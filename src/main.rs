@@ -34,13 +34,17 @@ fn main() -> eframe::Result<()> {
     log::info!("Default device log directory: {}", config.log_dir);
     log::info!("ADB path: {}", config.adb_path);
 
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../icons/icon_256.png"))
+        .unwrap_or_default();
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_inner_size([980.0, 680.0]),
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_inner_size([980.0, 680.0])
+            .with_icon(icon),
         ..Default::default()
     };
 
     eframe::run_native(
-        "ADB Logcat Collector",
+        &format!("ADB Logcat Collector v{}", env!("CARGO_PKG_VERSION")),
         options,
         Box::new(move |cc| {
             Ok(Box::new(app::AdbCollectorApp::new(
