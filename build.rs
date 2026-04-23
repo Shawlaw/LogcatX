@@ -36,12 +36,12 @@ BEGIN
     BEGIN
         BLOCK "080404b0"
         BEGIN
-            VALUE "CompanyName", "ADB Logcat Collector"
-            VALUE "FileDescription", "ADB Logcat Collector - multi-device adb logcat GUI"
+            VALUE "CompanyName", "LogcatX"
+            VALUE "FileDescription", "LogcatX - multi-device adb logcat GUI"
             VALUE "FileVersion", "{version}"
-            VALUE "InternalName", "adb-logcat-collector"
-            VALUE "OriginalFilename", "adb-logcat-collector.exe"
-            VALUE "ProductName", "ADB Logcat Collector"
+            VALUE "InternalName", "logcatx"
+            VALUE "OriginalFilename", "LogcatX.exe"
+            VALUE "ProductName", "LogcatX"
             VALUE "ProductVersion", "{version}"
         END
     END

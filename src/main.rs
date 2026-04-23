@@ -27,7 +27,7 @@ fn main() -> eframe::Result<()> {
     let boot_i18n = i18n::I18n::new(&config.language);
 
     log::info!(
-        "========== ADB Logcat Collector v{} startup ==========",
+        "========== LogcatX v{} startup ==========",
         env!("CARGO_PKG_VERSION")
     );
     log::info!("Portable mode: {}", paths.portable_mode);
@@ -168,7 +168,7 @@ fn candidate_cjk_fonts() -> Vec<(String, std::path::PathBuf)> {
 
 fn fatal_error(message: &str) -> ! {
     let _ = rfd::MessageDialog::new()
-        .set_title("ADB Logcat Collector")
+        .set_title("LogcatX")
         .set_description(message)
         .set_level(rfd::MessageLevel::Error)
         .show();

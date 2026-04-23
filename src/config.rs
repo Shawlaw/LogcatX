@@ -116,7 +116,7 @@ pub fn resolve_app_paths() -> Result<AppPaths, String> {
 
     Ok(AppPaths {
         exe_dir,
-        app_log_path: config_dir.join(".adb-logcat-collector.log"),
+        app_log_path: config_dir.join(".logcatx.log"),
         config_path: config_dir.join("config.json"),
         config_dir,
         portable_mode,
@@ -130,7 +130,7 @@ fn appdata_config_dir() -> Result<PathBuf, String> {
 }
 
 fn project_dirs() -> Option<ProjectDirs> {
-    ProjectDirs::from("com", "Copilot", "AdbLogcatCollector")
+    ProjectDirs::from("com", "Copilot", "LogcatX")
 }
 
 fn is_dir_writable(dir: &Path) -> bool {
@@ -260,8 +260,7 @@ mod tests {
 
     #[test]
     fn detect_adb_path_prefers_existing_candidate() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("adb-logcat-collector-test-{}", std::process::id()));
+        let temp_dir = std::env::temp_dir().join(format!("logcatx-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).expect("create temp dir");
 

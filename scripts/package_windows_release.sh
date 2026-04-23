@@ -11,19 +11,21 @@ if [[ -z "$VERSION" ]]; then
 fi
 
 TARGET="x86_64-pc-windows-msvc"
-EXE_NAME="adb-logcat-collector.exe"
-ZIP_NAME="adb-logcat-collector-v${VERSION}-win64.zip"
+BUILD_EXE_NAME="logcatx.exe"
+EXE_NAME="LogcatX.exe"
+ZIP_NAME="LogcatX-v${VERSION}-win64.zip"
 DIST_DIR="$ROOT/dist"
-PACKAGE_DIR="$DIST_DIR/adb-logcat-collector-v${VERSION}-win64"
+PACKAGE_DIR="$DIST_DIR/LogcatX-v${VERSION}-win64"
 
 cargo xwin build --target "$TARGET" --release
 
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR"
 
-cp "$ROOT/target/$TARGET/release/$EXE_NAME" "$DIST_DIR/$EXE_NAME"
-cp "$ROOT/target/$TARGET/release/$EXE_NAME" "$PACKAGE_DIR/$EXE_NAME"
+cp "$ROOT/target/$TARGET/release/$BUILD_EXE_NAME" "$DIST_DIR/$EXE_NAME"
+cp "$ROOT/target/$TARGET/release/$BUILD_EXE_NAME" "$PACKAGE_DIR/$EXE_NAME"
 cp "$ROOT/README.md" "$PACKAGE_DIR/README.md"
+cp "$ROOT/README.en.md" "$PACKAGE_DIR/README.en.md"
 cp "$ROOT/CHANGELOG.md" "$PACKAGE_DIR/CHANGELOG.md"
 cp "$ROOT/config.example.json" "$PACKAGE_DIR/config.example.json"
 

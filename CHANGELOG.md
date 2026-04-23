@@ -15,6 +15,7 @@ All notable changes to this project will be documented in this file.
 - embedded English and Simplified Chinese UI resources with persisted language selection
 
 ### Changed
+- project renamed from `adb-logcat-collector` to `LogcatX`
 - default project version bumped from `0.1.0` to `0.2.0`
 - Windows builds now default to GUI subsystem mode instead of showing a console window
 - first-run and settings flows now better explain config paths, app logs, and portable mode

@@ -6,7 +6,7 @@
 
 ## 背景
 
-当前 `adb-logcat-collector` 已具备核心功能：
+当前 `LogcatX` 已具备核心功能：
 
 - 展示 ADB 已连接设备
 - 双击或点击按钮启动/停止设备日志采集
@@ -219,8 +219,8 @@
    - 说明 `cargo xwin` 构建方式
 
 5. 发布输出规范
-   - `dist/adb-logcat-collector.exe`
-   - `dist/adb-logcat-collector-v0.2.0-win64.zip`
+   - `dist/LogcatX.exe`
+   - `dist/LogcatX-v0.2.0-win64.zip`
 
 ---
 

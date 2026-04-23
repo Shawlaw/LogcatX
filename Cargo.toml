@@ -1,8 +1,8 @@
 [package]
-name = "adb-logcat-collector"
+name = "logcatx"
 version = "0.2.0"
 edition = "2024"
-description = "Windows-first desktop GUI tool for collecting adb logcat from multiple devices"
+description = "LogcatX - Windows-first desktop GUI tool for collecting adb logcat from multiple devices"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

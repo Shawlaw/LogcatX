@@ -111,20 +111,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "adb-logcat-collector"
-version = "0.2.0"
-dependencies = [
- "chrono",
- "directories",
- "eframe",
- "log",
- "rfd",
- "serde",
- "serde_json",
- "sys-locale",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1867,6 +1853,20 @@ name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
+
+[[package]]
+name = "logcatx"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "directories",
+ "eframe",
+ "log",
+ "rfd",
+ "serde",
+ "serde_json",
+ "sys-locale",
+]
 
 [[package]]
 name = "malloc_buf"

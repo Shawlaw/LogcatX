@@ -1,77 +1,80 @@
-# ADB Logcat Collector
+# LogcatX
 
-A small desktop GUI tool for collecting `adb logcat` logs from multiple Android devices in parallel.
+LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集多台 Android 设备的 `adb logcat` 日志。
 
-## Release target
+## 文档入口
 
-- platform: **Windows**
-- distribution: **portable zip + single exe**
-- current milestone: **v0.2.0**
+- [English README](./README.en.md)
+- [更新日志](./CHANGELOG.md)
+- [配置示例](./config.example.json)
+- [Windows 打包脚本](./scripts/package_windows_release.sh)
 
-## Core capabilities
+## 当前发布形态
 
-- show currently connected ADB devices in the main window
-- start logcat collection by double-clicking a device row
-- stop collection manually per device
-- collect from multiple devices in parallel
-- configure the `adb` executable path and the device-log output directory
-- refresh device list and historical log size
-- clear historical device logs while protecting active sessions
-- write a separate **application runtime log** for diagnostics
-- embedded English and Simplified Chinese UI with system-language default on first launch
+- 平台：**Windows**
+- 分发方式：**绿色版 zip + 单 exe**
+- 当前里程碑：**v0.2.0**
 
-## Portable behavior
+## 核心能力
 
-The Windows release prefers `config.json` next to the exe, and falls back to AppData when the exe directory is not writable.
+- 主界面展示当前 ADB 已连接设备
+- 双击设备行即可开始采集对应设备的 logcat
+- 支持按设备手动停止采集
+- 支持多设备并行采集
+- 支持配置 `adb` 可执行文件路径和设备日志保存目录
+- 支持刷新设备列表与历史日志占用空间
+- 支持清理历史设备日志，同时保护正在写入的日志
+- 支持独立的应用运行日志，便于排障
+- 内置简体中文与英文界面，首次启动按系统语言选择默认值
 
-This keeps the normal zip download usable as a portable tool while still working in restricted directories.
+## 便携模式说明
 
-## Logs
+Windows 发布包会优先读取 exe 同目录下的 `config.json`；如果 exe 目录不可写，则自动回退到 AppData 目录。
 
-The app writes two different kinds of logs:
+这样既适合直接解压即用的绿色版场景，也能兼容受限目录下的运行环境。
 
-1. **Device logs** — the `adb logcat` output collected from Android devices
-2. **Application log** — startup/runtime diagnostics for the collector itself
+## 日志说明
 
-The application log is stored separately from device logcat output.
+应用会写入两类日志：
 
-## First run
+1. **设备日志**：来自 Android 设备的 `adb logcat` 输出
+2. **应用日志**：LogcatX 自身的启动与运行诊断信息
 
-On first launch, the app asks the user to confirm:
+应用日志与设备日志相互独立，便于定位问题。
 
-- the `adb` executable path
-- the directory used to store collected device logs
+## 首次启动
 
-The settings dialog supports:
+首次启动时，应用会要求确认：
 
-- choosing the UI language (English / Simplified Chinese)
-- opening the config directory directly
-- opening the application runtime log directly
-- showing whether the app is currently running in portable mode or AppData mode
+- `adb` 可执行文件路径
+- 设备日志保存目录
+- 界面语言
 
-## Configuration example
+设置窗口同时支持：
 
-See `config.example.json` for the current config shape.
+- 直接打开配置目录
+- 直接打开应用日志
+- 查看当前是便携模式还是 AppData 模式
 
-## Windows build
+## 构建
 
 ```bash
 cargo xwin build --target x86_64-pc-windows-msvc --release
 ```
 
-## Windows release packaging
+## Windows 打包
 
 ```bash
 ./scripts/package_windows_release.sh
 ```
 
-This produces:
+打包后会生成：
 
-- `dist/adb-logcat-collector.exe`
-- `dist/adb-logcat-collector-v0.2.0-win64.zip`
+- `dist/LogcatX.exe`
+- `dist/LogcatX-v0.2.0-win64.zip`
 
-## Troubleshooting
+## 排障建议
 
-- If normal startup shows no console, that is expected for the Windows GUI build.
-- For troubleshooting builds, enable the console feature or run with `--console`.
-- If device collection fails, check the configured `adb` path and the application runtime log first.
+- 正常发布版启动时不显示控制台窗口，这属于预期行为。
+- 如果需要排查启动问题，可启用 `console` feature 或使用 `--console`。
+- 如果设备采集失败，请优先检查已配置的 `adb` 路径以及应用运行日志。

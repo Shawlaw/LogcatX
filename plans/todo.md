@@ -1,4 +1,4 @@
-# adb-logcat-collector 待办事项 & 发布方向
+# LogcatX 待办事项 & 发布方向
 
 ## 当前发布目标
 
@@ -25,7 +25,7 @@
 **现状**：只有设备采集日志，没有应用自身的运行日志，启动失败和运行异常难以定位。
 
 **思路**：
-- 增加 `.adb-logcat-collector.log`
+- 增加 `.logcatx.log`
 - 支持文件日志、可选控制台日志、日志轮转
 - 增加 panic hook
 
