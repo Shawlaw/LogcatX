@@ -1,6 +1,6 @@
 use crate::{
     adb,
-    config::{self, AppConfig},
+    config::{self, AppConfig, AppPaths},
     fs_utils,
     models::{AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, SharedChild, StatusMessage},
 };
@@ -14,7 +14,16 @@ use std::{
     time::Duration,
 };
 
+pub struct AppBootstrap {
+    pub app_paths: AppPaths,
+    pub config: AppConfig,
+    pub config_exists: bool,
+    pub startup_error: Option<String>,
+    pub version: &'static str,
+}
+
 pub struct AdbCollectorApp {
+    app_paths: AppPaths,
     config: AppConfig,
     devices: Vec<DeviceEntry>,
     total_log_bytes: u64,
@@ -27,23 +36,21 @@ pub struct AdbCollectorApp {
     require_initial_setup: bool,
     show_clear_confirm: bool,
     selected_serial: Option<String>,
+    version: String,
 }
 
 impl AdbCollectorApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        let config_exists = config::config_file_exists();
-        let (config, startup_error) = match config::load_config() {
-            Ok(config) => (config, None),
-            Err(err) => (AppConfig::with_defaults(), Some(err)),
-        };
-        let require_initial_setup =
-            !config_exists || !config.is_complete() || startup_error.is_some();
+    pub fn new(_cc: &eframe::CreationContext<'_>, bootstrap: AppBootstrap) -> Self {
+        let require_initial_setup = !bootstrap.config_exists
+            || !bootstrap.config.is_complete()
+            || bootstrap.startup_error.is_some();
         let (tx, rx) = mpsc::channel();
 
         let mut app = Self {
-            adb_path_input: config.adb_path.clone(),
-            log_dir_input: config.log_dir.clone(),
-            config,
+            adb_path_input: bootstrap.config.adb_path.clone(),
+            log_dir_input: bootstrap.config.log_dir.clone(),
+            app_paths: bootstrap.app_paths,
+            config: bootstrap.config,
             devices: Vec::new(),
             total_log_bytes: 0,
             status: None,
@@ -53,12 +60,13 @@ impl AdbCollectorApp {
             require_initial_setup,
             show_clear_confirm: false,
             selected_serial: None,
+            version: bootstrap.version.to_owned(),
         };
 
         if !app.require_initial_setup {
             app.refresh_devices();
             app.refresh_log_size();
-        } else if let Some(err) = startup_error {
+        } else if let Some(err) = bootstrap.startup_error {
             app.set_error(format!(
                 "Config could not be loaded; please confirm settings before use: {err}"
             ));
@@ -157,6 +165,28 @@ impl AdbCollectorApp {
 
     fn ui_summary(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(format!("Version: v{}", self.version)).strong());
+            ui.separator();
+            ui.label(RichText::new("Mode:").strong());
+            ui.monospace(if self.app_paths.portable_mode {
+                "Portable"
+            } else {
+                "AppData"
+            });
+            ui.separator();
+            ui.label(RichText::new("Devices:").strong());
+            ui.monospace(format!(
+                "{} connected / {} running",
+                self.devices
+                    .iter()
+                    .filter(|device| device.info.state == "device")
+                    .count(),
+                self.devices
+                    .iter()
+                    .filter(|device| device.is_active())
+                    .count()
+            ));
+            ui.separator();
             ui.label(RichText::new("Log directory:").strong());
             ui.monospace(self.config.log_dir.as_str());
             ui.separator();
@@ -175,6 +205,22 @@ impl AdbCollectorApp {
             }
             if ui.button("Refresh size").clicked() {
                 self.refresh_log_size();
+            }
+            if ui.button("Open log dir").clicked() {
+                if let Err(err) = fs_utils::open_path(PathBuf::from(&self.config.log_dir).as_path())
+                {
+                    self.set_error(err);
+                }
+            }
+            if ui.button("Open app log").clicked() {
+                if let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path()) {
+                    self.set_error(err);
+                }
+            }
+            if ui.button("Open config dir").clicked() {
+                if let Err(err) = fs_utils::open_path(self.app_paths.config_dir.as_path()) {
+                    self.set_error(err);
+                }
             }
             if ui.button("Clear history").clicked() {
                 self.show_clear_confirm = true;
@@ -292,6 +338,14 @@ impl AdbCollectorApp {
                 ui.label(
                     "Confirm the ADB executable path and the directory used to store logcat files.",
                 );
+                ui.label(format!(
+                    "Config file: {}",
+                    self.app_paths.config_path.display()
+                ));
+                ui.label(format!(
+                    "App runtime log: {}",
+                    self.app_paths.app_log_path.display()
+                ));
                 ui.add_space(8.0);
 
                 ui.label("ADB executable");
@@ -359,6 +413,7 @@ impl AdbCollectorApp {
         let candidate = AppConfig {
             adb_path: self.adb_path_input.trim().to_owned(),
             log_dir: self.log_dir_input.trim().to_owned(),
+            app_log_max_size_mb: self.config.app_log_max_size_mb,
         };
 
         if candidate.adb_path.is_empty() || candidate.log_dir.is_empty() {
@@ -383,9 +438,10 @@ impl AdbCollectorApp {
         let saved = AppConfig {
             adb_path: candidate.adb_path,
             log_dir: resolved_log_dir.display().to_string(),
+            app_log_max_size_mb: candidate.app_log_max_size_mb,
         };
 
-        if let Err(err) = config::save_config(&saved) {
+        if let Err(err) = config::save_config(&self.app_paths.config_path, &saved) {
             self.set_error(err);
             return;
         }
@@ -430,6 +486,8 @@ impl AdbCollectorApp {
             .filter(|device| device.is_active())
             .filter_map(|device| device.output_path.clone())
             .collect();
+        let mut protected_paths = protected_paths;
+        protected_paths.push(self.app_paths.app_log_path.clone());
 
         self.set_info("Clearing historical logs...");
         thread::spawn(move || {
@@ -588,10 +646,14 @@ impl AdbCollectorApp {
     }
 
     fn set_info(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        log::info!("{text}");
         self.status = Some(StatusMessage::info(text));
     }
 
     fn set_error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        log::error!("{text}");
         self.status = Some(StatusMessage::error(text));
     }
 }

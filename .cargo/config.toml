@@ -1,0 +1,5 @@
+# Windows 交叉编译配置
+# 用法:
+#   cargo xwin build --target x86_64-pc-windows-msvc --release
+#
+# 不设置默认 target，保持 Linux/macOS 上的 cargo check/test 体验

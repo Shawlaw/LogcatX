@@ -3,6 +3,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 pub fn session_log_path(base_dir: &Path, serial: &str) -> PathBuf {
@@ -170,6 +171,33 @@ fn remove_empty_dirs(path: &Path) -> Result<bool, String> {
 
 fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+pub fn open_path(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut cmd = Command::new("explorer");
+        cmd.arg(path);
+        cmd
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut cmd = Command::new("open");
+        cmd.arg(path);
+        cmd
+    };
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let mut cmd = {
+        let mut cmd = Command::new("xdg-open");
+        cmd.arg(path);
+        cmd
+    };
+
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Failed to open {}: {err}", path.display()))
 }
 
 #[cfg(test)]

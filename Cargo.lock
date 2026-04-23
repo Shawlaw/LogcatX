@@ -117,6 +117,7 @@ dependencies = [
  "chrono",
  "directories",
  "eframe",
+ "log",
  "rfd",
  "serde",
  "serde_json",
