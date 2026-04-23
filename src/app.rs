@@ -28,6 +28,7 @@ pub struct AdbCollectorApp {
     devices: Vec<DeviceEntry>,
     total_log_bytes: u64,
     status: Option<StatusMessage>,
+    last_error: Option<StatusMessage>,
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
     adb_path_input: String,
@@ -54,6 +55,7 @@ impl AdbCollectorApp {
             devices: Vec::new(),
             total_log_bytes: 0,
             status: None,
+            last_error: None,
             tx,
             rx,
             show_settings: require_initial_setup,
@@ -196,6 +198,12 @@ impl AdbCollectorApp {
             ui.label(RichText::new("Historical log size:").strong());
             ui.monospace(fs_utils::format_bytes(self.total_log_bytes));
         });
+        ui.add_space(4.0);
+        ui.small(format!(
+            "Config: {} | App log: {}",
+            self.app_paths.config_path.display(),
+            self.app_paths.app_log_path.display()
+        ));
 
         ui.add_space(8.0);
 
@@ -243,6 +251,7 @@ impl AdbCollectorApp {
 
         let mut start_serial: Option<String> = None;
         let mut stop_serial: Option<String> = None;
+        let mut open_output: Option<PathBuf> = None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("device_grid")
@@ -252,6 +261,7 @@ impl AdbCollectorApp {
                     ui.strong("Serial");
                     ui.strong("ADB state");
                     ui.strong("Session");
+                    ui.strong("Started");
                     ui.strong("Output file");
                     ui.strong("Action");
                     ui.end_row();
@@ -269,14 +279,27 @@ impl AdbCollectorApp {
 
                         ui.label(device.info.state.as_str());
                         ui.label(device.status_text());
+                        ui.label(
+                            device
+                                .started_at
+                                .map(format_system_time)
+                                .unwrap_or_else(|| "-".to_owned()),
+                        );
                         let output_text = device
                             .output_path
                             .as_ref()
-                            .map(|path| path.display().to_string())
+                            .map(|path| {
+                                if let Some(name) = path.file_name().and_then(|name| name.to_str())
+                                {
+                                    name.to_owned()
+                                } else {
+                                    path.to_string_lossy().into_owned()
+                                }
+                            })
                             .unwrap_or_else(|| "-".to_owned());
                         ui.monospace(output_text);
 
-                        match device.run_state {
+                        ui.horizontal(|ui| match device.run_state {
                             DeviceRunState::Idle | DeviceRunState::Error(_) => {
                                 let can_start = device.info.state == "device";
                                 if ui
@@ -285,16 +308,26 @@ impl AdbCollectorApp {
                                 {
                                     start_serial = Some(device.info.serial.clone());
                                 }
+                                if let Some(path) = &device.output_path {
+                                    if ui.button("Open").clicked() {
+                                        open_output = Some(path.clone());
+                                    }
+                                }
                             }
                             DeviceRunState::Starting | DeviceRunState::Running => {
                                 if ui.button("Stop").clicked() {
                                     stop_serial = Some(device.info.serial.clone());
                                 }
+                                if let Some(path) = &device.output_path {
+                                    if ui.button("Open").clicked() {
+                                        open_output = Some(path.clone());
+                                    }
+                                }
                             }
                             DeviceRunState::Stopping => {
                                 ui.label("Stopping...");
                             }
-                        }
+                        });
                         ui.end_row();
                     }
                 });
@@ -306,6 +339,11 @@ impl AdbCollectorApp {
         if let Some(serial) = stop_serial {
             self.stop_collection(&serial);
         }
+        if let Some(path) = open_output {
+            if let Err(err) = fs_utils::open_path(&path) {
+                self.set_error(err);
+            }
+        }
     }
 
     fn ui_status(&mut self, ui: &mut egui::Ui) {
@@ -315,7 +353,14 @@ impl AdbCollectorApp {
             } else {
                 Color32::from_rgb(70, 160, 90)
             };
-            ui.colored_label(color, status.text.as_str());
+            ui.colored_label(color, format!("[{}] {}", status.timestamp, status.text));
+        }
+        if let Some(last_error) = &self.last_error {
+            ui.add_space(4.0);
+            ui.colored_label(
+                Color32::from_rgb(200, 70, 70),
+                format!("Last error [{}]: {}", last_error.timestamp, last_error.text),
+            );
         }
     }
 
@@ -338,6 +383,9 @@ impl AdbCollectorApp {
                 ui.label(
                     "Confirm the ADB executable path and the directory used to store logcat files.",
                 );
+                ui.small(
+                    "Device logs are written into the configured log directory. App runtime diagnostics are written to the app log path below.",
+                );
                 ui.label(format!(
                     "Config file: {}",
                     self.app_paths.config_path.display()
@@ -356,6 +404,9 @@ impl AdbCollectorApp {
                             self.adb_path_input = path.display().to_string();
                         }
                     }
+                    if ui.button("Use `adb`").clicked() {
+                        self.adb_path_input = "adb".to_owned();
+                    }
                 });
 
                 ui.add_space(8.0);
@@ -367,6 +418,15 @@ impl AdbCollectorApp {
                             self.log_dir_input = path.display().to_string();
                         }
                     }
+                    if ui.button("Use default").clicked() {
+                        self.log_dir_input =
+                            self.app_paths.exe_dir.join("logs").display().to_string();
+                    }
+                });
+                ui.small(if self.app_paths.portable_mode {
+                    "Portable mode is active. The app prefers config and logs next to the exe."
+                } else {
+                    "AppData mode is active because the exe directory is not writable."
                 });
 
                 ui.add_space(12.0);
@@ -654,7 +714,9 @@ impl AdbCollectorApp {
     fn set_error(&mut self, text: impl Into<String>) {
         let text = text.into();
         log::error!("{text}");
-        self.status = Some(StatusMessage::error(text));
+        let error = StatusMessage::error(text);
+        self.status = Some(error.clone());
+        self.last_error = Some(error);
     }
 }
 
@@ -712,4 +774,9 @@ fn wait_for_process_exit(child: &SharedChild) -> (Option<i32>, Option<String>) {
             }
         }
     }
+}
+
+fn format_system_time(time: std::time::SystemTime) -> String {
+    let datetime: chrono::DateTime<chrono::Local> = time.into();
+    datetime.format("%H:%M:%S").to_string()
 }

@@ -43,9 +43,9 @@ impl DeviceEntry {
     pub fn status_text(&self) -> String {
         match &self.run_state {
             DeviceRunState::Idle => "Idle".to_owned(),
-            DeviceRunState::Starting => "Starting".to_owned(),
-            DeviceRunState::Running => "Running".to_owned(),
-            DeviceRunState::Stopping => "Stopping".to_owned(),
+            DeviceRunState::Starting => "Launching collector".to_owned(),
+            DeviceRunState::Running => "Collecting logcat".to_owned(),
+            DeviceRunState::Stopping => "Stopping collector".to_owned(),
             DeviceRunState::Error(message) => format!("Error: {message}"),
         }
     }
@@ -81,6 +81,7 @@ pub enum AppEvent {
 pub struct StatusMessage {
     pub text: String,
     pub is_error: bool,
+    pub timestamp: String,
 }
 
 impl StatusMessage {
@@ -88,6 +89,7 @@ impl StatusMessage {
         Self {
             text: text.into(),
             is_error: false,
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
         }
     }
 
@@ -95,6 +97,7 @@ impl StatusMessage {
         Self {
             text: text.into(),
             is_error: true,
+            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
         }
     }
 }
