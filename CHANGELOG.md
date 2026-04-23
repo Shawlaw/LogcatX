@@ -4,8 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [0.2.0] - Unreleased
 
-### Planned
-- Windows-first release hardening for public distribution
+### Added
+- Windows-first portable release structure
 - portable config resolution (exe directory first, AppData fallback)
-- runtime app log file and panic capture
-- better Windows release identity and packaging
+- dedicated application runtime log with panic capture
+- Windows branding resources via `build.rs`, icon assets, and embedded EXE metadata
+- version display, config/app-log shortcuts, and richer device session information in the UI
+- release planning docs under `plans/`
+- release packaging helper script and `cargo xwin` build guidance
+
+### Changed
+- default project version bumped from `0.1.0` to `0.2.0`
+- Windows builds now default to GUI subsystem mode instead of showing a console window
+- first-run and settings flows now better explain config paths, app logs, and portable mode
+
+### Packaging
+- release output is standardized around a Windows portable zip containing the exe, README, CHANGELOG, and config example
