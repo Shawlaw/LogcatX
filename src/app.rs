@@ -72,8 +72,15 @@ impl AdbCollectorApp {
             app.set_error(format!(
                 "Config could not be loaded; please confirm settings before use: {err}"
             ));
+        } else if !app.adb_path_input.trim().is_empty() {
+            app.set_info(format!(
+                "Detected local adb automatically: {}. Please confirm the settings before use.",
+                app.adb_path_input
+            ));
         } else {
-            app.set_info("Please confirm the ADB path and log directory before using the app.");
+            app.set_info(
+                "No local adb executable was detected automatically. Please confirm the ADB path and log directory before using the app.",
+            );
         }
 
         app
