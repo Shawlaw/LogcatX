@@ -47,6 +47,7 @@ fn main() -> eframe::Result<()> {
         &format!("ADB Logcat Collector v{}", env!("CARGO_PKG_VERSION")),
         options,
         Box::new(move |cc| {
+            install_fonts(&cc.egui_ctx);
             Ok(Box::new(app::AdbCollectorApp::new(
                 cc,
                 app::AppBootstrap {
@@ -59,6 +60,97 @@ fn main() -> eframe::Result<()> {
             )))
         }),
     )
+}
+
+fn install_fonts(ctx: &eframe::egui::Context) {
+    use eframe::egui::{FontData, FontDefinitions, FontFamily};
+
+    let mut fonts = FontDefinitions::default();
+    if let Some((font_name, font_data)) = load_cjk_font() {
+        fonts
+            .font_data
+            .insert(font_name.clone(), FontData::from_owned(font_data).into());
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, font_name.clone());
+        fonts
+            .families
+            .entry(FontFamily::Monospace)
+            .or_default()
+            .push(font_name.clone());
+        ctx.set_fonts(fonts);
+        log::info!("Loaded CJK UI font: {font_name}");
+    } else {
+        log::warn!("No CJK-capable system font found; Chinese text may not render correctly");
+    }
+}
+
+fn load_cjk_font() -> Option<(String, Vec<u8>)> {
+    for (name, path) in candidate_cjk_fonts() {
+        if let Ok(bytes) = std::fs::read(&path) {
+            return Some((name, bytes));
+        }
+    }
+    None
+}
+
+fn candidate_cjk_fonts() -> Vec<(String, std::path::PathBuf)> {
+    let mut candidates = Vec::new();
+
+    #[cfg(target_os = "windows")]
+    {
+        let windows_dir = std::env::var_os("WINDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        let font_dir = windows_dir.join("Fonts");
+        candidates.extend([
+            ("microsoft-yahei".to_owned(), font_dir.join("msyh.ttc")),
+            (
+                "microsoft-yahei-bold".to_owned(),
+                font_dir.join("msyhbd.ttc"),
+            ),
+            ("simhei".to_owned(), font_dir.join("simhei.ttf")),
+            ("simsun".to_owned(), font_dir.join("simsun.ttc")),
+        ]);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        candidates.extend([
+            (
+                "pingfang".to_owned(),
+                std::path::PathBuf::from("/System/Library/Fonts/PingFang.ttc"),
+            ),
+            (
+                "stheiti".to_owned(),
+                std::path::PathBuf::from("/System/Library/Fonts/STHeiti Light.ttc"),
+            ),
+        ]);
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        candidates.extend([
+            (
+                "noto-sans-cjk".to_owned(),
+                std::path::PathBuf::from("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+            ),
+            (
+                "noto-sans-cjk-sc".to_owned(),
+                std::path::PathBuf::from(
+                    "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+                ),
+            ),
+            (
+                "wqy-zenhei".to_owned(),
+                std::path::PathBuf::from("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc"),
+            ),
+        ]);
+    }
+
+    candidates
 }
 
 fn fatal_error(message: &str) -> ! {
