@@ -2,11 +2,14 @@
 
 A small desktop GUI tool for collecting `adb logcat` logs from multiple Android devices in parallel.
 
+- [中文 README](./README.md)
+- [MIT License](./LICENSE)
+
 ## Release target
 
 - platform: **Windows**
 - distribution: **portable zip + single exe**
-- current milestone: **v0.2.0**
+- current milestone: **v0.3.0**
 
 ## Core capabilities
 
@@ -68,7 +71,16 @@ cargo xwin build --target x86_64-pc-windows-msvc --release
 This produces:
 
 - `dist/LogcatX.exe`
-- `dist/LogcatX-v0.2.0-win64.zip`
+- `dist/LogcatX-v0.3.0-win64.zip`
+
+## GitHub Release CI
+
+This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.3.0`, it will:
+
+1. verify that the tag matches the version in `Cargo.toml`
+2. build the Windows release artifacts
+3. create a GitHub Release
+4. upload `LogcatX.exe` and the matching zip package
 
 ## Troubleshooting
 

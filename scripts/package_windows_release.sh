@@ -27,6 +27,7 @@ cp "$ROOT/target/$TARGET/release/$BUILD_EXE_NAME" "$PACKAGE_DIR/$EXE_NAME"
 cp "$ROOT/README.md" "$PACKAGE_DIR/README.md"
 cp "$ROOT/README.en.md" "$PACKAGE_DIR/README.en.md"
 cp "$ROOT/CHANGELOG.md" "$PACKAGE_DIR/CHANGELOG.md"
+cp "$ROOT/LICENSE" "$PACKAGE_DIR/LICENSE"
 cp "$ROOT/config.example.json" "$PACKAGE_DIR/config.example.json"
 
 rm -f "$DIST_DIR/$ZIP_NAME"

@@ -6,6 +6,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 
 - [English README](./README.en.md)
 - [更新日志](./CHANGELOG.md)
+- [MIT License](./LICENSE)
 - [配置示例](./config.example.json)
 - [Windows 打包脚本](./scripts/package_windows_release.sh)
 
@@ -13,7 +14,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 
 - 平台：**Windows**
 - 分发方式：**绿色版 zip + 单 exe**
-- 当前里程碑：**v0.2.0**
+- 当前里程碑：**v0.3.0**
 
 ## 核心能力
 
@@ -71,7 +72,16 @@ cargo xwin build --target x86_64-pc-windows-msvc --release
 打包后会生成：
 
 - `dist/LogcatX.exe`
-- `dist/LogcatX-v0.2.0-win64.zip`
+- `dist/LogcatX-v0.3.0-win64.zip`
+
+## GitHub Release CI
+
+仓库内置了基于 GitHub Actions 的发布流程：当你推送形如 `v0.3.0` 的 tag 到远端时，会自动：
+
+1. 校验 tag 与 `Cargo.toml` 中的版本号一致
+2. 构建 Windows 发布版
+3. 生成 GitHub Release
+4. 上传 `LogcatX.exe` 和对应 zip 包
 
 ## 排障建议
 

@@ -1,0 +1,59 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install cargo-xwin
+        run: cargo install cargo-xwin --locked
+
+      - name: Install LLVM
+        run: sudo apt-get update && sudo apt-get install -y llvm
+
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
+          TAG="${GITHUB_REF_NAME#v}"
+          if [[ -z "$VERSION" ]]; then
+            echo "Failed to detect version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [[ "$VERSION" != "$TAG" ]]; then
+            echo "Tag v$TAG does not match Cargo.toml version $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Build release artifacts
+        shell: bash
+        run: ./scripts/package_windows_release.sh
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/LogcatX.exe
+            dist/LogcatX-${{ github.ref_name }}-win64.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

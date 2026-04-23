@@ -2,7 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.0] - Unreleased
+## [0.3.0] - 2026-04-23
+
+### Added
+- MIT license for open-source distribution
+- embedded English and Simplified Chinese UI resources with persisted language selection
+- Chinese README plus English alias document for public repository use
+
+### Changed
+- project renamed from `adb-logcat-collector` to `LogcatX`
+- version bumped to `0.3.0` for the first public open-source release
+- default Windows release artifacts now use the `LogcatX` product name
+- main window now emphasizes device status and quick actions instead of exposing raw filesystem paths
+- user-facing Windows paths are normalized for display instead of showing `\\?\` verbatim prefixes
+
+### Packaging
+- public release output is standardized around `LogcatX.exe` and `LogcatX-v0.3.0-win64.zip`
+
+## [0.2.0] - Internal milestone
 
 ### Added
 - Windows-first portable release structure
@@ -15,7 +32,6 @@ All notable changes to this project will be documented in this file.
 - embedded English and Simplified Chinese UI resources with persisted language selection
 
 ### Changed
-- project renamed from `adb-logcat-collector` to `LogcatX`
 - default project version bumped from `0.1.0` to `0.2.0`
 - Windows builds now default to GUI subsystem mode instead of showing a console window
 - first-run and settings flows now better explain config paths, app logs, and portable mode
