@@ -528,8 +528,7 @@ impl AdbCollectorApp {
         let adb_path = self.config.adb_path.clone();
 
         thread::spawn(move || {
-            let result =
-                adb::validate_adb_path(&adb_path).and_then(|_| adb::list_devices(&adb_path));
+            let result = adb::list_devices(&adb_path);
             let _ = tx.send(AppEvent::DevicesRefreshed(result));
         });
     }

@@ -11,7 +11,7 @@ pub fn validate_adb_path(adb_path: &str) -> Result<(), String> {
         return Err("ADB executable path cannot be empty".to_owned());
     }
 
-    let output = Command::new(trimmed)
+    let output = adb_command(trimmed)
         .arg("version")
         .output()
         .map_err(|err| format!("Failed to execute `{trimmed} version`: {err}"))?;
@@ -28,7 +28,7 @@ pub fn validate_adb_path(adb_path: &str) -> Result<(), String> {
 }
 
 pub fn list_devices(adb_path: &str) -> Result<Vec<DeviceInfo>, String> {
-    let output = Command::new(adb_path)
+    let output = adb_command(adb_path)
         .arg("devices")
         .output()
         .map_err(|err| format!("Failed to run `{adb_path} devices`: {err}"))?;
@@ -65,13 +65,30 @@ pub fn spawn_logcat(adb_path: &str, serial: &str, output_path: &Path) -> Result<
         )
     })?;
 
-    Command::new(adb_path)
+    adb_command(adb_path)
         .args(["-s", serial, "logcat"])
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
         .spawn()
         .map_err(|err| format!("Failed to start logcat for {serial}: {err}"))
 }
+
+fn adb_command(adb_path: &str) -> Command {
+    let mut command = Command::new(adb_path);
+    hide_window(&mut command);
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn hide_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_window(_command: &mut Command) {}
 
 trait EmptyStringExt {
     fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str;
