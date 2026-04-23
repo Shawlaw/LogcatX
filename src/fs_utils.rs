@@ -49,6 +49,18 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+pub fn display_path(path: &Path) -> String {
+    simplify_windows_path(&path.to_string_lossy())
+}
+
+pub fn display_path_string(path: &str) -> String {
+    simplify_windows_path(path)
+}
+
+pub fn normalize_display_path(path: &Path) -> PathBuf {
+    PathBuf::from(display_path(path))
+}
+
 pub fn clear_history_logs(base_dir: &Path, protected_paths: &[PathBuf]) -> Result<(), String> {
     if !base_dir.exists() {
         return Ok(());
@@ -173,6 +185,20 @@ fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn simplify_windows_path(path: &str) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{}", rest);
+        }
+        if let Some(rest) = path.strip_prefix(r"\\?\") {
+            return rest.to_owned();
+        }
+    }
+
+    path.to_owned()
+}
+
 pub fn open_path(path: &Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut cmd = {
@@ -202,7 +228,7 @@ pub fn open_path(path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bytes, sanitize_serial, session_log_path};
+    use super::{display_path_string, format_bytes, sanitize_serial, session_log_path};
     use std::path::Path;
 
     #[test]
@@ -222,5 +248,16 @@ mod tests {
     fn format_bytes_uses_readable_units() {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(2048), "2.00 KB");
+    }
+
+    #[test]
+    fn display_path_string_strips_windows_verbatim_prefix() {
+        let raw = r"\\?\F:\logs\demo";
+        let cleaned = display_path_string(raw);
+        if cfg!(target_os = "windows") {
+            assert_eq!(cleaned, r"F:\logs\demo");
+        } else {
+            assert_eq!(cleaned, raw);
+        }
     }
 }

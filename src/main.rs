@@ -7,6 +7,7 @@ mod adb;
 mod app;
 mod config;
 mod fs_utils;
+mod i18n;
 mod logger;
 mod models;
 
@@ -18,21 +19,29 @@ fn main() -> eframe::Result<()> {
     logger::set_panic_hook(&paths.app_log_path);
 
     let config_exists = paths.config_path.exists();
-    let (config, startup_error) = match config::load_config(&paths.config_path) {
+    let (config, startup_error) = match config::load_config(&paths.config_path, &paths) {
         Ok(config) => (config, None),
         Err(err) if config_exists => (config::AppConfig::with_defaults(&paths), Some(err)),
         Err(_) => (config::AppConfig::with_defaults(&paths), None),
     };
+    let boot_i18n = i18n::I18n::new(&config.language);
 
     log::info!(
         "========== ADB Logcat Collector v{} startup ==========",
         env!("CARGO_PKG_VERSION")
     );
     log::info!("Portable mode: {}", paths.portable_mode);
-    log::info!("Config path: {}", paths.config_path.display());
-    log::info!("App log path: {}", paths.app_log_path.display());
+    log::info!(
+        "Config path: {}",
+        fs_utils::display_path(paths.config_path.as_path())
+    );
+    log::info!(
+        "App log path: {}",
+        fs_utils::display_path(paths.app_log_path.as_path())
+    );
     log::info!("Default device log directory: {}", config.log_dir);
     log::info!("ADB path: {}", config.adb_path);
+    log::info!("Language: {}", config.language);
 
     let icon = eframe::icon_data::from_png_bytes(include_bytes!("../icons/icon_256.png"))
         .unwrap_or_default();
@@ -44,7 +53,11 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        &format!("ADB Logcat Collector v{}", env!("CARGO_PKG_VERSION")),
+        &format!(
+            "{} v{}",
+            boot_i18n.tr("app.title"),
+            env!("CARGO_PKG_VERSION")
+        ),
         options,
         Box::new(move |cc| {
             install_fonts(&cc.egui_ctx);

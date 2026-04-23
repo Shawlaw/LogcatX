@@ -2,6 +2,7 @@ use crate::{
     adb,
     config::{self, AppConfig, AppPaths},
     fs_utils,
+    i18n::I18n,
     models::{AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, SharedChild, StatusMessage},
 };
 use eframe::egui::{self, Align, Color32, RichText};
@@ -33,6 +34,8 @@ pub struct AdbCollectorApp {
     rx: Receiver<AppEvent>,
     adb_path_input: String,
     log_dir_input: String,
+    language_input: String,
+    i18n: I18n,
     show_settings: bool,
     require_initial_setup: bool,
     show_clear_confirm: bool,
@@ -42,45 +45,45 @@ pub struct AdbCollectorApp {
 
 impl AdbCollectorApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, bootstrap: AppBootstrap) -> Self {
-        let require_initial_setup = !bootstrap.config_exists
-            || !bootstrap.config.is_complete()
-            || bootstrap.startup_error.is_some();
+        let config = bootstrap.config;
+        let require_initial_setup =
+            !bootstrap.config_exists || !config.is_complete() || bootstrap.startup_error.is_some();
         let (tx, rx) = mpsc::channel();
 
         let mut app = Self {
-            adb_path_input: bootstrap.config.adb_path.clone(),
-            log_dir_input: bootstrap.config.log_dir.clone(),
+            adb_path_input: config.adb_path.clone(),
+            log_dir_input: config.log_dir.clone(),
             app_paths: bootstrap.app_paths,
-            config: bootstrap.config,
+            config,
             devices: Vec::new(),
             total_log_bytes: 0,
             status: None,
             last_error: None,
             tx,
             rx,
+            language_input: String::new(),
+            i18n: I18n::new("en"),
             show_settings: require_initial_setup,
             require_initial_setup,
             show_clear_confirm: false,
             selected_serial: None,
             version: bootstrap.version.to_owned(),
         };
+        app.language_input = app.config.language.clone();
+        app.i18n.set_language(&app.config.language);
 
         if !app.require_initial_setup {
             app.refresh_devices();
             app.refresh_log_size();
         } else if let Some(err) = bootstrap.startup_error {
-            app.set_error(format!(
-                "Config could not be loaded; please confirm settings before use: {err}"
-            ));
+            app.set_error(app.tr_args("status.config_load_error", &[("error", err)]));
         } else if !app.adb_path_input.trim().is_empty() {
-            app.set_info(format!(
-                "Detected local adb automatically: {}. Please confirm the settings before use.",
-                app.adb_path_input
+            app.set_info(app.tr_args(
+                "status.detected_adb",
+                &[("path", app.adb_path_input.clone())],
             ));
         } else {
-            app.set_info(
-                "No local adb executable was detected automatically. Please confirm the ADB path and log directory before using the app.",
-            );
+            app.set_info(app.tr("status.initial_no_adb"));
         }
 
         app
@@ -92,7 +95,7 @@ impl AdbCollectorApp {
                 AppEvent::DevicesRefreshed(result) => match result {
                     Ok(devices) => {
                         self.merge_devices(devices);
-                        self.set_info("Device list refreshed.");
+                        self.set_info(self.tr("status.device_list_refreshed"));
                     }
                     Err(err) => self.set_error(err),
                 },
@@ -113,10 +116,9 @@ impl AdbCollectorApp {
                         device.child = Some(child);
                         device.started_at = Some(std::time::SystemTime::now());
                     }
-                    self.set_info(format!(
-                        "Started collecting logcat for {serial} -> {}",
-                        output_path.display()
-                    ));
+                    self.set_info(
+                        self.tr_args("status.started_collection", &[("serial", serial.clone())]),
+                    );
                     self.refresh_log_size();
                 }
                 AppEvent::CollectionEnded {
@@ -139,23 +141,31 @@ impl AdbCollectorApp {
                     }
 
                     if let Some(err) = error {
-                        self.set_error(format!("Collector for {serial} stopped with error: {err}"));
+                        self.set_error(self.tr_args(
+                            "status.collector_error",
+                            &[("serial", serial.clone()), ("error", err)],
+                        ));
                     } else if was_stopping {
-                        self.set_info(format!("Stopped collecting logcat for {serial}."));
+                        self.set_info(
+                            self.tr_args("status.stopped_collection", &[("serial", serial)]),
+                        );
                     } else if let Some(code) = exit_code {
                         if code == 0 {
-                            self.set_info(format!("Collector for {serial} exited."));
+                            self.set_info(
+                                self.tr_args("status.collector_exit", &[("serial", serial)]),
+                            );
                         } else {
-                            self.set_error(format!(
-                                "Collector for {serial} exited unexpectedly with code {code}."
-                            ));
+                            let message = self.tr_args(
+                                "status.collector_exit_unexpected",
+                                &[("serial", serial.clone()), ("code", code.to_string())],
+                            );
+                            self.set_error(message.clone());
                             if let Some(device) = self.find_device_mut(&serial) {
-                                device.run_state =
-                                    DeviceRunState::Error(format!("Exited with code {code}"));
+                                device.run_state = DeviceRunState::Error(message);
                             }
                         }
                     } else {
-                        self.set_info(format!("Collector for {serial} exited."));
+                        self.set_info(self.tr_args("status.collector_exit", &[("serial", serial)]));
                     }
 
                     self.refresh_devices();
@@ -163,7 +173,7 @@ impl AdbCollectorApp {
                 }
                 AppEvent::CleanupFinished(result) => match result {
                     Ok(()) => {
-                        self.set_info("Historical logs cleared.");
+                        self.set_info(self.tr("status.history_cleared"));
                         self.refresh_log_size();
                     }
                     Err(err) => self.set_error(err),
@@ -173,104 +183,180 @@ impl AdbCollectorApp {
     }
 
     fn ui_summary(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new(format!("Version: v{}", self.version)).strong());
-            ui.separator();
-            ui.label(RichText::new("Mode:").strong());
-            ui.monospace(if self.app_paths.portable_mode {
-                "Portable"
+        ui.heading(self.tr("app.title"));
+        ui.small(format!(
+            "{} v{} • {}",
+            self.tr("misc.click_to_open"),
+            self.version,
+            if self.app_paths.portable_mode {
+                self.tr("settings.mode.portable")
             } else {
-                "AppData"
-            });
-            ui.separator();
-            ui.label(RichText::new("Devices:").strong());
-            ui.monospace(format!(
-                "{} connected / {} running",
+                self.tr("settings.mode.appdata")
+            }
+        ));
+        ui.add_space(8.0);
+
+        ui.columns(4, |columns| {
+            self.stat_card(
+                &mut columns[0],
+                &self.tr("overview.connected"),
                 self.devices
                     .iter()
                     .filter(|device| device.info.state == "device")
-                    .count(),
+                    .count()
+                    .to_string(),
+            );
+            self.stat_card(
+                &mut columns[1],
+                &self.tr("overview.running"),
                 self.devices
                     .iter()
                     .filter(|device| device.is_active())
                     .count()
-            ));
-            ui.separator();
-            ui.label(RichText::new("Log directory:").strong());
-            ui.monospace(self.config.log_dir.as_str());
-            ui.separator();
-            ui.label(RichText::new("ADB:").strong());
-            ui.monospace(self.config.adb_path.as_str());
-            ui.separator();
-            ui.label(RichText::new("Historical log size:").strong());
-            ui.monospace(fs_utils::format_bytes(self.total_log_bytes));
+                    .to_string(),
+            );
+            self.stat_card(
+                &mut columns[2],
+                &self.tr("overview.storage"),
+                fs_utils::format_bytes(self.total_log_bytes),
+            );
+            self.stat_card(
+                &mut columns[3],
+                &self.tr("overview.language"),
+                self.language_name(self.i18n.language()).to_owned(),
+            );
         });
-        ui.add_space(4.0);
-        ui.small(format!(
-            "Config: {} | App log: {}",
-            self.app_paths.config_path.display(),
-            self.app_paths.app_log_path.display()
-        ));
 
-        ui.add_space(8.0);
-
-        ui.horizontal(|ui| {
-            if ui.button("Refresh devices").clicked() {
+        ui.add_space(10.0);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button(self.tr("toolbar.refresh_devices")).clicked() {
                 self.refresh_devices();
             }
-            if ui.button("Refresh size").clicked() {
+            if ui.button(self.tr("toolbar.refresh_size")).clicked() {
                 self.refresh_log_size();
             }
-            if ui.button("Open log dir").clicked() {
+            if ui.button(self.tr("toolbar.open_logs")).clicked() {
                 if let Err(err) = fs_utils::open_path(PathBuf::from(&self.config.log_dir).as_path())
                 {
                     self.set_error(err);
                 }
             }
-            if ui.button("Open app log").clicked() {
+            if ui.button(self.tr("toolbar.open_app_log")).clicked() {
                 if let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path()) {
                     self.set_error(err);
                 }
             }
-            if ui.button("Open config dir").clicked() {
-                if let Err(err) = fs_utils::open_path(self.app_paths.config_dir.as_path()) {
-                    self.set_error(err);
-                }
+            if ui.button(self.tr("toolbar.settings")).clicked() {
+                self.show_settings = true;
             }
-            if ui.button("Clear history").clicked() {
+            if ui.button(self.tr("toolbar.clear_history")).clicked() {
                 self.show_clear_confirm = true;
             }
-            if ui.button("Settings").clicked() {
-                self.show_settings = true;
+        });
+    }
+
+    fn ui_selected_device(&mut self, ui: &mut egui::Ui) {
+        let selected = self
+            .selected_serial
+            .as_deref()
+            .and_then(|serial| self.find_device(serial).cloned());
+        let heading = self.tr("device.selected");
+        let state_label = self.tr("device.state");
+        let session_label = self.tr("device.session");
+        let started_label = self.tr("device.started");
+        let latest_file_label = self.tr("device.latest_file");
+        let never_text = self.tr("misc.never");
+        let no_file_text = self.tr("device.no_file");
+        let open_file_text = self.tr("device.action.open_file");
+        let open_folder_text = self.tr("device.action.open_folder");
+        let none_selected_text = self.tr("device.none_selected");
+
+        ui.group(|ui| {
+            ui.heading(heading);
+            if let Some(device) = selected {
+                ui.label(format!("{}: {}", state_label, device.info.state));
+                ui.label(format!(
+                    "{}: {}",
+                    session_label,
+                    self.run_state_text(&device.run_state)
+                ));
+                ui.label(format!(
+                    "{}: {}",
+                    started_label,
+                    device
+                        .started_at
+                        .map(format_system_time)
+                        .unwrap_or(never_text)
+                ));
+                ui.label(format!(
+                    "{}: {}",
+                    latest_file_label,
+                    device
+                        .output_path
+                        .as_ref()
+                        .and_then(|path| path.file_name().and_then(|name| name.to_str()))
+                        .map(str::to_owned)
+                        .unwrap_or(no_file_text)
+                ));
+                ui.horizontal(|ui| {
+                    if let Some(path) = &device.output_path {
+                        if ui.button(open_file_text).clicked() {
+                            if let Err(err) = fs_utils::open_path(path) {
+                                self.set_error(err);
+                            }
+                        }
+                        if let Some(parent) = path.parent() {
+                            if ui.button(open_folder_text).clicked() {
+                                if let Err(err) = fs_utils::open_path(parent) {
+                                    self.set_error(err);
+                                }
+                            }
+                        }
+                    }
+                });
+            } else {
+                ui.label(none_selected_text);
             }
         });
     }
 
     fn ui_devices(&mut self, ui: &mut egui::Ui) {
-        ui.heading("ADB devices");
-        ui.label("Double-click a device row to start logcat collection. Use Stop to end a running session.");
+        ui.heading(self.tr("devices.title"));
+        ui.label(self.tr("devices.hint"));
         ui.add_space(8.0);
 
         if self.devices.is_empty() {
-            ui.label("No connected devices.");
+            ui.label(self.tr("devices.empty"));
             return;
         }
 
         let mut start_serial: Option<String> = None;
         let mut stop_serial: Option<String> = None;
         let mut open_output: Option<PathBuf> = None;
+        let i18n = self.i18n.clone();
+        let serial_text = self.tr("device.column.serial");
+        let state_text = self.tr("device.column.state");
+        let session_text = self.tr("device.column.session");
+        let started_text = self.tr("device.column.started");
+        let output_text = self.tr("device.column.output");
+        let actions_text = self.tr("device.column.actions");
+        let never_text = self.tr("misc.never");
+        let start_text = self.tr("device.action.start");
+        let stop_text = self.tr("device.action.stop");
+        let open_text = self.tr("device.action.open");
+        let stopping_text = self.tr("run_state.stopping");
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("device_grid")
                 .striped(true)
                 .min_col_width(90.0)
                 .show(ui, |ui| {
-                    ui.strong("Serial");
-                    ui.strong("ADB state");
-                    ui.strong("Session");
-                    ui.strong("Started");
-                    ui.strong("Output file");
-                    ui.strong("Action");
+                    ui.strong(serial_text);
+                    ui.strong(state_text);
+                    ui.strong(session_text);
+                    ui.strong(started_text);
+                    ui.strong(output_text);
+                    ui.strong(actions_text);
                     ui.end_row();
 
                     for device in &mut self.devices {
@@ -285,14 +371,14 @@ impl AdbCollectorApp {
                         }
 
                         ui.label(device.info.state.as_str());
-                        ui.label(device.status_text());
+                        ui.label(run_state_text_with(&i18n, &device.run_state));
                         ui.label(
                             device
                                 .started_at
                                 .map(format_system_time)
-                                .unwrap_or_else(|| "-".to_owned()),
+                                .unwrap_or_else(|| never_text.clone()),
                         );
-                        let output_text = device
+                        let output_name = device
                             .output_path
                             .as_ref()
                             .map(|path| {
@@ -304,35 +390,35 @@ impl AdbCollectorApp {
                                 }
                             })
                             .unwrap_or_else(|| "-".to_owned());
-                        ui.monospace(output_text);
+                        ui.monospace(output_name);
 
                         ui.horizontal(|ui| match device.run_state {
                             DeviceRunState::Idle | DeviceRunState::Error(_) => {
                                 let can_start = device.info.state == "device";
                                 if ui
-                                    .add_enabled(can_start, egui::Button::new("Start"))
+                                    .add_enabled(can_start, egui::Button::new(start_text.clone()))
                                     .clicked()
                                 {
                                     start_serial = Some(device.info.serial.clone());
                                 }
                                 if let Some(path) = &device.output_path {
-                                    if ui.button("Open").clicked() {
+                                    if ui.button(open_text.clone()).clicked() {
                                         open_output = Some(path.clone());
                                     }
                                 }
                             }
                             DeviceRunState::Starting | DeviceRunState::Running => {
-                                if ui.button("Stop").clicked() {
+                                if ui.button(stop_text.clone()).clicked() {
                                     stop_serial = Some(device.info.serial.clone());
                                 }
                                 if let Some(path) = &device.output_path {
-                                    if ui.button("Open").clicked() {
+                                    if ui.button(open_text.clone()).clicked() {
                                         open_output = Some(path.clone());
                                     }
                                 }
                             }
                             DeviceRunState::Stopping => {
-                                ui.label("Stopping...");
+                                ui.label(stopping_text.clone());
                             }
                         });
                         ui.end_row();
@@ -366,7 +452,12 @@ impl AdbCollectorApp {
             ui.add_space(4.0);
             ui.colored_label(
                 Color32::from_rgb(200, 70, 70),
-                format!("Last error [{}]: {}", last_error.timestamp, last_error.text),
+                format!(
+                    "{} [{}]: {}",
+                    self.tr("misc.last_error"),
+                    last_error.timestamp,
+                    last_error.text
+                ),
             );
         }
     }
@@ -377,9 +468,9 @@ impl AdbCollectorApp {
         }
 
         let title = if self.require_initial_setup {
-            "Initial setup"
+            self.tr("settings.initial_title")
         } else {
-            "Settings"
+            self.tr("settings.title")
         };
 
         egui::Window::new(title)
@@ -387,64 +478,83 @@ impl AdbCollectorApp {
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label(
-                    "Confirm the ADB executable path and the directory used to store logcat files.",
-                );
-                ui.small(
-                    "Device logs are written into the configured log directory. App runtime diagnostics are written to the app log path below.",
-                );
-                ui.label(format!(
-                    "Config file: {}",
-                    self.app_paths.config_path.display()
-                ));
-                ui.label(format!(
-                    "App runtime log: {}",
-                    self.app_paths.app_log_path.display()
-                ));
-                ui.add_space(8.0);
-
-                ui.label("ADB executable");
+                ui.label(self.tr("settings.intro"));
+                ui.small(self.tr("settings.explainer"));
                 ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.adb_path_input);
-                    if ui.button("Browse").clicked() {
-                        if let Some(path) = FileDialog::new().pick_file() {
-                            self.adb_path_input = path.display().to_string();
+                    if ui.button(self.tr("settings.open_config_dir")).clicked() {
+                        if let Err(err) = fs_utils::open_path(self.app_paths.config_dir.as_path()) {
+                            self.set_error(err);
                         }
                     }
-                    if ui.button("Use `adb`").clicked() {
+                    if ui.button(self.tr("settings.open_app_log")).clicked() {
+                        if let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path())
+                        {
+                            self.set_error(err);
+                        }
+                    }
+                });
+                ui.add_space(8.0);
+
+                ui.label(self.tr("settings.adb"));
+                ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.adb_path_input);
+                    if ui.button(self.tr("settings.browse")).clicked() {
+                        if let Some(path) = FileDialog::new().pick_file() {
+                            self.adb_path_input = fs_utils::display_path(path.as_path());
+                        }
+                    }
+                    if ui.button(self.tr("settings.use_adb")).clicked() {
                         self.adb_path_input = "adb".to_owned();
                     }
                 });
 
                 ui.add_space(8.0);
-                ui.label("Log directory");
+                ui.label(self.tr("settings.log_dir"));
                 ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.log_dir_input);
-                    if ui.button("Browse").clicked() {
+                    if ui.button(self.tr("settings.browse")).clicked() {
                         if let Some(path) = FileDialog::new().pick_folder() {
-                            self.log_dir_input = path.display().to_string();
+                            self.log_dir_input = fs_utils::display_path(path.as_path());
                         }
                     }
-                    if ui.button("Use default").clicked() {
+                    if ui.button(self.tr("settings.use_default")).clicked() {
                         self.log_dir_input =
-                            self.app_paths.exe_dir.join("logs").display().to_string();
+                            fs_utils::display_path(&self.app_paths.exe_dir.join("logs"));
                     }
                 });
+                ui.add_space(8.0);
+                ui.label(self.tr("settings.language"));
+                egui::ComboBox::from_id_salt("language-select")
+                    .selected_text(self.language_name(&self.language_input))
+                    .show_ui(ui, |ui| {
+                        for (code, _) in I18n::supported_languages() {
+                            let label = self.language_name(code);
+                            ui.selectable_value(
+                                &mut self.language_input,
+                                (*code).to_owned(),
+                                label,
+                            );
+                        }
+                    });
+                ui.small(self.tr("settings.language.help"));
                 ui.small(if self.app_paths.portable_mode {
-                    "Portable mode is active. The app prefers config and logs next to the exe."
+                    self.tr("settings.mode.portable")
                 } else {
-                    "AppData mode is active because the exe directory is not writable."
+                    self.tr("settings.mode.appdata")
                 });
 
                 ui.add_space(12.0);
                 ui.horizontal(|ui| {
-                    if ui.button("Save").clicked() {
+                    if ui.button(self.tr("settings.save")).clicked() {
                         self.save_settings();
                     }
 
-                    if !self.require_initial_setup && ui.button("Cancel").clicked() {
+                    if !self.require_initial_setup
+                        && ui.button(self.tr("settings.cancel")).clicked()
+                    {
                         self.adb_path_input = self.config.adb_path.clone();
                         self.log_dir_input = self.config.log_dir.clone();
+                        self.language_input = self.config.language.clone();
                         self.show_settings = false;
                     }
                 });
@@ -456,20 +566,19 @@ impl AdbCollectorApp {
             return;
         }
 
-        egui::Window::new("Clear historical logs")
+        egui::Window::new(self.tr("clear.title"))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label("Delete all historical .log files under the configured log directory?");
-                ui.label("Active capture files will be preserved.");
+                ui.label(self.tr("clear.body"));
                 ui.add_space(12.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button("Delete").clicked() {
+                    if ui.button(self.tr("clear.delete")).clicked() {
                         self.show_clear_confirm = false;
                         self.clear_history_logs();
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(self.tr("clear.cancel")).clicked() {
                         self.show_clear_confirm = false;
                     }
                 });
@@ -481,10 +590,11 @@ impl AdbCollectorApp {
             adb_path: self.adb_path_input.trim().to_owned(),
             log_dir: self.log_dir_input.trim().to_owned(),
             app_log_max_size_mb: self.config.app_log_max_size_mb,
+            language: self.language_input.clone(),
         };
 
         if candidate.adb_path.is_empty() || candidate.log_dir.is_empty() {
-            self.set_error("ADB path and log directory are required.");
+            self.set_error(self.tr("status.required_fields"));
             return;
         }
 
@@ -503,9 +613,10 @@ impl AdbCollectorApp {
         };
 
         let saved = AppConfig {
-            adb_path: candidate.adb_path,
-            log_dir: resolved_log_dir.display().to_string(),
+            adb_path: fs_utils::display_path_string(&candidate.adb_path),
+            log_dir: fs_utils::display_path(&resolved_log_dir),
             app_log_max_size_mb: candidate.app_log_max_size_mb,
+            language: self.language_input.clone(),
         };
 
         if let Err(err) = config::save_config(&self.app_paths.config_path, &saved) {
@@ -516,9 +627,11 @@ impl AdbCollectorApp {
         self.config = saved.clone();
         self.adb_path_input = saved.adb_path.clone();
         self.log_dir_input = saved.log_dir.clone();
+        self.language_input = saved.language.clone();
+        self.i18n.set_language(&saved.language);
         self.show_settings = false;
         self.require_initial_setup = false;
-        self.set_info("Settings saved.");
+        self.set_info(self.tr("status.settings_saved"));
         self.refresh_devices();
         self.refresh_log_size();
     }
@@ -555,7 +668,7 @@ impl AdbCollectorApp {
         let mut protected_paths = protected_paths;
         protected_paths.push(self.app_paths.app_log_path.clone());
 
-        self.set_info("Clearing historical logs...");
+        self.set_info(self.tr("status.clearing_history"));
         thread::spawn(move || {
             let result = fs_utils::clear_history_logs(&log_dir, &protected_paths);
             let _ = tx.send(AppEvent::CleanupFinished(result));
@@ -564,16 +677,16 @@ impl AdbCollectorApp {
 
     fn start_collection(&mut self, serial: String) {
         if self.require_initial_setup {
-            self.set_error("Finish the initial setup before starting collection.");
+            self.set_error(self.tr("status.finish_initial_setup"));
             self.show_settings = true;
             return;
         }
 
         if let Some(device) = self.find_device(&serial) {
             if device.info.state != "device" {
-                self.set_error(format!(
-                    "Device {serial} is not in `device` state and cannot start logcat."
-                ));
+                self.set_error(
+                    self.tr_args("status.device_invalid_state", &[("serial", serial.clone())]),
+                );
                 return;
             }
         }
@@ -584,7 +697,10 @@ impl AdbCollectorApp {
         );
         if let Some(device) = self.find_device_mut(&serial) {
             if device.is_active() {
-                self.set_info(format!("{serial} is already collecting."));
+                self.set_info(self.tr_args(
+                    "status.device_already_collecting",
+                    &[("serial", serial.clone())],
+                ));
                 return;
             }
             device.run_state = DeviceRunState::Starting;
@@ -636,35 +752,49 @@ impl AdbCollectorApp {
     }
 
     fn stop_collection(&mut self, serial: &str) {
-        let Some(device) = self.find_device_mut(serial) else {
+        let Some(index) = self
+            .devices
+            .iter()
+            .position(|device| device.info.serial == serial)
+        else {
             return;
         };
 
-        let Some(child) = device.child.clone() else {
-            device.run_state = DeviceRunState::Idle;
+        let Some(child) = self.devices[index].child.clone() else {
+            self.devices[index].run_state = DeviceRunState::Idle;
             return;
         };
 
-        device.run_state = DeviceRunState::Stopping;
+        self.devices[index].run_state = DeviceRunState::Stopping;
         match child.lock() {
             Ok(mut guard) => {
                 if let Some(process) = guard.as_mut() {
                     if let Err(err) = process.kill() {
-                        device.run_state =
-                            DeviceRunState::Error(format!("Failed to stop collector: {err}"));
-                        self.set_error(format!("Failed to stop collector for {serial}: {err}"));
+                        let message = self.tr_args(
+                            "status.stop_failed",
+                            &[("serial", serial.to_owned()), ("error", err.to_string())],
+                        );
+                        self.devices[index].run_state = DeviceRunState::Error(message.clone());
+                        self.set_error(message);
                     } else {
-                        self.set_info(format!("Stopping collector for {serial}..."));
+                        self.set_info(self.tr_args(
+                            "status.stopping_collection",
+                            &[("serial", serial.to_owned())],
+                        ));
                     }
                 } else {
-                    device.run_state = DeviceRunState::Idle;
+                    self.devices[index].run_state = DeviceRunState::Idle;
                 }
             }
             Err(_) => {
-                device.run_state =
+                self.devices[index].run_state =
                     DeviceRunState::Error("Collector handle is poisoned.".to_owned());
-                self.set_error(format!(
-                    "Failed to stop collector for {serial}: internal lock error"
+                self.set_error(self.tr_args(
+                    "status.stop_failed",
+                    &[
+                        ("serial", serial.to_owned()),
+                        ("error", "internal lock error".to_owned()),
+                    ],
                 ));
             }
         }
@@ -724,6 +854,45 @@ impl AdbCollectorApp {
         self.status = Some(error.clone());
         self.last_error = Some(error);
     }
+
+    fn tr(&self, key: &str) -> String {
+        self.i18n.tr(key)
+    }
+
+    fn tr_args(&self, key: &str, args: &[(&str, String)]) -> String {
+        self.i18n.tr_args(key, args)
+    }
+
+    fn language_name(&self, code: &str) -> String {
+        match code {
+            "zh-CN" => self.tr("language.zh-CN"),
+            _ => self.tr("language.english"),
+        }
+    }
+
+    fn run_state_text(&self, run_state: &DeviceRunState) -> String {
+        run_state_text_with(&self.i18n, run_state)
+    }
+
+    fn stat_card(&self, ui: &mut egui::Ui, title: &str, value: String) {
+        ui.group(|ui| {
+            ui.label(RichText::new(title).strong());
+            ui.add_space(4.0);
+            ui.heading(value);
+        });
+    }
+}
+
+fn run_state_text_with(i18n: &I18n, run_state: &DeviceRunState) -> String {
+    match run_state {
+        DeviceRunState::Idle => i18n.tr("run_state.idle"),
+        DeviceRunState::Starting => i18n.tr("run_state.starting"),
+        DeviceRunState::Running => i18n.tr("run_state.running"),
+        DeviceRunState::Stopping => i18n.tr("run_state.stopping"),
+        DeviceRunState::Error(message) => {
+            i18n.tr_args("run_state.error", &[("message", message.clone())])
+        }
+    }
 }
 
 impl eframe::App for AdbCollectorApp {
@@ -737,6 +906,8 @@ impl eframe::App for AdbCollectorApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             self.ui_summary(ui);
             ui.separator();
+            self.ui_selected_device(ui);
+            ui.add_space(8.0);
             self.ui_devices(ui);
         });
 

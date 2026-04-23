@@ -13,7 +13,7 @@ pub struct DeviceInfo {
     pub state: String,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DeviceEntry {
     pub info: DeviceInfo,
     pub run_state: DeviceRunState,
@@ -39,19 +39,9 @@ impl DeviceEntry {
             DeviceRunState::Starting | DeviceRunState::Running | DeviceRunState::Stopping
         )
     }
-
-    pub fn status_text(&self) -> String {
-        match &self.run_state {
-            DeviceRunState::Idle => "Idle".to_owned(),
-            DeviceRunState::Starting => "Launching collector".to_owned(),
-            DeviceRunState::Running => "Collecting logcat".to_owned(),
-            DeviceRunState::Stopping => "Stopping collector".to_owned(),
-            DeviceRunState::Error(message) => format!("Error: {message}"),
-        }
-    }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum DeviceRunState {
     Idle,
     Starting,

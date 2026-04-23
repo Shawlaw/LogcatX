@@ -18,6 +18,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - refresh device list and historical log size
 - clear historical device logs while protecting active sessions
 - write a separate **application runtime log** for diagnostics
+- embedded English and Simplified Chinese UI with system-language default on first launch
 
 ## Portable behavior
 
@@ -41,11 +42,12 @@ On first launch, the app asks the user to confirm:
 - the `adb` executable path
 - the directory used to store collected device logs
 
-The settings dialog also shows:
+The settings dialog supports:
 
-- config file path
-- app runtime log path
-- whether the app is currently running in portable mode or AppData mode
+- choosing the UI language (English / Simplified Chinese)
+- opening the config directory directly
+- opening the application runtime log directly
+- showing whether the app is currently running in portable mode or AppData mode
 
 ## Configuration example
 

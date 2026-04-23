@@ -1,3 +1,4 @@
+use crate::{fs_utils, i18n};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,9 +17,14 @@ pub struct AppPaths {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
     pub adb_path: String,
+    #[serde(default)]
     pub log_dir: String,
+    #[serde(default = "default_app_log_max_size_mb")]
     pub app_log_max_size_mb: u32,
+    #[serde(default)]
+    pub language: String,
 }
 
 impl AppConfig {
@@ -26,9 +32,12 @@ impl AppConfig {
         let default_log_dir = paths.exe_dir.join("logs");
 
         Self {
-            adb_path: detect_adb_path().unwrap_or_default(),
-            log_dir: default_log_dir.to_string_lossy().into_owned(),
-            app_log_max_size_mb: 2,
+            adb_path: detect_adb_path()
+                .map(|path| fs_utils::display_path_string(&path))
+                .unwrap_or_default(),
+            log_dir: fs_utils::display_path(&default_log_dir),
+            app_log_max_size_mb: default_app_log_max_size_mb(),
+            language: i18n::detect_system_language(),
         }
     }
 
@@ -37,14 +46,15 @@ impl AppConfig {
     }
 }
 
-pub fn load_config(path: &Path) -> Result<AppConfig, String> {
+pub fn load_config(path: &Path, paths: &AppPaths) -> Result<AppConfig, String> {
     if !path.exists() {
         return Err(format!("Config file does not exist: {}", path.display()));
     }
 
     let bytes = fs::read(&path).map_err(|err| format!("Failed to read config: {err}"))?;
-    serde_json::from_slice::<AppConfig>(&bytes)
-        .map_err(|err| format!("Failed to parse config {}: {err}", path.display()))
+    let config = serde_json::from_slice::<AppConfig>(&bytes)
+        .map_err(|err| format!("Failed to parse config {}: {err}", path.display()))?;
+    Ok(normalize_config(config, paths))
 }
 
 pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
@@ -58,7 +68,15 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
         )
     })?;
 
-    let content = serde_json::to_vec_pretty(config)
+    let mut normalized = config.clone();
+    normalized.language = i18n::normalize_language_code(&normalized.language).to_owned();
+    normalized.log_dir = fs_utils::display_path_string(&normalized.log_dir);
+    normalized.adb_path = fs_utils::display_path_string(&normalized.adb_path);
+    if normalized.app_log_max_size_mb == 0 {
+        normalized.app_log_max_size_mb = default_app_log_max_size_mb();
+    }
+
+    let content = serde_json::to_vec_pretty(&normalized)
         .map_err(|err| format!("Failed to serialize config: {err}"))?;
     fs::write(&path, content)
         .map_err(|err| format!("Failed to write config {}: {err}", path.display()))
@@ -68,7 +86,8 @@ pub fn ensure_log_dir(path: &Path) -> Result<PathBuf, String> {
     fs::create_dir_all(path)
         .map_err(|err| format!("Failed to create log directory {}: {err}", path.display()))?;
     path.canonicalize()
-        .or_else(|_| Ok(path.to_path_buf()))
+        .map(|canonical| fs_utils::normalize_display_path(&canonical))
+        .or_else(|_| Ok(fs_utils::normalize_display_path(path)))
         .map_err(|err: std::io::Error| {
             format!("Failed to resolve log directory {}: {err}", path.display())
         })
@@ -123,6 +142,38 @@ fn is_dir_writable(dir: &Path) -> bool {
         }
         Err(_) => false,
     }
+}
+
+fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
+    let defaults = AppConfig::with_defaults(paths);
+
+    if config.adb_path.trim().is_empty() {
+        config.adb_path = defaults.adb_path;
+    } else {
+        config.adb_path = fs_utils::display_path_string(&config.adb_path);
+    }
+
+    if config.log_dir.trim().is_empty() {
+        config.log_dir = defaults.log_dir;
+    } else {
+        config.log_dir = fs_utils::display_path_string(&config.log_dir);
+    }
+
+    if config.app_log_max_size_mb == 0 {
+        config.app_log_max_size_mb = default_app_log_max_size_mb();
+    }
+
+    config.language = if config.language.trim().is_empty() {
+        i18n::detect_system_language()
+    } else {
+        i18n::normalize_language_code(&config.language).to_owned()
+    };
+
+    config
+}
+
+fn default_app_log_max_size_mb() -> u32 {
+    2
 }
 
 pub fn detect_adb_path() -> Option<String> {
@@ -204,7 +255,7 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_executable_file;
+    use super::{default_app_log_max_size_mb, is_executable_file};
     use std::{fs, path::PathBuf};
 
     #[test]
@@ -226,5 +277,10 @@ mod tests {
 
         fs::remove_file(&adb_path).expect("cleanup adb stub");
         let _ = fs::remove_dir_all(PathBuf::from(&temp_dir));
+    }
+
+    #[test]
+    fn default_app_log_size_is_nonzero() {
+        assert_eq!(default_app_log_max_size_mb(), 2);
     }
 }
