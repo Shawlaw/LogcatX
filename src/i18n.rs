@@ -1,50 +1,37 @@
-use std::{collections::HashMap, sync::OnceLock};
-
-use serde::Deserialize;
-
 const EN_JSON: &str = include_str!("../locales/en.json");
 const ZH_CN_JSON: &str = include_str!("../locales/zh-CN.json");
 
-#[derive(Debug, Deserialize)]
-struct Catalog {
-    strings: HashMap<String, String>,
-}
-
 #[derive(Clone, Debug)]
 pub struct I18n {
-    language: String,
+    inner: desktop_i18n::I18n,
 }
 
 impl I18n {
     pub fn new(language: &str) -> Self {
         Self {
-            language: normalize_language_code(language).to_owned(),
+            inner: desktop_i18n::I18n::from_json_catalogs(
+                language,
+                "en",
+                &[("en", EN_JSON), ("zh-CN", ZH_CN_JSON)],
+            )
+            .expect("invalid locale file"),
         }
     }
 
     pub fn set_language(&mut self, language: &str) {
-        self.language = normalize_language_code(language).to_owned();
+        self.inner.set_language(language);
     }
 
     pub fn language(&self) -> &str {
-        &self.language
+        self.inner.language()
     }
 
     pub fn tr(&self, key: &str) -> String {
-        catalogs()
-            .get(self.language())
-            .and_then(|catalog| catalog.get(key))
-            .or_else(|| catalogs().get("en").and_then(|catalog| catalog.get(key)))
-            .cloned()
-            .unwrap_or_else(|| key.to_owned())
+        self.inner.tr(key)
     }
 
     pub fn tr_args(&self, key: &str, args: &[(&str, String)]) -> String {
-        let mut text = self.tr(key);
-        for (name, value) in args {
-            text = text.replace(&format!("{{{name}}}"), value);
-        }
-        text
+        self.inner.tr_args(key, args)
     }
 
     pub fn supported_languages() -> &'static [(&'static str, &'static str)] {
@@ -53,34 +40,14 @@ impl I18n {
 }
 
 pub fn detect_system_language() -> String {
-    sys_locale::get_locale()
-        .map(|locale| normalize_language_code(&locale).to_owned())
-        .unwrap_or_else(|| "en".to_owned())
+    normalize_language_code(&desktop_i18n::detect_system_language()).to_owned()
 }
 
 pub fn normalize_language_code(language: &str) -> &'static str {
-    let lower = language.trim().to_ascii_lowercase();
-    if lower.starts_with("zh") {
-        "zh-CN"
-    } else {
-        "en"
+    match desktop_i18n::normalize_language_code(language, &["en", "zh-CN"], "en").as_str() {
+        "zh-CN" => "zh-CN",
+        _ => "en",
     }
-}
-
-fn catalogs() -> &'static HashMap<String, HashMap<String, String>> {
-    static CATALOGS: OnceLock<HashMap<String, HashMap<String, String>>> = OnceLock::new();
-    CATALOGS.get_or_init(|| {
-        HashMap::from([
-            ("en".to_owned(), parse_catalog(EN_JSON)),
-            ("zh-CN".to_owned(), parse_catalog(ZH_CN_JSON)),
-        ])
-    })
-}
-
-fn parse_catalog(json: &str) -> HashMap<String, String> {
-    serde_json::from_str::<Catalog>(json)
-        .expect("invalid locale file")
-        .strings
 }
 
 #[cfg(test)]

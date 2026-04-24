@@ -3,26 +3,16 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 pub fn session_log_path(base_dir: &Path, serial: &str) -> PathBuf {
-    let file_name = format!(
-        "{}-{}.log",
-        sanitize_serial(serial),
-        Local::now().format("%Y%m%d-%H%M%S")
-    );
-    base_dir.join(sanitize_serial(serial)).join(file_name)
+    let sanitized = sanitize_serial(serial);
+    let file_name = format!("{}-{}.log", sanitized, Local::now().format("%Y%m%d-%H%M%S"));
+    base_dir.join(&sanitized).join(file_name)
 }
 
 pub fn sanitize_serial(serial: &str) -> String {
-    serial
-        .chars()
-        .map(|ch| match ch {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => ch,
-            _ => '_',
-        })
-        .collect()
+    desktop_fs::sanitize_path_component(serial)
 }
 
 pub fn dir_size(path: &Path) -> Result<u64, String> {
@@ -33,32 +23,19 @@ pub fn dir_size(path: &Path) -> Result<u64, String> {
 }
 
 pub fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    let mut value = bytes as f64;
-    let mut unit_idx = 0usize;
-
-    while value >= 1024.0 && unit_idx < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit_idx += 1;
-    }
-
-    if unit_idx == 0 {
-        format!("{bytes} {}", UNITS[unit_idx])
-    } else {
-        format!("{value:.2} {}", UNITS[unit_idx])
-    }
+    desktop_fs::format_bytes(bytes)
 }
 
 pub fn display_path(path: &Path) -> String {
-    simplify_windows_path(&path.to_string_lossy())
+    desktop_fs::display_path(path)
 }
 
 pub fn display_path_string(path: &str) -> String {
-    simplify_windows_path(path)
+    desktop_fs::display_path_string(path)
 }
 
 pub fn normalize_display_path(path: &Path) -> PathBuf {
-    PathBuf::from(display_path(path))
+    desktop_fs::normalize_display_path(path)
 }
 
 pub fn clear_history_logs(base_dir: &Path, protected_paths: &[PathBuf]) -> Result<(), String> {
@@ -185,45 +162,8 @@ fn normalize_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-fn simplify_windows_path(path: &str) -> String {
-    #[cfg(target_os = "windows")]
-    {
-        if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
-            return format!(r"\\{}", rest);
-        }
-        if let Some(rest) = path.strip_prefix(r"\\?\") {
-            return rest.to_owned();
-        }
-    }
-
-    path.to_owned()
-}
-
 pub fn open_path(path: &Path) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut cmd = Command::new("explorer");
-        cmd.arg(path);
-        cmd
-    };
-
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut cmd = Command::new("open");
-        cmd.arg(path);
-        cmd
-    };
-
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    let mut cmd = {
-        let mut cmd = Command::new("xdg-open");
-        cmd.arg(path);
-        cmd
-    };
-
-    cmd.spawn()
-        .map(|_| ())
-        .map_err(|err| format!("Failed to open {}: {err}", path.display()))
+    desktop_fs::open_path(path)
 }
 
 #[cfg(test)]

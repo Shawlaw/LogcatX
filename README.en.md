@@ -9,7 +9,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 
 - platform: **Windows**
 - distribution: **portable zip + single exe**
-- current milestone: **v0.3.0**
+- current milestone: **v0.3.1**
 
 ## Core capabilities
 
@@ -22,6 +22,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - clear historical device logs while protecting active sessions
 - write a separate **application runtime log** for diagnostics
 - embedded English and Simplified Chinese UI with system-language default on first launch
+- shared infrastructure now comes from the public [DeskFoundry](https://github.com/Shawlaw/DeskFoundry) monorepo
 
 ## Portable behavior
 
@@ -71,11 +72,11 @@ cargo xwin build --target x86_64-pc-windows-msvc --release
 This produces:
 
 - `dist/LogcatX.exe`
-- `dist/LogcatX-v0.3.0-win64.zip`
+- `dist/LogcatX-v0.3.1-win64.zip`
 
 ## GitHub Release CI
 
-This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.3.0`, it will:
+This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.3.1`, it will:
 
 1. verify that the tag matches the version in `Cargo.toml`
 2. build the Windows release artifacts

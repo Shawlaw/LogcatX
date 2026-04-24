@@ -8,15 +8,15 @@ mod app;
 mod config;
 mod fs_utils;
 mod i18n;
-mod logger;
 mod models;
 
 fn main() -> eframe::Result<()> {
     let console_mode = cfg!(feature = "console") || std::env::args().any(|arg| arg == "--console");
     let paths = config::resolve_app_paths().unwrap_or_else(|err| fatal_error(&err));
 
-    logger::init(&paths.app_log_path, console_mode, 2).unwrap_or_else(|err| fatal_error(&err));
-    logger::set_panic_hook(&paths.app_log_path);
+    desktop_logger::init(&paths.app_log_path, console_mode, 2)
+        .unwrap_or_else(|err| fatal_error(&err));
+    desktop_logger::set_panic_hook(&paths.app_log_path);
 
     let config_exists = paths.config_path.exists();
     let (config, startup_error) = match config::load_config(&paths.config_path, &paths) {

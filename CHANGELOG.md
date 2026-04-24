@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-04-24
+
+### Changed
+- switched shared desktop infrastructure to the public `DeskFoundry` monorepo GitHub dependencies
+- `desktop-logger`, `desktop-config`, `desktop-i18n`, and `desktop-fs` are now consumed as reusable SDK crates instead of app-local copies
+- version bumped to `0.3.1`
+
 ## [0.3.0] - 2026-04-23
 
 ### Added

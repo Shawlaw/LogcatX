@@ -798,6 +798,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "desktop-config"
+version = "0.1.0"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.0#bec1b50777e666cdf36a84cc836c508d7eb4c500"
+dependencies = [
+ "directories",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "desktop-fs"
+version = "0.1.0"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.0#bec1b50777e666cdf36a84cc836c508d7eb4c500"
+
+[[package]]
+name = "desktop-i18n"
+version = "0.1.0"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.0#bec1b50777e666cdf36a84cc836c508d7eb4c500"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sys-locale",
+]
+
+[[package]]
+name = "desktop-logger"
+version = "0.1.0"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.0#bec1b50777e666cdf36a84cc836c508d7eb4c500"
+dependencies = [
+ "chrono",
+ "log",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1856,16 +1890,19 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
 name = "logcatx"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "chrono",
+ "desktop-config",
+ "desktop-fs",
+ "desktop-i18n",
+ "desktop-logger",
  "directories",
  "eframe",
  "log",
  "rfd",
  "serde",
  "serde_json",
- "sys-locale",
 ]
 
 [[package]]
