@@ -1,4 +1,8 @@
-# LogcatX
+<p align="center">
+  <img src="icons/icon_128.png" width="128">
+</p>
+
+<h1 align="center">LogcatX</h1>
 
 A small desktop GUI tool for collecting `adb logcat` logs from multiple Android devices in parallel.
 
@@ -9,7 +13,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 
 - platform: **Windows**
 - distribution: **portable zip + single exe**
-- current milestone: **v0.3.1**
+- current milestone: **v0.4.0**
 
 ## Core capabilities
 
@@ -17,6 +21,11 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - start logcat collection by double-clicking a device row
 - stop collection manually per device
 - collect from multiple devices in parallel
+- save device aliases, pins, and recent connection history
+- connect directly with an `IP:port` endpoint
+- refresh the device list automatically after USB changes
+- show clearer device states such as ready, offline, unauthorized, and disconnected
+- generate both log directories and log file prefixes from the saved alias when available
 - configure the `adb` executable path and the device-log output directory
 - refresh device list and historical log size
 - clear historical device logs while protecting active sessions
@@ -72,11 +81,11 @@ cargo xwin build --target x86_64-pc-windows-msvc --release
 This produces:
 
 - `dist/LogcatX.exe`
-- `dist/LogcatX-v0.3.1-win64.zip`
+- `dist/LogcatX-v0.4.0-win64.zip`
 
 ## GitHub Release CI
 
-This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.3.1`, it will:
+This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.4.0`, it will:
 
 1. verify that the tag matches the version in `Cargo.toml`
 2. build the Windows release artifacts

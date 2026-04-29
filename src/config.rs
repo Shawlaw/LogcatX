@@ -1,11 +1,13 @@
 use crate::{fs_utils, i18n};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
 
 pub type AppPaths = desktop_config::PortableAppPaths;
+pub const MAX_RECENT_CONNECTIONS: usize = 8;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AppConfig {
@@ -17,6 +19,12 @@ pub struct AppConfig {
     pub app_log_max_size_mb: u32,
     #[serde(default)]
     pub language: String,
+    #[serde(default)]
+    pub device_aliases: BTreeMap<String, String>,
+    #[serde(default)]
+    pub pinned_devices: Vec<String>,
+    #[serde(default)]
+    pub recent_connections: Vec<String>,
 }
 
 impl AppConfig {
@@ -30,6 +38,9 @@ impl AppConfig {
             log_dir: fs_utils::display_path(&default_log_dir),
             app_log_max_size_mb: default_app_log_max_size_mb(),
             language: i18n::detect_system_language(),
+            device_aliases: BTreeMap::new(),
+            pinned_devices: Vec::new(),
+            recent_connections: Vec::new(),
         }
     }
 
@@ -55,6 +66,9 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
     if normalized.app_log_max_size_mb == 0 {
         normalized.app_log_max_size_mb = default_app_log_max_size_mb();
     }
+    normalized.device_aliases = normalize_aliases(normalized.device_aliases);
+    normalized.pinned_devices = normalize_serial_list(normalized.pinned_devices);
+    normalized.recent_connections = normalize_recent_connections(normalized.recent_connections);
 
     desktop_config::save_pretty_json(path, &normalized)
 }
@@ -104,8 +118,46 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
     } else {
         i18n::normalize_language_code(&config.language).to_owned()
     };
+    config.device_aliases = normalize_aliases(config.device_aliases);
+    config.pinned_devices = normalize_serial_list(config.pinned_devices);
+    config.recent_connections = normalize_recent_connections(config.recent_connections);
 
     config
+}
+
+fn normalize_aliases(aliases: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut normalized = BTreeMap::new();
+
+    for (serial, alias) in aliases {
+        let serial = serial.trim();
+        let alias = alias.trim();
+        if serial.is_empty() || alias.is_empty() {
+            continue;
+        }
+        normalized.insert(serial.to_owned(), alias.to_owned());
+    }
+
+    normalized
+}
+
+fn normalize_serial_list(values: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() || normalized.iter().any(|existing| existing == value) {
+            continue;
+        }
+        normalized.push(value.to_owned());
+    }
+
+    normalized
+}
+
+fn normalize_recent_connections(values: Vec<String>) -> Vec<String> {
+    let mut normalized = normalize_serial_list(values);
+    normalized.truncate(MAX_RECENT_CONNECTIONS);
+    normalized
 }
 
 fn default_app_log_max_size_mb() -> u32 {
@@ -191,8 +243,11 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_app_log_max_size_mb, is_executable_file};
-    use std::{fs, path::PathBuf};
+    use super::{
+        MAX_RECENT_CONNECTIONS, default_app_log_max_size_mb, is_executable_file, normalize_aliases,
+        normalize_recent_connections, normalize_serial_list,
+    };
+    use std::{collections::BTreeMap, fs, path::PathBuf};
 
     #[test]
     fn detect_adb_path_prefers_existing_candidate() {
@@ -217,5 +272,43 @@ mod tests {
     #[test]
     fn default_app_log_size_is_nonzero() {
         assert_eq!(default_app_log_max_size_mb(), 2);
+    }
+
+    #[test]
+    fn normalize_aliases_discards_empty_entries() {
+        let mut aliases = BTreeMap::new();
+        aliases.insert("serial-1".to_owned(), "Pixel".to_owned());
+        aliases.insert(" ".to_owned(), "ignored".to_owned());
+        aliases.insert("serial-2".to_owned(), "   ".to_owned());
+
+        let normalized = normalize_aliases(aliases);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized.get("serial-1"), Some(&"Pixel".to_owned()));
+    }
+
+    #[test]
+    fn normalize_serial_list_deduplicates_and_trims() {
+        let normalized = normalize_serial_list(vec![
+            " serial-1 ".to_owned(),
+            "serial-1".to_owned(),
+            "".to_owned(),
+            "serial-2".to_owned(),
+        ]);
+
+        assert_eq!(
+            normalized,
+            vec!["serial-1".to_owned(), "serial-2".to_owned()]
+        );
+    }
+
+    #[test]
+    fn normalize_recent_connections_caps_length() {
+        let values: Vec<String> = (0..MAX_RECENT_CONNECTIONS + 3)
+            .map(|index| format!("192.168.0.{index}:5555"))
+            .collect();
+
+        let normalized = normalize_recent_connections(values);
+        assert_eq!(normalized.len(), MAX_RECENT_CONNECTIONS);
+        assert_eq!(normalized[0], "192.168.0.0:5555");
     }
 }

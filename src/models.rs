@@ -53,7 +53,12 @@ pub enum DeviceRunState {
 #[derive(Debug)]
 pub enum AppEvent {
     DevicesRefreshed(Result<Vec<DeviceInfo>, String>),
+    DevicesPolled(Result<Vec<DeviceInfo>, String>),
     LogSizeRefreshed(Result<u64, String>),
+    DeviceConnectFinished {
+        target: String,
+        result: Result<String, String>,
+    },
     CollectionSpawned {
         serial: String,
         output_path: PathBuf,

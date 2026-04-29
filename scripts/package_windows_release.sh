@@ -21,6 +21,7 @@ cargo xwin build --target "$TARGET" --release
 
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR"
+mkdir -p "$PACKAGE_DIR/icons"
 
 cp "$ROOT/target/$TARGET/release/$BUILD_EXE_NAME" "$DIST_DIR/$EXE_NAME"
 cp "$ROOT/target/$TARGET/release/$BUILD_EXE_NAME" "$PACKAGE_DIR/$EXE_NAME"
@@ -29,6 +30,7 @@ cp "$ROOT/README.en.md" "$PACKAGE_DIR/README.en.md"
 cp "$ROOT/CHANGELOG.md" "$PACKAGE_DIR/CHANGELOG.md"
 cp "$ROOT/LICENSE" "$PACKAGE_DIR/LICENSE"
 cp "$ROOT/config.example.json" "$PACKAGE_DIR/config.example.json"
+cp "$ROOT/icons/icon_128.png" "$PACKAGE_DIR/icons/icon_128.png"
 
 rm -f "$DIST_DIR/$ZIP_NAME"
 python3 - "$DIST_DIR" "$ZIP_NAME" "$(basename "$PACKAGE_DIR")" <<'PY'

@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-04-29
+
+### Added
+- GitHub project homepage button in the main window
+- device alias persistence, pinned devices, and recent network connection history in `config.json`
+- direct `adb connect` flow for `IP:port` targets with a recent-connections dialog
+- friendlier device-state labels in the UI
+
+### Changed
+- device logs are now grouped by alias-based directories when an alias is set
+- log file names now use the alias prefix when an alias is available
+- changing a device alias now renames the corresponding historical log directory when possible
+- device ordering now respects pinned devices before the normal name sort
+- the device list now auto-refreshes when ADB device snapshots change
+- device rows now support click-to-select and click-again to clear the selection
+- version bumped to `0.4.0`
+
 ## [0.3.1] - 2026-04-24
 
 ### Changed

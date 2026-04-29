@@ -1,4 +1,8 @@
-# LogcatX
+<p align="center">
+  <img src="icons/icon_128.png" width="128">
+</p>
+
+<h1 align="center">LogcatX</h1>
 
 LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集多台 Android 设备的 `adb logcat` 日志。
 
@@ -14,7 +18,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 
 - 平台：**Windows**
 - 分发方式：**绿色版 zip + 单 exe**
-- 当前里程碑：**v0.3.1**
+- 当前里程碑：**v0.4.0**
 
 ## 核心能力
 
@@ -22,6 +26,11 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 - 双击设备行即可开始采集对应设备的 logcat
 - 支持按设备手动停止采集
 - 支持多设备并行采集
+- 支持设备别名、置顶和最近连接记录
+- 支持直接输入 `IP:端口` 快捷连接设备
+- 支持 USB 设备变化后的自动刷新
+- 支持更清晰的设备状态展示（可用 / 离线 / 未授权 / 已断开）
+- 支持按设备别名生成日志目录与日志文件名前缀
 - 支持配置 `adb` 可执行文件路径和设备日志保存目录
 - 支持刷新设备列表与历史日志占用空间
 - 支持清理历史设备日志，同时保护正在写入的日志
@@ -73,11 +82,11 @@ cargo xwin build --target x86_64-pc-windows-msvc --release
 打包后会生成：
 
 - `dist/LogcatX.exe`
-- `dist/LogcatX-v0.3.1-win64.zip`
+- `dist/LogcatX-v0.4.0-win64.zip`
 
 ## GitHub Release CI
 
-仓库内置了基于 GitHub Actions 的发布流程：当你推送形如 `v0.3.1` 的 tag 到远端时，会自动：
+仓库内置了基于 GitHub Actions 的发布流程：当你推送形如 `v0.4.0` 的 tag 到远端时，会自动：
 
 1. 校验 tag 与 `Cargo.toml` 中的版本号一致
 2. 构建 Windows 发布版
