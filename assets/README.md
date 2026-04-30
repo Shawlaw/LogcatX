@@ -9,6 +9,7 @@
 | `icon_source.png` | 应用图标原始设计稿（1024x1024） |
 | `icon_raw.png` | 图标设计过程中的原始草稿 / 备用版本 |
 | `icon_source_corner_256.png` | 已加圆角的正式应用图标源图，程序图标和 README 展示优先使用它 |
+| `ui_redesign_reference_20260430.png` | 主界面重构参考图（已缩小后纳入项目，供后续 UI 重构对照） |
 
 ## 如何更新图标
 
