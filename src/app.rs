@@ -17,6 +17,9 @@ use std::{
 
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const PROJECT_URL: &str = "https://github.com/Shawlaw/LogcatX";
+const PLATFORM_TOOLS_URL_EN: &str = "https://developer.android.com/tools/releases/platform-tools";
+const PLATFORM_TOOLS_URL_ZH_CN: &str =
+    "https://developer.android.google.cn/tools/releases/platform-tools?hl=zh-cn";
 
 pub struct AppBootstrap {
     pub app_paths: AppPaths,
@@ -345,6 +348,7 @@ impl AdbCollectorApp {
         let alias_label = self.tr("device.alias");
         let display_label = self.tr("device.display_name");
         let serial_label = self.tr("device.serial");
+        let android_version_label = self.tr("device.android_version");
         let state_label = self.tr("device.state");
         let session_label = self.tr("device.session");
         let started_label = self.tr("device.started");
@@ -376,6 +380,11 @@ impl AdbCollectorApp {
                 ui.label(format!("{}: {}", display_label, display_name));
                 ui.label(format!("{}: {}", alias_label, alias_text));
                 ui.label(format!("{}: {}", serial_label, serial));
+                ui.label(format!(
+                    "{}: {}",
+                    android_version_label,
+                    self.device_android_version_text(&device.info)
+                ));
                 ui.horizontal_wrapped(|ui| {
                     ui.label(format!(
                         "{}: {}",
@@ -476,6 +485,7 @@ impl AdbCollectorApp {
         let mut open_output: Option<PathBuf> = None;
         let i18n = self.i18n.clone();
         let serial_text = self.tr("device.column.serial");
+        let android_version_text = self.tr("device.column.android_version");
         let state_text = self.tr("device.column.state");
         let session_text = self.tr("device.column.session");
         let started_text = self.tr("device.column.started");
@@ -493,6 +503,7 @@ impl AdbCollectorApp {
                 .min_col_width(90.0)
                 .show(ui, |ui| {
                     ui.strong(serial_text);
+                    ui.strong(android_version_text);
                     ui.strong(state_text);
                     ui.strong(session_text);
                     ui.strong(started_text);
@@ -503,6 +514,7 @@ impl AdbCollectorApp {
                     for index in 0..self.devices.len() {
                         let serial = self.devices[index].info.serial.clone();
                         let state = self.devices[index].info.state.clone();
+                        let android_version = self.devices[index].info.android_version.clone();
                         let run_state = self.devices[index].run_state.clone();
                         let started_at = self.devices[index].started_at;
                         let output_path = self.devices[index].output_path.clone();
@@ -538,6 +550,10 @@ impl AdbCollectorApp {
                             start_serial = Some(serial.clone());
                         }
 
+                        ui.label(
+                            android_version
+                                .unwrap_or_else(|| self.tr("device.android_version.unknown")),
+                        );
                         ui.colored_label(
                             self.device_state_color(&state),
                             self.device_state_text(&state),
@@ -676,6 +692,14 @@ impl AdbCollectorApp {
                         self.adb_path_input = "adb".to_owned();
                     }
                 });
+                if self.adb_path_input.trim().is_empty() {
+                    ui.add_space(4.0);
+                    ui.small(self.tr("settings.adb.download_hint"));
+                    ui.hyperlink_to(
+                        self.tr("settings.adb.download_link"),
+                        self.adb_download_url(),
+                    );
+                }
 
                 ui.add_space(8.0);
                 ui.label(self.tr("settings.log_dir"));
@@ -738,11 +762,10 @@ impl AdbCollectorApp {
         egui::Window::new(self.tr("clear.title"))
             .collapsible(false)
             .resizable(false)
-            .default_width(360.0)
-            .max_width(360.0)
+            .fixed_size([420.0, 150.0])
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.set_max_width(360.0);
+                ui.set_max_width(420.0);
                 ui.label(self.tr("clear.body"));
                 ui.add_space(12.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -1135,6 +1158,7 @@ impl AdbCollectorApp {
         for info in devices {
             if let Some(mut current) = existing.remove(&info.serial) {
                 current.info.state = info.state;
+                current.info.android_version = info.android_version;
                 merged.push(current);
             } else {
                 merged.push(DeviceEntry::new(info));
@@ -1150,6 +1174,12 @@ impl AdbCollectorApp {
 
         self.devices = merged;
         self.sort_devices();
+    }
+
+    fn device_android_version_text(&self, info: &DeviceInfo) -> String {
+        info.android_version
+            .clone()
+            .unwrap_or_else(|| self.tr("device.android_version.unknown"))
     }
 
     fn persist_config(&mut self) -> Result<(), String> {
@@ -1369,6 +1399,14 @@ impl AdbCollectorApp {
             "unauthorized" => Color32::from_rgb(200, 90, 50),
             "disconnected" => Color32::from_rgb(140, 140, 140),
             _ => Color32::from_rgb(120, 120, 120),
+        }
+    }
+
+    fn adb_download_url(&self) -> &'static str {
+        if self.language_input == "zh-CN" {
+            PLATFORM_TOOLS_URL_ZH_CN
+        } else {
+            PLATFORM_TOOLS_URL_EN
         }
     }
 

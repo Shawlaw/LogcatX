@@ -11,6 +11,8 @@ All notable changes to this project will be documented in this file.
 - device alias persistence, pinned devices, and recent network connection history in `config.json`
 - direct `adb connect` flow for `IP:port` targets with a recent-connections dialog
 - friendlier device-state labels in the UI
+- Android version display in the device list
+- a Google official Platform-Tools download link when ADB is not detected on first launch
 
 ### Changed
 - device logs are now grouped by alias-based directories when an alias is set

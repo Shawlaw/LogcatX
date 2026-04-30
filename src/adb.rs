@@ -42,7 +42,13 @@ pub fn list_devices(adb_path: &str) -> Result<Vec<DeviceInfo>, String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(parse_devices_output(&stdout))
+    let mut devices = parse_devices_output(&stdout);
+    for device in &mut devices {
+        if device.state == "device" {
+            device.android_version = query_android_version(adb_path, &device.serial);
+        }
+    }
+    Ok(devices)
 }
 
 pub fn connect_device(adb_path: &str, target: &str) -> Result<String, String> {
@@ -133,9 +139,56 @@ fn parse_devices_output(stdout: &str) -> Vec<DeviceInfo> {
             Some(DeviceInfo {
                 serial: serial.to_owned(),
                 state: state.to_owned(),
+                android_version: None,
             })
         })
         .collect()
+}
+
+fn query_android_version(adb_path: &str, serial: &str) -> Option<String> {
+    let release_or_codename =
+        adb_shell_getprop(adb_path, serial, "ro.build.version.release_or_codename");
+    let release = adb_shell_getprop(adb_path, serial, "ro.build.version.release");
+
+    match release_or_codename
+        .as_deref()
+        .or(release.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(value) => Some(format_android_version(value)),
+        None => None,
+    }
+}
+
+fn adb_shell_getprop(adb_path: &str, serial: &str, key: &str) -> Option<String> {
+    let output = adb_command(adb_path)
+        .args(["-s", serial, "shell", "getprop", key])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let value = stdout.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+fn format_android_version(version: &str) -> String {
+    let trimmed = version.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else if trimmed.to_ascii_lowercase().starts_with("android ") {
+        trimmed.to_owned()
+    } else {
+        format!("Android {trimmed}")
+    }
 }
 
 fn parse_connect_output(target: &str, output: &std::process::Output) -> Result<String, String> {
@@ -167,7 +220,7 @@ fn parse_connect_output(target: &str, output: &std::process::Output) -> Result<S
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_connect_output, parse_devices_output};
+    use super::{format_android_version, parse_connect_output, parse_devices_output};
     use std::process::Output;
 
     #[test]
@@ -183,8 +236,15 @@ ZY223JQ9K\toffline
         assert_eq!(devices.len(), 3);
         assert_eq!(devices[0].serial, "emulator-5554");
         assert_eq!(devices[0].state, "device");
+        assert_eq!(devices[0].android_version, None);
         assert_eq!(devices[1].state, "offline");
         assert_eq!(devices[2].state, "unauthorized");
+    }
+
+    #[test]
+    fn format_android_version_prefixes_plain_versions() {
+        assert_eq!(format_android_version("14"), "Android 14");
+        assert_eq!(format_android_version("Android 15"), "Android 15");
     }
 
     #[test]

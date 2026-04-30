@@ -11,6 +11,7 @@ pub type SharedChild = Arc<Mutex<Option<Child>>>;
 pub struct DeviceInfo {
     pub serial: String,
     pub state: String,
+    pub android_version: Option<String>,
 }
 
 #[derive(Clone, Debug)]

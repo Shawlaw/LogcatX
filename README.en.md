@@ -26,6 +26,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - save device aliases, pins, and recent connection history
 - connect directly with an `IP:port` endpoint
 - refresh the device list automatically after USB changes
+- show the Android version for each device in the device list
 - show clearer device states such as ready, offline, unauthorized, and disconnected
 - generate both log directories and log file prefixes from the saved alias when available
 - configure the `adb` executable path and the device-log output directory
@@ -63,6 +64,7 @@ The settings dialog supports:
 - opening the config directory directly
 - opening the application runtime log directly
 - showing whether the app is currently running in portable mode or AppData mode
+- showing a Google official Platform-Tools download link when ADB is not detected automatically
 
 ## Configuration example
 
