@@ -411,7 +411,9 @@ impl AdbCollectorApp {
                 ));
                 ui.horizontal(|ui| {
                     ui.label(alias_label.clone());
-                    ui.text_edit_singleline(&mut self.alias_input_value);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.alias_input_value).return_key(None),
+                    );
                     if ui.button(save_alias_text.clone()).clicked() {
                         alias_save_serial = Some(device.info.serial.clone());
                     }
@@ -736,8 +738,11 @@ impl AdbCollectorApp {
         egui::Window::new(self.tr("clear.title"))
             .collapsible(false)
             .resizable(false)
+            .default_width(360.0)
+            .max_width(360.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
+                ui.set_max_width(360.0);
                 ui.label(self.tr("clear.body"));
                 ui.add_space(12.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
