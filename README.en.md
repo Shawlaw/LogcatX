@@ -6,7 +6,9 @@
 
 A small desktop GUI tool for collecting `adb logcat` logs from multiple Android devices in parallel.
 
+- [English Changelog](./CHANGELOG.en.md)
 - [中文 README](./README.md)
+- [中文更新日志](./CHANGELOG.md)
 - [MIT License](./LICENSE)
 
 ## Release target

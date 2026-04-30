@@ -10,6 +10,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 
 - [English README](./README.en.md)
 - [更新日志](./CHANGELOG.md)
+- [English Changelog](./CHANGELOG.en.md)
 - [MIT License](./LICENSE)
 - [配置示例](./config.example.json)
 - [Windows 打包脚本](./scripts/package_windows_release.sh)

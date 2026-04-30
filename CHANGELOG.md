@@ -1,66 +1,68 @@
-# Changelog
+# 更新日志
 
-All notable changes to this project will be documented in this file.
+本文档记录 LogcatX 的重要版本变更。
+
+- English changelog: [`CHANGELOG.en.md`](./CHANGELOG.en.md)
 
 ## [0.4.0] - 2026-04-29
 
-### Added
-- GitHub project homepage button in the main window
-- device alias persistence, pinned devices, and recent network connection history in `config.json`
-- direct `adb connect` flow for `IP:port` targets with a recent-connections dialog
-- friendlier device-state labels in the UI
+### 新增
+- 主界面增加 GitHub 项目主页入口按钮
+- `config.json` 新增设备别名持久化、设备置顶和最近网络连接记录
+- 支持直接输入 `IP:端口` 发起 `adb connect`，并提供最近连接记录弹窗
+- 界面中的设备状态文案更友好
 
-### Changed
-- device logs are now grouped by alias-based directories when an alias is set
-- log file names now use the alias prefix when an alias is available
-- changing a device alias now renames the corresponding historical log directory when possible
-- device ordering now respects pinned devices before the normal name sort
-- the device list now auto-refreshes when ADB device snapshots change
-- device rows now support click-to-select and click-again to clear the selection
-- version bumped to `0.4.0`
+### 变更
+- 设置别名后，设备日志会按别名目录归档
+- 设置别名后，日志文件名前缀也会优先使用别名
+- 修改设备别名时，会在可行情况下自动重命名历史日志目录
+- 设备列表排序现在会优先展示已置顶设备
+- 检测到 ADB 设备快照变化时，设备列表会自动刷新
+- 设备行支持再次点击取消选中
+- 版本号升级为 `0.4.0`
 
 ## [0.3.1] - 2026-04-24
 
-### Changed
-- switched shared desktop infrastructure to the public `DeskFoundry` monorepo GitHub dependencies
-- `desktop-logger`, `desktop-config`, `desktop-i18n`, and `desktop-fs` are now consumed as reusable SDK crates instead of app-local copies
-- version bumped to `0.3.1`
+### 变更
+- 将共享桌面基础设施切换为公开的 `DeskFoundry` monorepo GitHub 依赖
+- `desktop-logger`、`desktop-config`、`desktop-i18n` 和 `desktop-fs` 现在以可复用 SDK crate 的形式使用，不再保留应用内复制版本
+- 版本号升级为 `0.3.1`
 
 ## [0.3.0] - 2026-04-23
 
-### Added
-- MIT license for open-source distribution
-- embedded English and Simplified Chinese UI resources with persisted language selection
-- Chinese README plus English alias document for public repository use
+### 新增
+- 面向开源发布的 MIT License
+- 内置英文与简体中文 UI 资源，并持久化保存语言选择
+- 中文 README 与英文版 README 文档
 
-### Changed
-- project renamed from `adb-logcat-collector` to `LogcatX`
-- version bumped to `0.3.0` for the first public open-source release
-- default Windows release artifacts now use the `LogcatX` product name
-- main window now emphasizes device status and quick actions instead of exposing raw filesystem paths
-- user-facing Windows paths are normalized for display instead of showing `\\?\` verbatim prefixes
+### 变更
+- 项目名称从 `adb-logcat-collector` 更名为 `LogcatX`
+- 作为首个公开开源版本，版本号升级为 `0.3.0`
+- 默认 Windows 发布产物统一使用 `LogcatX` 产品名
+- 主界面更强调设备状态与快捷操作，而不再直接暴露原始文件路径
+- 面向用户显示的 Windows 路径会规范化处理，不再直接显示 `\\?\` 前缀
 
-### Packaging
-- public release output is standardized around `LogcatX.exe` and `LogcatX-v0.3.0-win64.zip`
+### 打包
+- 公开发布产物统一为 `LogcatX.exe` 和 `LogcatX-v0.3.0-win64.zip`
 
-## [0.2.0] - Internal milestone
+## [0.2.0] - 内部里程碑
 
-### Added
-- Windows-first portable release structure
-- portable config resolution (exe directory first, AppData fallback)
-- dedicated application runtime log with panic capture
-- Windows branding resources via `build.rs`, icon assets, and embedded EXE metadata
-- version display, config/app-log shortcuts, and richer device session information in the UI
-- release planning docs under `plans/`
-- release packaging helper script and `cargo xwin` build guidance
-- embedded English and Simplified Chinese UI resources with persisted language selection
+### 新增
+- 面向 Windows 的便携发布结构
+- 便携配置路径解析（优先 exe 目录，其次 AppData）
+- 独立的应用运行日志与 panic 捕获
+- 通过 `build.rs`、图标资源和嵌入式 EXE 元数据完善 Windows 品牌信息
+- 在界面中增加版本显示、配置/应用日志快捷入口，以及更丰富的设备会话信息
+- 在 `plans/` 目录下加入版本规划文档
+- 发布打包脚本与 `cargo xwin` 构建指引
+- 内置英文与简体中文 UI 资源，并持久化保存语言选择
 
-### Changed
-- default project version bumped from `0.1.0` to `0.2.0`
-- Windows builds now default to GUI subsystem mode instead of showing a console window
-- first-run and settings flows now better explain config paths, app logs, and portable mode
-- main window now emphasizes device status and quick actions instead of exposing raw filesystem paths
-- user-facing Windows paths are normalized for display instead of showing `\\?\` verbatim prefixes
+### 变更
+- 默认版本号从 `0.1.0` 升级为 `0.2.0`
+- Windows 构建默认改为 GUI subsystem，不再弹出控制台窗口
+- 首次运行和设置流程更清楚地解释了配置路径、应用日志和便携模式
+- 主界面更强调设备状态与快捷操作，而不再直接暴露原始文件路径
+- 面向用户显示的 Windows 路径会规范化处理，不再直接显示 `\\?\` 前缀
 
-### Packaging
-- release output is standardized around a Windows portable zip containing the exe, README, CHANGELOG, and config example
+### 打包
+- 发布产物统一为一个 Windows 绿色版 zip，内含 exe、README、CHANGELOG 和配置示例
