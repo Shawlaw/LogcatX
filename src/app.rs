@@ -350,36 +350,6 @@ impl AdbCollectorApp {
         }
     }
 
-    fn ui_toolbar(&mut self, ui: &mut egui::Ui) {
-        // Paint title perfectly centered (H+V) using the painter
-        let rect = ui.max_rect();
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            format!("LogcatX v{}", self.version),
-            egui::FontId::new(15.0, egui::FontFamily::Proportional),
-            Color32::from_rgb(38, 44, 56),
-        );
-        // GitHub button: right-aligned, vertically centered via layout
-        ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            let github_button = egui::Button::new(
-                RichText::new(self.tr("toolbar.project_homepage"))
-                    .size(13.0)
-                    .color(Color32::from_rgb(88, 95, 110)),
-            )
-            .fill(Color32::TRANSPARENT)
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(218, 224, 234)))
-            .corner_radius(egui::CornerRadius::same(10))
-            .min_size(egui::vec2(70.0, 28.0));
-            if ui.add(github_button).clicked() {
-                if let Err(err) = fs_utils::open_url(PROJECT_URL) {
-                    self.set_error(err);
-                }
-            }
-        });
-    }
-
     fn ui_sidebar(&mut self, ui: &mut egui::Ui) {
         ui.add_space(2.0);
         egui::Frame::new()
@@ -506,6 +476,20 @@ impl AdbCollectorApp {
         }
 
         ui.with_layout(egui::Layout::bottom_up(Align::LEFT), |ui| {
+            let github_button = egui::Button::new(
+                RichText::new(self.tr("toolbar.project_homepage"))
+                    .size(12.0)
+                    .color(Color32::from_rgb(88, 95, 110)),
+            )
+            .fill(Color32::TRANSPARENT)
+            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(218, 224, 234)))
+            .corner_radius(egui::CornerRadius::same(8))
+            .min_size(egui::vec2(0.0, 26.0));
+            if ui.add(github_button).clicked() {
+                if let Err(err) = fs_utils::open_url(PROJECT_URL) {
+                    self.set_error(err);
+                }
+            }
             ui.add_space(6.0);
             ui.label(
                 RichText::new(format!(
@@ -522,11 +506,12 @@ impl AdbCollectorApp {
                     .color(Color32::from_rgb(51, 162, 94))
                     .strong(),
             );
+            ui.add_space(6.0);
         });
     }
 
     fn ui_overview_cards(&self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        ui.with_layout(egui::Layout::left_to_right(Align::TOP).with_main_wrap(false), |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
             for (title, value, fill, color) in [
                 (
@@ -557,7 +542,7 @@ impl AdbCollectorApp {
                 ),
             ] {
                 ui.allocate_ui_with_layout(
-                    egui::vec2(220.0, 104.0),
+                    egui::vec2(200.0, 0.0),
                     egui::Layout::top_down(Align::LEFT),
                     |ui| self.stat_card(ui, &title, value, fill, color),
                 );
@@ -675,20 +660,29 @@ impl AdbCollectorApp {
     fn ui_main_content(&mut self, ui: &mut egui::Ui) {
         match self.active_page {
             NavigationPage::Devices => {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .scroll_bar_visibility(
-                        egui::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                    )
-                    .show(ui, |ui| {
-                        self.ui_overview_cards(ui);
-                        ui.add_space(14.0);
-                        self.ui_action_row(ui);
-                        ui.add_space(14.0);
-                        self.ui_devices(ui);
-                        ui.add_space(14.0);
-                        self.ui_selected_device(ui);
-                    });
+                let log_height = 120.0;
+                let spacing = 14.0;
+                let upper_height = (ui.available_height() - log_height - spacing).max(80.0);
+
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), upper_height),
+                    egui::Layout::top_down(Align::LEFT),
+                    |ui| {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                self.ui_overview_cards(ui);
+                                ui.add_space(14.0);
+                                self.ui_action_row(ui);
+                                ui.add_space(14.0);
+                                self.ui_devices(ui);
+                                ui.add_space(14.0);
+                                self.ui_selected_device(ui);
+                            });
+                    },
+                );
+                ui.add_space(spacing);
+                self.ui_status_fixed_height(ui);
             }
             NavigationPage::Logs => self.ui_logs_page(ui),
             NavigationPage::LogFiles => self.ui_log_files_page(ui),
@@ -750,7 +744,10 @@ impl AdbCollectorApp {
                 };
 
                 ui.horizontal(|ui| {
-                    let left_width = (ui.available_width() * 0.56).max(520.0);
+                    let right_min = 160.0;
+                    let left_width = (ui.available_width() * 0.56)
+                        .min(ui.available_width() - right_min - 30.0)
+                        .max(280.0);
                     ui.allocate_ui_with_layout(
                         egui::vec2(left_width, 0.0),
                         egui::Layout::top_down(Align::LEFT),
@@ -919,7 +916,10 @@ impl AdbCollectorApp {
                 });
             } else {
                 ui.horizontal(|ui| {
-                    let left_width = (ui.available_width() * 0.56).max(520.0);
+                    let right_min = 160.0;
+                    let left_width = (ui.available_width() * 0.56)
+                        .min(ui.available_width() - right_min - 30.0)
+                        .max(280.0);
                     ui.allocate_ui_with_layout(
                         egui::vec2(left_width, 220.0),
                         egui::Layout::top_down(Align::LEFT),
@@ -1028,6 +1028,7 @@ impl AdbCollectorApp {
 
             egui::ScrollArea::horizontal()
                 .auto_shrink([false, true])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
                 .show(ui, |ui| {
                     ui.set_min_width(total_min_w);
                     // Header row: 12px left indent to align with row frame inner margin
@@ -1392,10 +1393,17 @@ impl AdbCollectorApp {
         });
     }
 
-    fn ui_status(&mut self, ui: &mut egui::Ui) {
-        // Reserve space for card margins (24px) + heading (~26px) + spacing (6px) + bottom gap (10px)
-        let scroll_max = (ui.available_height() - 66.0).max(20.0);
-        self.ui_status_content(ui, Some(scroll_max));
+    fn ui_status_fixed_height(&mut self, ui: &mut egui::Ui) {
+        const STATUS_HEIGHT: f32 = 120.0;
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), STATUS_HEIGHT),
+            egui::Layout::top_down(Align::LEFT),
+            |ui| {
+                // Reserve space for card margins (24px) + heading (~26px) + spacing (6px) + bottom gap (10px)
+                let scroll_max = (ui.available_height() - 66.0).max(20.0);
+                self.ui_status_content(ui, Some(scroll_max));
+            },
+        );
     }
 
     fn ui_status_content(&mut self, ui: &mut egui::Ui, max_height: Option<f32>) {
@@ -2581,10 +2589,9 @@ impl AdbCollectorApp {
         egui::Frame::new()
             .fill(Color32::from_rgb(255, 255, 255))
             .stroke(egui::Stroke::new(1.0, Color32::from_rgb(231, 235, 243)))
-            .corner_radius(egui::CornerRadius::same(16))
-            .inner_margin(egui::Margin::symmetric(16, 12))
+            .corner_radius(egui::CornerRadius::same(12))
+            .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
-                ui.set_min_size(egui::vec2(188.0, 72.0));
                 ui.horizontal(|ui| {
                     egui::Frame::new()
                         .fill(chip_fill)
@@ -2800,37 +2807,6 @@ impl eframe::App for AdbCollectorApp {
         self.handle_events();
         self.poll_devices_if_due();
         self.handle_dropped_files(ctx);
-
-        egui::TopBottomPanel::top("toolbar_panel")
-            .exact_height(40.0)
-            .frame(
-                egui::Frame::new()
-                    .fill(Color32::WHITE)
-                    .inner_margin(egui::Margin::symmetric(12, 1)),
-            )
-            .show_separator_line(false)
-            .show(ctx, |ui| {
-                self.ui_toolbar(ui);
-            });
-
-        if self.active_page == NavigationPage::Devices {
-            egui::TopBottomPanel::bottom("status_panel")
-                .exact_height(134.0)
-                .frame(
-                    egui::Frame::new()
-                        .fill(Color32::from_rgb(250, 248, 244))
-                        .inner_margin(egui::Margin {
-                            left: 12,
-                            right: 12,
-                            top: 8,
-                            bottom: 16,
-                        }),
-                )
-                .show_separator_line(false)
-                .show(ctx, |ui| {
-                    self.ui_status(ui);
-                });
-        }
 
         egui::SidePanel::left("sidebar_panel")
             .exact_width(248.0)
