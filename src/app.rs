@@ -743,11 +743,24 @@ impl AdbCollectorApp {
                         .min_size(egui::vec2(82.0, 34.0))
                 };
 
+                // Determine layout based on available width to prevent overflow.
+                // right_min must accommodate draw_device_visual (~150px) plus separator overhead.
+                let avail = ui.available_width();
+                let sep_overhead = 30.0_f32; // add_space(10) + separator + add_space(10)
+                let right_min = 160.0_f32;
+                let show_right = avail > 280.0 + sep_overhead + right_min;
+                let left_width = if show_right {
+                    (avail * 0.56)
+                        .min(avail - sep_overhead - right_min)
+                        .max(280.0)
+                } else {
+                    avail
+                };
+
+                // Top section: device info grid on the left, device visual on the right.
+                // Alias editor and action buttons are placed below at full card width
+                // to avoid overflowing the narrower left panel column.
                 ui.horizontal(|ui| {
-                    let right_min = 160.0;
-                    let left_width = (ui.available_width() * 0.56)
-                        .min(ui.available_width() - right_min - 30.0)
-                        .max(280.0);
                     ui.allocate_ui_with_layout(
                         egui::vec2(left_width, 0.0),
                         egui::Layout::top_down(Align::LEFT),
@@ -811,115 +824,131 @@ impl AdbCollectorApp {
                                     );
                                     ui.end_row();
                                 });
-
-                            ui.add_space(16.0);
-                            ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
-                                ui.add_sized(
-                                    [72.0, 34.0],
-                                    egui::Label::new(
-                                        RichText::new(alias_label.clone())
-                                            .color(Color32::from_rgb(86, 93, 106)),
-                                    ),
-                                );
-                                ui.add_sized(
-                                    [240.0, 36.0],
-                                    egui::TextEdit::singleline(&mut self.alias_input_value)
-                                        .vertical_align(Align::Center)
-                                        .return_key(None),
-                                );
-                                let primary = egui::Button::new(
-                                    RichText::new(save_alias_text.clone())
-                                        .color(Color32::WHITE)
-                                        .strong(),
-                                )
-                                .fill(Color32::from_rgb(56, 116, 255))
-                                .stroke(egui::Stroke::NONE)
-                                .corner_radius(egui::CornerRadius::same(10))
-                                .min_size(egui::vec2(62.0, 34.0));
-                                if ui.add(primary).clicked() {
-                                    alias_save_serial = Some(device.info.serial.clone());
-                                }
-                                if ui.add(secondary_button(clear_alias_text.clone())).clicked() {
-                                    alias_clear_serial = Some(device.info.serial.clone());
-                                }
-                            });
-
-                            ui.add_space(14.0);
-                            ui.horizontal_wrapped(|ui| {
-                                let pin_button_text = if self.is_pinned_device(&device.info.serial)
-                                {
-                                    unpin_text.clone()
-                                } else {
-                                    pin_text.clone()
-                                };
-                                if ui.add(secondary_button(pin_button_text)).clicked() {
-                                    toggle_pin_serial = Some(device.info.serial.clone());
-                                }
-                                if ui.add(secondary_button(copy_serial_text.clone())).clicked() {
-                                    copy_serial = Some(device.info.serial.clone());
-                                }
-                                if ui
-                                    .add_enabled(
-                                        device.info.state == "device",
-                                        secondary_button(open_shell_text.clone()),
-                                    )
-                                    .clicked()
-                                {
-                                    open_shell_serial = Some(device.info.serial.clone());
-                                }
-                                if adb::is_network_device_serial(&device.info.serial)
-                                    && ui
-                                        .add_enabled(
-                                            self.disconnecting_serial.as_deref()
-                                                != Some(device.info.serial.as_str()),
-                                            secondary_button(disconnect_text.clone()),
-                                        )
-                                        .clicked()
-                                {
-                                    disconnect_serial = Some(device.info.serial.clone());
-                                }
-                                if let Some(path) = &device.output_path {
-                                    if ui.add(secondary_button(open_file_text.clone())).clicked() {
-                                        if let Err(err) = fs_utils::open_path(path) {
-                                            self.set_error(err);
-                                        }
-                                    }
-                                    if let Some(parent) = path.parent() {
-                                        if ui
-                                            .add(secondary_button(open_folder_text.clone()))
-                                            .clicked()
-                                        {
-                                            if let Err(err) = fs_utils::open_path(parent) {
-                                                self.set_error(err);
-                                            }
-                                        }
-                                    }
-                                }
-                            });
                         },
                     );
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::top_down(Align::Center),
-                        |ui| {
-                            draw_device_visual(
-                                ui,
-                                &self.tr("device.status_card.title"),
-                                &self.tr("device.status_card.subtitle"),
-                                device.info.state == "device",
-                            );
-                        },
+                    if show_right {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        ui.allocate_ui_with_layout(
+                            ui.available_size(),
+                            egui::Layout::top_down(Align::Center),
+                            |ui| {
+                                draw_device_visual(
+                                    ui,
+                                    &self.tr("device.status_card.title"),
+                                    &self.tr("device.status_card.subtitle"),
+                                    device.info.state == "device",
+                                );
+                            },
+                        );
+                    }
+                });
+
+                // Alias editor at full card width so it never overflows.
+                ui.add_space(16.0);
+                ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
+                    ui.add_sized(
+                        [72.0, 34.0],
+                        egui::Label::new(
+                            RichText::new(alias_label.clone())
+                                .color(Color32::from_rgb(86, 93, 106)),
+                        ),
                     );
+                    // Give the TextEdit the remaining width after buttons, so it stays
+                    // within the card at any window size.
+                    let btn_total =
+                        62.0 + 82.0 + 2.0 * ui.spacing().item_spacing.x;
+                    let te_width = (ui.available_width() - btn_total).max(60.0);
+                    ui.add_sized(
+                        [te_width, 36.0],
+                        egui::TextEdit::singleline(&mut self.alias_input_value)
+                            .vertical_align(Align::Center)
+                            .return_key(None),
+                    );
+                    let primary = egui::Button::new(
+                        RichText::new(save_alias_text.clone())
+                            .color(Color32::WHITE)
+                            .strong(),
+                    )
+                    .fill(Color32::from_rgb(56, 116, 255))
+                    .stroke(egui::Stroke::NONE)
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .min_size(egui::vec2(62.0, 34.0));
+                    if ui.add(primary).clicked() {
+                        alias_save_serial = Some(device.info.serial.clone());
+                    }
+                    if ui.add(secondary_button(clear_alias_text.clone())).clicked() {
+                        alias_clear_serial = Some(device.info.serial.clone());
+                    }
+                });
+
+                // Action buttons at full card width, wrapping on narrow windows.
+                ui.add_space(14.0);
+                ui.horizontal_wrapped(|ui| {
+                    let pin_button_text = if self.is_pinned_device(&device.info.serial) {
+                        unpin_text.clone()
+                    } else {
+                        pin_text.clone()
+                    };
+                    if ui.add(secondary_button(pin_button_text)).clicked() {
+                        toggle_pin_serial = Some(device.info.serial.clone());
+                    }
+                    if ui.add(secondary_button(copy_serial_text.clone())).clicked() {
+                        copy_serial = Some(device.info.serial.clone());
+                    }
+                    if ui
+                        .add_enabled(
+                            device.info.state == "device",
+                            secondary_button(open_shell_text.clone()),
+                        )
+                        .clicked()
+                    {
+                        open_shell_serial = Some(device.info.serial.clone());
+                    }
+                    if adb::is_network_device_serial(&device.info.serial)
+                        && ui
+                            .add_enabled(
+                                self.disconnecting_serial.as_deref()
+                                    != Some(device.info.serial.as_str()),
+                                secondary_button(disconnect_text.clone()),
+                            )
+                            .clicked()
+                    {
+                        disconnect_serial = Some(device.info.serial.clone());
+                    }
+                    if let Some(path) = &device.output_path {
+                        if ui.add(secondary_button(open_file_text.clone())).clicked() {
+                            if let Err(err) = fs_utils::open_path(path) {
+                                self.set_error(err);
+                            }
+                        }
+                        if let Some(parent) = path.parent() {
+                            if ui
+                                .add(secondary_button(open_folder_text.clone()))
+                                .clicked()
+                            {
+                                if let Err(err) = fs_utils::open_path(parent) {
+                                    self.set_error(err);
+                                }
+                            }
+                        }
+                    }
                 });
             } else {
+                let avail = ui.available_width();
+                let sep_overhead = 30.0_f32;
+                let right_min = 160.0_f32;
+                let show_right = avail > 280.0 + sep_overhead + right_min;
+                let left_width = if show_right {
+                    (avail * 0.56)
+                        .min(avail - sep_overhead - right_min)
+                        .max(280.0)
+                } else {
+                    avail
+                };
+
                 ui.horizontal(|ui| {
-                    let right_min = 160.0;
-                    let left_width = (ui.available_width() * 0.56)
-                        .min(ui.available_width() - right_min - 30.0)
-                        .max(280.0);
                     ui.allocate_ui_with_layout(
                         egui::vec2(left_width, 220.0),
                         egui::Layout::top_down(Align::LEFT),
@@ -933,21 +962,23 @@ impl AdbCollectorApp {
                             );
                         },
                     );
-                    ui.add_space(10.0);
-                    ui.separator();
-                    ui.add_space(10.0);
-                    ui.allocate_ui_with_layout(
-                        ui.available_size(),
-                        egui::Layout::top_down(Align::Center),
-                        |ui| {
-                            draw_device_visual(
-                                ui,
-                                &self.tr("device.status_card.title"),
-                                &self.tr("device.status_card.subtitle"),
-                                false,
-                            );
-                        },
-                    );
+                    if show_right {
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(10.0);
+                        ui.allocate_ui_with_layout(
+                            ui.available_size(),
+                            egui::Layout::top_down(Align::Center),
+                            |ui| {
+                                draw_device_visual(
+                                    ui,
+                                    &self.tr("device.status_card.title"),
+                                    &self.tr("device.status_card.subtitle"),
+                                    false,
+                                );
+                            },
+                        );
+                    }
                 });
             }
         });
