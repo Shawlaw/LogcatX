@@ -661,26 +661,85 @@ impl AdbCollectorApp {
                 let log_height = 120.0;
                 let spacing = 14.0;
                 let upper_height = (ui.available_height() - log_height - spacing).max(80.0);
+                let available_width = ui.available_width();
 
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), upper_height),
-                    egui::Layout::top_down(Align::LEFT),
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                self.ui_overview_cards(ui);
-                                ui.add_space(14.0);
-                                self.ui_action_row(ui);
-                                ui.add_space(14.0);
-                                self.ui_devices(ui);
-                                ui.add_space(14.0);
-                                self.ui_selected_device(ui);
-                            });
-                    },
+                // 上部区域：严格固定高度，超出内容滚动显示
+                let (upper_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(available_width, upper_height),
+                    egui::Sense::hover(),
                 );
+                let mut upper_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(upper_rect)
+                        .layout(egui::Layout::top_down(Align::LEFT)),
+                );
+                upper_ui.set_clip_rect(upper_rect);
+                // 让垂直滚动条不浮动，占据独立空间，避免遮盖内容
+                upper_ui.spacing_mut().scroll.floating = false;
+                egui::ScrollArea::vertical()
+                    .max_height(upper_rect.height())
+                    .auto_shrink([false, false])
+                    .show(&mut upper_ui, |ui| {
+                        // 锁定内容宽度 = 视口宽度 - 滚动条占位，防止卡片被撑宽
+                        let content_width = ui.available_width();
+                        ui.set_min_width(content_width);
+                        ui.set_max_width(content_width);
+                        self.ui_overview_cards(ui);
+                        ui.add_space(14.0);
+                        self.ui_action_row(ui);
+                        ui.add_space(14.0);
+                        self.ui_devices(ui);
+                        ui.add_space(14.0);
+                        self.ui_selected_device(ui);
+                    });
+
                 ui.add_space(spacing);
-                self.ui_status_fixed_height(ui);
+
+                // 下部日志区域：严格固定 120px
+                let (log_rect, _) = ui.allocate_exact_size(
+                    egui::vec2(available_width, log_height),
+                    egui::Sense::hover(),
+                );
+                let mut log_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(log_rect)
+                        .layout(egui::Layout::top_down(Align::LEFT)),
+                );
+                log_ui.set_clip_rect(log_rect);
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(255, 255, 255))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(229, 233, 241)))
+                    .corner_radius(egui::CornerRadius::same(12))
+                    .inner_margin(egui::Margin::symmetric(16, 12))
+                    .show(&mut log_ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.heading(self.tr("status.panel_title"));
+                            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                                if ui.button(self.tr("status.panel_clear")).clicked() {
+                                    self.status = None;
+                                    self.last_error = None;
+                                    self.status_log.clear();
+                                }
+                            });
+                        });
+                        ui.add_space(6.0);
+                        let scroll_height = ui.available_height().max(20.0);
+                        egui::ScrollArea::vertical()
+                            .stick_to_bottom(true)
+                            .max_height(scroll_height)
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                for entry in &self.status_log {
+                                    let color = if entry.is_error {
+                                        Color32::from_rgb(220, 71, 71)
+                                    } else {
+                                        Color32::from_rgb(51, 162, 94)
+                                    };
+                                    ui.colored_label(color, format!("[{}] {}", entry.timestamp, entry.text));
+                                }
+                            });
+                    });
             }
             NavigationPage::Logs => self.ui_logs_page(ui),
             NavigationPage::LogFiles => self.ui_log_files_page(ui),
@@ -759,11 +818,18 @@ impl AdbCollectorApp {
                         .min_size(egui::vec2(82.0, 34.0))
                 };
                 let side_by_side = ui.available_width() >= 560.0;
-                let summary_width = (ui.available_width() - 216.0).max(260.0);
+                let visual_col_w = 216.0;
+                let gutter = 10.0 * 2.0 + ui.spacing().item_spacing.x;
+                let summary_width = (ui.available_width() - visual_col_w - gutter).max(0.0);
+
+                // 提取 alias_input_value 到局部变量，避免闭包借用冲突
+                let mut alias_input_value = std::mem::take(&mut self.alias_input_value);
+                let mut alias_save_serial_local: Option<String> = None;
+                let mut alias_clear_serial_local: Option<String> = None;
 
                 let render_summary = |ui: &mut egui::Ui| {
                     selected_device_text_row(ui, &display_label, display_name);
-                    selected_device_text_row(ui, &alias_label, alias_text);
+                    selected_device_text_row(ui, &alias_label, alias_text.clone());
                     selected_device_text_row(ui, &serial_label, serial.clone());
                     selected_device_text_row(ui, &android_version_label, android_version_text);
                     selected_device_detail_row(ui, &state_label, |ui| {
@@ -778,6 +844,34 @@ impl AdbCollectorApp {
                     selected_device_text_row(ui, &session_label, run_state_text);
                     selected_device_text_row(ui, &started_label, started_at_text);
                     selected_device_text_row(ui, &latest_file_label, latest_file_text);
+
+                    // 别名编辑区（3 行形式：标签、输入框、按钮）
+                    ui.add_space(14.0);
+                    selected_device_detail_row(ui, &alias_label, |ui| {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut alias_input_value)
+                                .vertical_align(Align::Center)
+                                .return_key(None),
+                        );
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        let primary = egui::Button::new(
+                            RichText::new(save_alias_text.clone())
+                                .color(Color32::WHITE)
+                                .strong(),
+                        )
+                        .fill(Color32::from_rgb(56, 116, 255))
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius(egui::CornerRadius::same(10))
+                        .min_size(egui::vec2(62.0, 34.0));
+                        if ui.add(primary).clicked() {
+                            alias_save_serial_local = Some(serial.clone());
+                        }
+                        if ui.add(secondary_button(clear_alias_text.clone())).clicked() {
+                            alias_clear_serial_local = Some(serial.clone());
+                        }
+                    });
                 };
 
                 if side_by_side {
@@ -820,70 +914,10 @@ impl AdbCollectorApp {
                     );
                 }
 
-                ui.add_space(16.0);
-                if ui.available_width() >= 420.0 {
-                    ui.with_layout(egui::Layout::left_to_right(Align::Center), |ui| {
-                        ui.add_sized(
-                            [72.0, 34.0],
-                            egui::Label::new(
-                                RichText::new(alias_label.clone())
-                                    .color(Color32::from_rgb(86, 93, 106)),
-                            ),
-                        );
-                        let button_total = 62.0 + 82.0 + 2.0 * ui.spacing().item_spacing.x;
-                        let text_width = (ui.available_width() - button_total).max(120.0);
-                        ui.add_sized(
-                            [text_width, 36.0],
-                            egui::TextEdit::singleline(&mut self.alias_input_value)
-                                .vertical_align(Align::Center)
-                                .return_key(None),
-                        );
-                        let primary = egui::Button::new(
-                            RichText::new(save_alias_text.clone())
-                                .color(Color32::WHITE)
-                                .strong(),
-                        )
-                        .fill(Color32::from_rgb(56, 116, 255))
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(egui::CornerRadius::same(10))
-                        .min_size(egui::vec2(62.0, 34.0));
-                        if ui.add(primary).clicked() {
-                            alias_save_serial = Some(device.info.serial.clone());
-                        }
-                        if ui.add(secondary_button(clear_alias_text.clone())).clicked() {
-                            alias_clear_serial = Some(device.info.serial.clone());
-                        }
-                    });
-                } else {
-                    ui.label(
-                        RichText::new(alias_label.clone()).color(Color32::from_rgb(86, 93, 106)),
-                    );
-                    ui.add_space(6.0);
-                    ui.add_sized(
-                        [ui.available_width(), 36.0],
-                        egui::TextEdit::singleline(&mut self.alias_input_value)
-                            .vertical_align(Align::Center)
-                            .return_key(None),
-                    );
-                    ui.add_space(10.0);
-                    ui.horizontal_wrapped(|ui| {
-                        let primary = egui::Button::new(
-                            RichText::new(save_alias_text.clone())
-                                .color(Color32::WHITE)
-                                .strong(),
-                        )
-                        .fill(Color32::from_rgb(56, 116, 255))
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(egui::CornerRadius::same(10))
-                        .min_size(egui::vec2(62.0, 34.0));
-                        if ui.add(primary).clicked() {
-                            alias_save_serial = Some(device.info.serial.clone());
-                        }
-                        if ui.add(secondary_button(clear_alias_text.clone())).clicked() {
-                            alias_clear_serial = Some(device.info.serial.clone());
-                        }
-                    });
-                }
+                // 写回 alias 状态
+                self.alias_input_value = alias_input_value;
+                alias_save_serial = alias_save_serial_local;
+                alias_clear_serial = alias_clear_serial_local;
 
                 ui.add_space(14.0);
                 ui.horizontal_wrapped(|ui| {
@@ -1465,19 +1499,6 @@ impl AdbCollectorApp {
             ui.add_space(10.0);
             self.ui_settings_form(ui, true);
         });
-    }
-
-    fn ui_status_fixed_height(&mut self, ui: &mut egui::Ui) {
-        const STATUS_HEIGHT: f32 = 120.0;
-        ui.allocate_ui_with_layout(
-            egui::vec2(ui.available_width(), STATUS_HEIGHT),
-            egui::Layout::top_down(Align::LEFT),
-            |ui| {
-                // Reserve space for card margins (24px) + heading (~26px) + spacing (6px) + bottom gap (10px)
-                let scroll_max = (ui.available_height() - 66.0).max(20.0);
-                self.ui_status_content(ui, Some(scroll_max));
-            },
-        );
     }
 
     fn ui_status_content(&mut self, ui: &mut egui::Ui, max_height: Option<f32>) {
