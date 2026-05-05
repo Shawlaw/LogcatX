@@ -88,14 +88,29 @@ pub struct AdbCollectorApp {
     last_device_poll_at: Option<Instant>,
     last_device_snapshot: Vec<DeviceInfo>,
     last_auto_poll_error: Option<String>,
+    sidebar_icon: Option<egui::TextureHandle>,
 }
 
 impl AdbCollectorApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>, bootstrap: AppBootstrap) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, bootstrap: AppBootstrap) -> Self {
         let config = bootstrap.config;
         let require_initial_setup =
             !bootstrap.config_exists || !config.is_complete() || bootstrap.startup_error.is_some();
         let (tx, rx) = mpsc::channel();
+
+        let sidebar_icon = eframe::icon_data::from_png_bytes(include_bytes!("../icons/icon_128.png"))
+            .ok()
+            .map(|icon_data| {
+                let image = egui::ColorImage::from_rgba_unmultiplied(
+                    [icon_data.width as usize, icon_data.height as usize],
+                    &icon_data.rgba,
+                );
+                cc.egui_ctx.load_texture(
+                    "sidebar_icon",
+                    image,
+                    egui::TextureOptions::LINEAR,
+                )
+            });
 
         let mut app = Self {
             adb_path_input: config.adb_path.clone(),
@@ -131,6 +146,7 @@ impl AdbCollectorApp {
             last_device_poll_at: None,
             last_device_snapshot: Vec::new(),
             last_auto_poll_error: None,
+            sidebar_icon,
         };
         app.language_input = app.config.language.clone();
         app.i18n.set_language(&app.config.language);
@@ -373,10 +389,12 @@ impl AdbCollectorApp {
             .inner_margin(egui::Margin::symmetric(16, 12))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.add(
-                        egui::Image::new(egui::include_image!("../assets/icon_source.png"))
-                            .fit_to_exact_size(egui::vec2(28.0, 28.0)),
-                    );
+                    if let Some(icon) = &self.sidebar_icon {
+                        ui.add(
+                            egui::Image::new(icon)
+                                .fit_to_exact_size(egui::vec2(28.0, 28.0)),
+                        );
+                    }
                     ui.add_space(8.0);
                     ui.label(
                         RichText::new("LogcatX")
