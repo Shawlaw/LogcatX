@@ -22,10 +22,6 @@ impl I18n {
         self.inner.set_language(language);
     }
 
-    pub fn language(&self) -> &str {
-        self.inner.language()
-    }
-
     pub fn tr(&self, key: &str) -> String {
         self.inner.tr(key)
     }

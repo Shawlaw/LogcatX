@@ -1,4 +1,6 @@
 use chrono::Local;
+#[cfg(target_os = "windows")]
+use std::process::Command;
 use std::{
     collections::HashSet,
     fs,
@@ -248,10 +250,75 @@ pub fn open_url(url: &str) -> Result<(), String> {
     }
 }
 
+pub fn open_device_shell(adb_path: &str, serial: &str) -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let terminal_args = build_windows_terminal_shell_args(adb_path, serial);
+        match Command::new("wt").args(&terminal_args).spawn() {
+            Ok(_) => {
+                return Ok(format!(
+                    "Opened a device shell for {serial} in Windows Terminal."
+                ));
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(format!(
+                    "Failed to open Windows Terminal for {serial}: {err}"
+                ));
+            }
+        }
+
+        let powershell_args = build_powershell_shell_args(adb_path, serial);
+        Command::new("powershell")
+            .args(&powershell_args)
+            .spawn()
+            .map_err(|err| format!("Failed to open PowerShell for {serial}: {err}"))?;
+        return Ok(format!("Opened a device shell for {serial} in PowerShell."));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = adb_path;
+        let _ = serial;
+        Err("Opening a device shell is currently supported on Windows only.".to_owned())
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn build_windows_terminal_shell_args(adb_path: &str, serial: &str) -> Vec<String> {
+    let mut args = vec!["new-tab".to_owned(), "powershell".to_owned()];
+    args.extend(build_powershell_shell_args(adb_path, serial));
+    args
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn build_powershell_shell_args(adb_path: &str, serial: &str) -> Vec<String> {
+    vec![
+        "-NoExit".to_owned(),
+        "-Command".to_owned(),
+        build_powershell_shell_command(adb_path, serial),
+    ]
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn build_powershell_shell_command(adb_path: &str, serial: &str) -> String {
+    format!(
+        "& {} -s {} shell",
+        quote_powershell_literal(adb_path),
+        quote_powershell_literal(serial)
+    )
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn quote_powershell_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        device_log_dir, display_path_string, format_bytes, rename_device_log_dir, sanitize_serial,
+        build_powershell_shell_args, build_windows_terminal_shell_args, device_log_dir,
+        display_path_string, format_bytes, rename_device_log_dir, sanitize_serial,
         session_log_path,
     };
     use std::{
@@ -321,5 +388,22 @@ mod tests {
         assert!(!source.exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn powershell_shell_args_quote_adb_path_and_serial() {
+        let args = build_powershell_shell_args(r"C:\Tools\adb.exe", "192.168.0.8:5555");
+        assert_eq!(args[0], "-NoExit");
+        assert_eq!(args[1], "-Command");
+        assert!(args[2].contains("'C:\\Tools\\adb.exe'"));
+        assert!(args[2].contains("'192.168.0.8:5555'"));
+    }
+
+    #[test]
+    fn windows_terminal_shell_args_start_with_new_tab() {
+        let args = build_windows_terminal_shell_args("adb", "serial-1");
+        assert_eq!(args[0], "new-tab");
+        assert_eq!(args[1], "powershell");
+        assert_eq!(args[2], "-NoExit");
     }
 }

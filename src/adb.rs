@@ -2,7 +2,7 @@ use crate::models::DeviceInfo;
 use std::{
     fs::File,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, Command, Output, Stdio},
 };
 
 pub fn validate_adb_path(adb_path: &str) -> Result<(), String> {
@@ -65,6 +65,123 @@ pub fn connect_device(adb_path: &str, target: &str) -> Result<String, String> {
     parse_connect_output(target, &output)
 }
 
+pub fn disconnect_device(adb_path: &str, target: &str) -> Result<String, String> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Err("Device endpoint cannot be empty".to_owned());
+    }
+
+    let output = adb_command(adb_path)
+        .args(["disconnect", target])
+        .output()
+        .map_err(|err| format!("Failed to run `{adb_path} disconnect {target}`: {err}"))?;
+
+    parse_disconnect_output(target, &output)
+}
+
+pub fn restart_server(adb_path: &str) -> Result<String, String> {
+    let kill_output = adb_command(adb_path)
+        .arg("kill-server")
+        .output()
+        .map_err(|err| format!("Failed to run `{adb_path} kill-server`: {err}"))?;
+    if !kill_output.status.success() {
+        return Err(format!(
+            "Failed to stop the ADB server: {}",
+            combined_output(&kill_output).if_empty("unknown error")
+        ));
+    }
+
+    let start_output = adb_command(adb_path)
+        .arg("start-server")
+        .output()
+        .map_err(|err| format!("Failed to run `{adb_path} start-server`: {err}"))?;
+    if !start_output.status.success() {
+        return Err(format!(
+            "Failed to start the ADB server: {}",
+            combined_output(&start_output).if_empty("unknown error")
+        ));
+    }
+
+    let message = [
+        combined_output(&kill_output),
+        combined_output(&start_output),
+    ]
+    .into_iter()
+    .filter(|text| !text.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+    if message.is_empty() {
+        Ok("ADB server restarted.".to_owned())
+    } else {
+        Ok(message)
+    }
+}
+
+pub fn install_apk(adb_path: &str, serial: &str, apk_path: &Path) -> Result<String, String> {
+    let output = adb_command(adb_path)
+        .args(["-s", serial, "install", "-r"])
+        .arg(apk_path)
+        .output()
+        .map_err(|err| {
+            format!(
+                "Failed to run `{adb_path} -s {serial} install -r {}`: {err}",
+                apk_path.display()
+            )
+        })?;
+
+    let combined = combined_output(&output);
+    if output.status.success() {
+        if combined.is_empty() {
+            Ok(format!("Installed {}.", apk_path.display()))
+        } else {
+            Ok(combined)
+        }
+    } else {
+        Err(format!(
+            "Failed to install {} on {serial}: {}",
+            apk_path.display(),
+            combined.if_empty("unknown error")
+        ))
+    }
+}
+
+pub fn push_file(
+    adb_path: &str,
+    serial: &str,
+    source_path: &Path,
+    remote_path: &str,
+) -> Result<String, String> {
+    let output = adb_command(adb_path)
+        .args(["-s", serial, "push"])
+        .arg(source_path)
+        .arg(remote_path)
+        .output()
+        .map_err(|err| {
+            format!(
+                "Failed to run `{adb_path} -s {serial} push {} {remote_path}`: {err}",
+                source_path.display()
+            )
+        })?;
+
+    let combined = combined_output(&output);
+    if output.status.success() {
+        if combined.is_empty() {
+            Ok(format!(
+                "Pushed {} to {remote_path}.",
+                source_path.display()
+            ))
+        } else {
+            Ok(combined)
+        }
+    } else {
+        Err(format!(
+            "Failed to push {} to {remote_path}: {}",
+            source_path.display(),
+            combined.if_empty("unknown error")
+        ))
+    }
+}
+
 pub fn spawn_logcat(adb_path: &str, serial: &str, output_path: &Path) -> Result<Child, String> {
     let parent = output_path
         .parent()
@@ -109,6 +226,14 @@ fn hide_window(command: &mut Command) {
 
 #[cfg(not(target_os = "windows"))]
 fn hide_window(_command: &mut Command) {}
+
+pub fn is_network_device_serial(serial: &str) -> bool {
+    let Some((host, port)) = serial.trim().rsplit_once(':') else {
+        return false;
+    };
+
+    !host.is_empty() && !host.starts_with("emulator-") && port.chars().all(|ch| ch.is_ascii_digit())
+}
 
 trait EmptyStringExt {
     fn if_empty<'a>(&'a self, fallback: &'a str) -> &'a str;
@@ -191,14 +316,18 @@ fn format_android_version(version: &str) -> String {
     }
 }
 
-fn parse_connect_output(target: &str, output: &std::process::Output) -> Result<String, String> {
+fn combined_output(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let combined = [stdout.trim(), stderr.trim()]
+    [stdout.trim(), stderr.trim()]
         .into_iter()
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+fn parse_connect_output(target: &str, output: &Output) -> Result<String, String> {
+    let combined = combined_output(output);
     let lower = combined.to_ascii_lowercase();
 
     if output.status.success()
@@ -218,9 +347,35 @@ fn parse_connect_output(target: &str, output: &std::process::Output) -> Result<S
     }
 }
 
+fn parse_disconnect_output(target: &str, output: &Output) -> Result<String, String> {
+    let combined = combined_output(output);
+    let lower = combined.to_ascii_lowercase();
+
+    if output.status.success()
+        && (lower.contains("disconnected")
+            || lower.contains("no such device")
+            || lower.contains("not connected"))
+    {
+        return Ok(if combined.is_empty() {
+            format!("Disconnected {target}.")
+        } else {
+            combined
+        });
+    }
+
+    if combined.is_empty() {
+        Err(format!("Failed to disconnect {target}: unknown error"))
+    } else {
+        Err(format!("Failed to disconnect {target}: {combined}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{format_android_version, parse_connect_output, parse_devices_output};
+    use super::{
+        format_android_version, is_network_device_serial, parse_connect_output,
+        parse_devices_output, parse_disconnect_output,
+    };
     use std::process::Output;
 
     #[test]
@@ -269,6 +424,39 @@ ZY223JQ9K\toffline
 
         let error = parse_connect_output("192.168.0.8:5555", &output).expect_err("connect error");
         assert!(error.contains("failed to connect"));
+    }
+
+    #[test]
+    fn parse_disconnect_output_accepts_success_and_missing_device() {
+        let success = Output {
+            status: exit_status(0),
+            stdout: b"disconnected 192.168.0.8:5555".to_vec(),
+            stderr: Vec::new(),
+        };
+        let missing = Output {
+            status: exit_status(0),
+            stdout: Vec::new(),
+            stderr: b"no such device '192.168.0.8:5555'".to_vec(),
+        };
+
+        assert!(
+            parse_disconnect_output("192.168.0.8:5555", &success)
+                .expect("disconnect success")
+                .contains("disconnected 192.168.0.8:5555")
+        );
+        assert!(
+            parse_disconnect_output("192.168.0.8:5555", &missing)
+                .expect("already disconnected")
+                .contains("no such device")
+        );
+    }
+
+    #[test]
+    fn network_device_serial_detection_ignores_usb_and_emulators() {
+        assert!(is_network_device_serial("192.168.0.8:5555"));
+        assert!(is_network_device_serial("localhost:5555"));
+        assert!(!is_network_device_serial("emulator-5554"));
+        assert!(!is_network_device_serial("ZY223JQ9K"));
     }
 
     #[cfg(unix)]

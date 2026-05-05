@@ -60,6 +60,15 @@ pub enum AppEvent {
         target: String,
         result: Result<String, String>,
     },
+    DeviceDisconnectFinished {
+        serial: String,
+        result: Result<String, String>,
+    },
+    AdbServerRestartFinished(Result<String, String>),
+    DeviceDropFinished {
+        serial: String,
+        result: Result<String, String>,
+    },
     CollectionSpawned {
         serial: String,
         output_path: PathBuf,

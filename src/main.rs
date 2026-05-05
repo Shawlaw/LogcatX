@@ -47,7 +47,8 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_default();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size([980.0, 680.0])
+            .with_title("LogcatX")
+            .with_inner_size([1280.0, 820.0])
             .with_icon(icon),
         ..Default::default()
     };
@@ -79,6 +80,8 @@ fn install_fonts(ctx: &eframe::egui::Context) {
     use eframe::egui::{FontData, FontDefinitions, FontFamily};
 
     let mut fonts = FontDefinitions::default();
+
+    // Load CJK font for Chinese characters.
     if let Some((font_name, font_data)) = load_cjk_font() {
         fonts
             .font_data
@@ -93,11 +96,43 @@ fn install_fonts(ctx: &eframe::egui::Context) {
             .entry(FontFamily::Monospace)
             .or_default()
             .push(font_name.clone());
-        ctx.set_fonts(fonts);
         log::info!("Loaded CJK UI font: {font_name}");
     } else {
         log::warn!("No CJK-capable system font found; Chinese text may not render correctly");
     }
+
+    // On Windows, load Segoe UI Symbol with highest priority so that Unicode icon
+    // characters (nav icons, symbols) render correctly. CJK fonts ship blank glyphs
+    // for many symbol code-points, which prevents egui from falling back to NotoSans.
+    // Putting a comprehensive symbol font first fixes the empty-box rendering.
+    if let Some((sym_name, sym_data)) = load_symbol_font() {
+        fonts
+            .font_data
+            .insert(sym_name.clone(), FontData::from_owned(sym_data).into());
+        fonts
+            .families
+            .entry(FontFamily::Proportional)
+            .or_default()
+            .insert(0, sym_name.clone());
+        log::info!("Loaded symbol font: {sym_name}");
+    }
+
+    ctx.set_fonts(fonts);
+}
+
+fn load_symbol_font() -> Option<(String, Vec<u8>)> {
+    #[cfg(target_os = "windows")]
+    {
+        let windows_dir = std::env::var_os("WINDIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+        let path = windows_dir.join("Fonts").join("seguisym.ttf");
+        if let Ok(bytes) = std::fs::read(&path) {
+            return Some(("segoe-ui-symbol".to_owned(), bytes));
+        }
+    }
+    let _ = (); // suppress unused warning on non-Windows
+    None
 }
 
 fn load_cjk_font() -> Option<(String, Vec<u8>)> {

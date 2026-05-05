@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.5.0] - 2026-04-30
+
+### Added
+- a redesigned main window with a top toolbar, left-side overview/device detail area, and a focused device list
+- direct device-serial copy actions in both the list and the detail panel
+- direct device-shell launch actions in both the list and the detail panel
+- direct disconnect actions for network devices from the device list
+- a one-click ADB Server restart action in the UI
+- drag-and-drop APK installation onto a target device
+- drag-and-drop file transfer to `/sdcard/Download`
+
+### Changed
+- dropped files now prefer the currently selected device; if none is selected, the app asks for the target device first
+- batch drops can process multiple APKs and regular files in one pass
+- version bumped to `0.5.0`
+
 ## [0.4.0] - 2026-04-29
 
 ### Added

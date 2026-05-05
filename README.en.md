@@ -15,7 +15,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 
 - platform: **Windows**
 - distribution: **portable zip + single exe**
-- current milestone: **v0.4.0**
+- current milestone: **v0.5.0**
 
 ## Core capabilities
 
@@ -28,6 +28,13 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - refresh the device list automatically after USB changes
 - show the Android version for each device in the device list
 - show clearer device states such as ready, offline, unauthorized, and disconnected
+- use a redesigned main window layout with a top toolbar, left-side overview/details, and a focused device list
+- copy a device serial directly from the list or the detail panel
+- open a device shell directly for the selected row or detail panel
+- disconnect network devices directly from the list
+- restart the ADB Server from the UI as a recovery action
+- drag APK files into the window to install them on a device
+- drag regular files into the window to copy them to `/sdcard/Download`
 - generate both log directories and log file prefixes from the saved alias when available
 - configure the `adb` executable path and the device-log output directory
 - refresh device list and historical log size
@@ -85,11 +92,11 @@ cargo xwin build --target x86_64-pc-windows-msvc --release
 This produces:
 
 - `dist/LogcatX.exe`
-- `dist/LogcatX-v0.4.0-win64.zip`
+- `dist/LogcatX-v0.5.0-win64.zip`
 
 ## GitHub Release CI
 
-This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.4.0`, it will:
+This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.5.0`, it will:
 
 1. verify that the tag matches the version in `Cargo.toml`
 2. build the Windows release artifacts
