@@ -1082,7 +1082,7 @@ impl AdbCollectorApp {
             let row_inner_margin: f32 = 12.0 * 2.0;
             let name_col_w =
                 (ui.available_width() - row_inner_margin - col_spacing - fixed_cols).max(180.0);
-            let widths = [name_col_w, 100.0, 90.0, 90.0, 120.0, 140.0, 120.0];
+            let widths = [name_col_w, 120.0, 90.0, 90.0, 140.0, 100.0, 120.0];
             let total_min_w = row_inner_margin + 180.0 + fixed_cols + col_spacing;
 
             egui::ScrollArea::horizontal()
@@ -1095,12 +1095,12 @@ impl AdbCollectorApp {
                         ui.add_space(12.0);
                         for (idx, title) in [
                             serial_text.clone(),
-                            android_version_text.clone(),
-                            state_text.clone(),
-                            session_text.clone(),
-                            started_text.clone(),
-                            output_text.clone(),
                             actions_text.clone(),
+                            session_text.clone(),
+                            state_text.clone(),
+                            output_text.clone(),
+                            android_version_text.clone(),
+                            started_text.clone(),
                         ]
                         .into_iter()
                         .enumerate()
@@ -1205,57 +1205,11 @@ impl AdbCollectorApp {
                                             }
                                         };
 
-                                    centered_cell(
-                                        ui,
-                                        widths[1],
-                                        android_version.unwrap_or_else(|| {
-                                            self.tr("device.android_version.unknown")
-                                        }),
-                                    );
-                                    {
-                                        let (badge_cell_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(widths[2], 44.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        if ui.is_rect_visible(badge_cell_rect) {
-                                            draw_state_badge_centered(
-                                                ui,
-                                                badge_cell_rect,
-                                                &self.device_state_text(&state),
-                                                self.device_state_color(&state),
-                                            );
-                                        }
-                                    }
-                                    centered_cell(
-                                        ui,
-                                        widths[3],
-                                        run_state_text_with(&i18n, &run_state),
-                                    );
-                                    centered_cell(
-                                        ui,
-                                        widths[4],
-                                        started_at
-                                            .map(format_system_time)
-                                            .unwrap_or_else(|| never_text.clone()),
-                                    );
-                                    let output_name = output_path
-                                        .as_ref()
-                                        .map(|path| {
-                                            path.file_name()
-                                                .and_then(|name| name.to_str())
-                                                .map(str::to_owned)
-                                                .unwrap_or_else(|| {
-                                                    path.to_string_lossy().into_owned()
-                                                })
-                                        })
-                                        .unwrap_or_else(|| "-".to_owned());
-                                    centered_cell(ui, widths[5], output_name);
-
                                     // Actions column: vertical centering via top_down(Center) wrapper,
                                     // horizontal centering via narrower group_w allocation for
                                     // Idle/Running states so the button group aligns with the header.
                                     ui.allocate_ui_with_layout(
-                                        egui::vec2(widths[6], 44.0),
+                                        egui::vec2(widths[1], 44.0),
                                         egui::Layout::top_down(Align::Center),
                                         |ui| {
                                             // Vertical center: button height ~30px, cell 44px → pad 7px
@@ -1264,7 +1218,7 @@ impl AdbCollectorApp {
                                             // Idle/Error = Start(52)+gap(10)+More(44) ≈ 106;
                                             // Starting/Running = Stop(56)+gap(10)+More(44) ≈ 110.
                                             let group_w = match &run_state {
-                                                DeviceRunState::Stopping => widths[6],
+                                                DeviceRunState::Stopping => widths[1],
                                                 DeviceRunState::Idle | DeviceRunState::Error(_) => {
                                                     106.0
                                                 }
@@ -1369,6 +1323,51 @@ impl AdbCollectorApp {
                                                 },
                                             );
                                         },
+                                    );
+                                    centered_cell(
+                                        ui,
+                                        widths[2],
+                                        run_state_text_with(&i18n, &run_state),
+                                    );
+                                    {
+                                        let (badge_cell_rect, _) = ui.allocate_exact_size(
+                                            egui::vec2(widths[3], 44.0),
+                                            egui::Sense::hover(),
+                                        );
+                                        if ui.is_rect_visible(badge_cell_rect) {
+                                            draw_state_badge_centered(
+                                                ui,
+                                                badge_cell_rect,
+                                                &self.device_state_text(&state),
+                                                self.device_state_color(&state),
+                                            );
+                                        }
+                                    }
+                                    let output_name = output_path
+                                        .as_ref()
+                                        .map(|path| {
+                                            path.file_name()
+                                                .and_then(|name| name.to_str())
+                                                .map(str::to_owned)
+                                                .unwrap_or_else(|| {
+                                                    path.to_string_lossy().into_owned()
+                                                })
+                                        })
+                                        .unwrap_or_else(|| "-".to_owned());
+                                    centered_cell(ui, widths[4], output_name);
+                                    centered_cell(
+                                        ui,
+                                        widths[5],
+                                        android_version.unwrap_or_else(|| {
+                                            self.tr("device.android_version.unknown")
+                                        }),
+                                    );
+                                    centered_cell(
+                                        ui,
+                                        widths[6],
+                                        started_at
+                                            .map(format_system_time)
+                                            .unwrap_or_else(|| never_text.clone()),
                                     );
                                 });
                             });
