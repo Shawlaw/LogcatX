@@ -1075,14 +1075,14 @@ impl AdbCollectorApp {
             let more_text = self.tr("device.action.more");
             let stopping_text = self.tr("run_state.stopping");
 
-            // Fixed widths for secondary columns (reduced for better fit).
+            // Fixed widths for secondary columns (tightened for better fit).
             // First column is flexible: fills remaining space, min 180 px.
-            let fixed_cols: f32 = 100.0 + 90.0 + 90.0 + 120.0 + 140.0 + 120.0;
-            let col_spacing: f32 = 10.0 * 6.0; // item_spacing.x * gaps
+            let fixed_cols: f32 = 100.0 + 80.0 + 80.0 + 100.0 + 70.0 + 90.0;
+            let col_spacing: f32 = 8.0 * 6.0; // actual item_spacing.x * gaps
             let row_inner_margin: f32 = 12.0 * 2.0;
             let name_col_w =
                 (ui.available_width() - row_inner_margin - col_spacing - fixed_cols).max(180.0);
-            let widths = [name_col_w, 120.0, 90.0, 90.0, 140.0, 100.0, 120.0];
+            let widths = [name_col_w, 100.0, 80.0, 80.0, 100.0, 70.0, 90.0];
             let total_min_w = row_inner_margin + 180.0 + fixed_cols + col_spacing;
 
             egui::ScrollArea::horizontal()
@@ -1354,7 +1354,13 @@ impl AdbCollectorApp {
                                                 })
                                         })
                                         .unwrap_or_else(|| "-".to_owned());
-                                    centered_cell(ui, widths[4], output_name);
+                                    let _ = ui.add_sized(
+                                        [widths[4], 44.0],
+                                        egui::Label::new(
+                                            RichText::new(output_name).size(13.0),
+                                        )
+                                        .truncate(),
+                                    );
                                     centered_cell(
                                         ui,
                                         widths[5],
