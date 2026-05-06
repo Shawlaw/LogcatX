@@ -636,29 +636,19 @@ impl AdbCollectorApp {
     fn ui_main_content(&mut self, ui: &mut egui::Ui) {
         match self.active_page {
             NavigationPage::Devices => {
-                // 上部内容区域：BottomPanel 已从底部扣除日志面板空间，直接使用全部可用高度
-                let available_width = ui.available_width();
-                let upper_height = ui.available_height().max(80.0);
-
-                let (upper_rect, _) = ui.allocate_exact_size(
-                    egui::vec2(available_width, upper_height),
-                    egui::Sense::hover(),
-                );
-                let mut upper_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(upper_rect)
-                        .layout(egui::Layout::top_down(Align::LEFT)),
-                );
-                upper_ui.set_clip_rect(upper_rect);
-                // 让垂直滚动条不浮动，占据独立空间，避免遮盖内容
-                upper_ui.spacing_mut().scroll.floating = false;
+                // BottomPanel 已从底部扣除日志面板空间，CentralPanel 可用高度自动正确
+                // 直接在 CentralPanel 内容区使用 ScrollArea，无需手动 allocate_exact_size
+                ui.spacing_mut().scroll.floating = false;
                 egui::ScrollArea::vertical()
-                    .max_height(upper_rect.height())
                     .auto_shrink([false, false])
-                    .show(&mut upper_ui, |ui| {
-                        let content_width = ui.available_width();
-                        ui.set_min_width(content_width);
-                        ui.set_max_width(content_width);
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.set_max_width(ui.available_width());
+                        // bar_inner_margin 让视口缩窄，但 clip_rect 也同步缩窄，
+                        // 需要右扩一点给描边和圆角抗锯齿留空间
+                        let mut clip = ui.clip_rect();
+                        clip.max.x += 4.0;
+                        ui.set_clip_rect(clip);
                         self.ui_overview_cards(ui);
                         ui.add_space(14.0);
                         self.ui_action_row(ui);
@@ -936,11 +926,18 @@ impl AdbCollectorApp {
                                 self.set_error(err);
                             }
                         }
-                        if let Some(parent) = path.parent() {
-                            if ui.add(secondary_button(open_folder_text.clone())).clicked() {
-                                if let Err(err) = fs_utils::open_path(parent) {
-                                    self.set_error(err);
-                                }
+                    }
+                    {
+                        let device_dir = fs_utils::device_log_dir(
+                            PathBuf::from(self.config.log_dir.as_str()).as_path(),
+                            &device.info.serial,
+                            self.device_alias(&device.info.serial).as_deref(),
+                        );
+                        if device_dir.exists()
+                            && ui.add(secondary_button(open_folder_text.clone())).clicked()
+                        {
+                            if let Err(err) = fs_utils::open_path(&device_dir) {
+                                self.set_error(err);
                             }
                         }
                     }
@@ -1057,6 +1054,7 @@ impl AdbCollectorApp {
             let mut copy_serial: Option<String> = None;
             let mut open_shell_serial: Option<String> = None;
             let mut disconnect_serial: Option<String> = None;
+            let mut toggle_pin_serial: Option<String> = None;
             let i18n = self.i18n.clone();
             let serial_text = self.tr("device.column.serial");
             let android_version_text = self.tr("device.column.android_version");
@@ -1074,6 +1072,9 @@ impl AdbCollectorApp {
             let disconnect_text = self.tr("device.action.disconnect");
             let more_text = self.tr("device.action.more");
             let stopping_text = self.tr("run_state.stopping");
+            let pin_text = self.tr("device.action.pin");
+            let unpin_text = self.tr("device.action.unpin");
+            let open_folder_text = self.tr("device.action.open_folder");
 
             // Fixed widths for secondary columns (tightened for better fit).
             // First column is flexible: fills remaining space, min 180 px.
@@ -1083,15 +1084,9 @@ impl AdbCollectorApp {
             let name_col_w =
                 (ui.available_width() - row_inner_margin - col_spacing - fixed_cols).max(180.0);
             let widths = [name_col_w, 100.0, 80.0, 80.0, 100.0, 70.0, 90.0];
-            let total_min_w = row_inner_margin + 180.0 + fixed_cols + col_spacing;
 
-            egui::ScrollArea::horizontal()
-                .auto_shrink([false, true])
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .show(ui, |ui| {
-                    ui.set_min_width(total_min_w);
-                    // Header row: 12px left indent to align with row frame inner margin
-                    ui.horizontal(|ui| {
+            // Header row: 12px left indent to align with row frame inner margin
+            ui.horizontal(|ui| {
                         ui.add_space(12.0);
                         for (idx, title) in [
                             serial_text.clone(),
@@ -1270,16 +1265,19 @@ impl AdbCollectorApp {
                                                     }
 
                                                     ui.menu_button(&more_text, |ui| {
-                                                        if let Some(path) = &output_path {
-                                                            if ui
-                                                                .add(rounded_secondary(
-                                                                    open_text.clone(),
-                                                                ))
-                                                                .clicked()
-                                                            {
-                                                                open_output = Some(path.clone());
-                                                                ui.close_menu();
-                                                            }
+                                                        let is_pinned = self.is_pinned_device(&serial);
+                                                        let pin_label = if is_pinned {
+                                                            unpin_text.clone()
+                                                        } else {
+                                                            pin_text.clone()
+                                                        };
+                                                        if ui
+                                                            .add(rounded_secondary(pin_label))
+                                                            .clicked()
+                                                        {
+                                                            toggle_pin_serial =
+                                                                Some(serial.clone());
+                                                            ui.close_menu();
                                                         }
                                                         if ui
                                                             .add(rounded_secondary(
@@ -1302,6 +1300,37 @@ impl AdbCollectorApp {
                                                             open_shell_serial =
                                                                 Some(serial.clone());
                                                             ui.close_menu();
+                                                        }
+                                                        if let Some(path) = &output_path {
+                                                            if ui
+                                                                .add(rounded_secondary(
+                                                                    open_text.clone(),
+                                                                ))
+                                                                .clicked()
+                                                            {
+                                                                open_output = Some(path.clone());
+                                                                ui.close_menu();
+                                                            }
+                                                        }
+                                                        {
+                                                            let device_dir = fs_utils::device_log_dir(
+                                                                PathBuf::from(self.config.log_dir.as_str()).as_path(),
+                                                                &serial,
+                                                                self.device_alias(&serial).as_deref(),
+                                                            );
+                                                            if device_dir.exists() && ui
+                                                                .add(rounded_secondary(
+                                                                    open_folder_text.clone(),
+                                                                ))
+                                                                .clicked()
+                                                            {
+                                                                if let Err(err) =
+                                                                    fs_utils::open_path(&device_dir)
+                                                                {
+                                                                    self.set_error(err);
+                                                                }
+                                                                ui.close_menu();
+                                                            }
                                                         }
                                                         if adb::is_network_device_serial(&serial)
                                                             && ui
@@ -1379,7 +1408,6 @@ impl AdbCollectorApp {
                             });
                         ui.add_space(8.0);
                     }
-                }); // end ScrollArea::horizontal
 
             if let Some(serial) = start_serial {
                 self.start_collection(serial);
@@ -1400,6 +1428,9 @@ impl AdbCollectorApp {
             }
             if let Some(serial) = disconnect_serial {
                 self.start_disconnect(serial);
+            }
+            if let Some(serial) = toggle_pin_serial {
+                self.toggle_pinned_device(&serial);
             }
         });
     }
@@ -2755,6 +2786,14 @@ fn apply_visual_style(ctx: &egui::Context) {
     style.spacing.button_padding = egui::vec2(12.0, 7.0);
     style.spacing.item_spacing = egui::vec2(10.0, 10.0);
     style.spacing.scroll.floating = false;
+    style.spacing.scroll.foreground_color = true;
+    style.spacing.scroll.bar_inner_margin = 14.0;
+    style.spacing.scroll.bar_outer_margin = 4.0;
+    // 滚动条 handle 颜色（foreground_color=true 时取 widgets.fg_stroke.color）
+    let scrollbar_handle_color = Color32::from_rgb(212, 216, 227);
+    style.visuals.widgets.inactive.fg_stroke.color = scrollbar_handle_color;
+    style.visuals.widgets.hovered.fg_stroke.color = scrollbar_handle_color;
+    style.visuals.widgets.active.fg_stroke.color = scrollbar_handle_color;
     ctx.set_style(style);
 }
 
