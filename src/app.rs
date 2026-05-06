@@ -628,29 +628,7 @@ impl AdbCollectorApp {
                             self.set_error(err);
                         }
                     }
-                    if ui
-                        .add(secondary_button("⚙", self.tr("toolbar.settings")))
-                        .clicked()
-                    {
-                        if self.require_initial_setup {
-                            self.show_settings = true;
-                        } else {
-                            self.active_page = NavigationPage::Settings;
-                        }
-                    }
-                    let danger = egui::Button::new(
-                        RichText::new(button_label("⌫", self.tr("toolbar.clear_history")))
-                            .color(Color32::from_rgb(230, 85, 77))
-                            .size(13.5)
-                            .strong(),
-                    )
-                    .fill(Color32::from_rgb(255, 244, 243))
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(255, 221, 218)))
-                    .corner_radius(egui::CornerRadius::same(10))
-                    .min_size(egui::vec2(120.0, 38.0));
-                    if ui.add(danger).clicked() {
-                        self.show_clear_confirm = true;
-                    }
+
                 });
             });
     }
@@ -1063,7 +1041,6 @@ impl AdbCollectorApp {
             ui.add_space(10.0);
 
             if self.devices.is_empty() {
-                ui.set_min_height(190.0);
                 ui.add_space(16.0);
                 ui.label(
                     RichText::new(self.tr("devices.empty"))
