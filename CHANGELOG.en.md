@@ -4,10 +4,11 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
-## [0.5.0] - 2026-04-30
+## [0.5.0] - 2026-05-06
 
 ### Added
-- a redesigned main window with a top toolbar, left-side overview/device detail area, and a focused device list
+- a redesigned main window with a left sidebar and a main content area
+- a fixed-height (150px) bottom log panel on the Devices page, independent of the main content scroll area
 - direct device-serial copy actions in both the list and the detail panel
 - direct device-shell launch actions in both the list and the detail panel
 - direct disconnect actions for network devices from the device list
@@ -18,6 +19,11 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - dropped files now prefer the currently selected device; if none is selected, the app asks for the target device first
 - batch drops can process multiple APKs and regular files in one pass
+- removed the top toolbar; moved the GitHub button to the bottom of the sidebar
+- removed "Settings" and "Clear History" buttons from the action row (functions overlap with the sidebar)
+- shrunk overview stat cards for better information density
+- changed device-list horizontal scrollbar to always-hidden; horizontal scrolling is now handled by the mouse wheel
+- empty device-list card now shrinks to fit content instead of reserving a fixed height
 - version bumped to `0.5.0`
 
 ## [0.4.0] - 2026-04-29

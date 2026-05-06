@@ -28,7 +28,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - refresh the device list automatically after USB changes
 - show the Android version for each device in the device list
 - show clearer device states such as ready, offline, unauthorized, and disconnected
-- use a redesigned main window layout with a top toolbar, left-side overview/details, and a focused device list
+- use a redesigned main window layout with a left sidebar, a main content area (overview cards, action buttons, device list, selected device details), and a fixed bottom log panel on the Devices page
 - copy a device serial directly from the list or the detail panel
 - open a device shell directly for the selected row or detail panel
 - disconnect network devices directly from the list
