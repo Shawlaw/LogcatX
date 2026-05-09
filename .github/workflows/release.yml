@@ -53,11 +53,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          TAG_REF="refs/tags/${GITHUB_REF_NAME}"
-          if [[ "$(git cat-file -t "$TAG_REF")" != "tag" ]]; then
-            echo "GitHub Release notes must come from an annotated tag, but ${GITHUB_REF_NAME} is not annotated." >&2
+          TAG_REF="${GITHUB_REF}"
+          if [[ "$TAG_REF" != refs/tags/* ]]; then
+            echo "Expected a tag ref in GITHUB_REF, got '${TAG_REF}'." >&2
             exit 1
           fi
+          TAG_NAME="${TAG_REF#refs/tags/}"
+
+          if ! git show-ref --verify --quiet "$TAG_REF"; then
+            echo "Tag ref '$TAG_REF' was not present locally. Fetching it from origin for validation..."
+            git fetch --no-tags origin "+${TAG_REF}:${TAG_REF}"
+          fi
+
+          TAG_OBJECT_TYPE="$(git cat-file -t "$TAG_REF" 2>/dev/null || true)"
+          TAG_OBJECT_ID="$(git rev-parse -q --verify "${TAG_REF}^{tag}" 2>/dev/null || true)"
+          TAG_COMMIT_ID="$(git rev-parse -q --verify "${TAG_REF}^{commit}" 2>/dev/null || true)"
+          if [[ -z "$TAG_OBJECT_ID" ]]; then
+            echo "GitHub Release notes must come from an annotated tag, but '${TAG_NAME}' is not annotated." >&2
+            echo "Debug: ref=${TAG_REF}, object_type=${TAG_OBJECT_TYPE:-<missing>}, commit=${TAG_COMMIT_ID:-<missing>}" >&2
+            echo "Hint: create and push an annotated tag: git tag -a ${TAG_NAME} -m \"Release ${TAG_NAME}\" && git push origin ${TAG_NAME}" >&2
+            exit 1
+          fi
+
+          echo "Validated annotated tag '${TAG_NAME}': tag_object=${TAG_OBJECT_ID}, commit=${TAG_COMMIT_ID}"
           {
             echo "body<<EOF"
             git for-each-ref "$TAG_REF" --format='%(contents)'
