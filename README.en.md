@@ -17,6 +17,15 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - distribution: **portable zip + single exe**
 - current milestone: **v0.5.1**
 
+## Screenshots
+
+These screenshots are from the `v0.5.1` Windows build and show the Devices page and the Settings page.
+
+<p align="center">
+  <img src="assets/screenshots/readme-en-devices.png" alt="LogcatX English Devices page screenshot" width="49%">
+  <img src="assets/screenshots/readme-en-settings.png" alt="LogcatX English Settings page screenshot" width="49%">
+</p>
+
 ## Core capabilities
 
 - show currently connected ADB devices in the main window
@@ -24,13 +33,17 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - stop collection manually per device
 - collect from multiple devices in parallel
 - save device aliases, pins, and recent connection history
+- resolve the default device title as **alias > manufacturer + model > serial**
+- merge USB and Wi-Fi ADB transports for the same physical device and prefer USB when both are available
 - connect directly with an `IP:port` endpoint
 - refresh the device list automatically after USB changes
 - show the Android version for each device in the device list
 - show clearer device states such as ready, offline, unauthorized, and disconnected
-- use a redesigned main window layout with a left sidebar, a main content area (overview cards, action buttons, device list, selected device details), and a fixed bottom log panel on the Devices page
-- copy a device serial directly from the list or the detail panel
-- open a device shell directly for the selected row or detail panel
+- use a redesigned main window layout with a left sidebar, a main content area (overview cards, action buttons, and device list), and a fixed bottom log panel on the Devices page
+- copy a device serial directly from the device-row menu
+- open a device shell directly from the device-row menu
+- edit aliases, pin devices, and open the device log folder from the device-row menu
+- inspect the current foreground app and run force-stop, clear-data, or uninstall shortcuts from the device-row menu
 - disconnect network devices directly from the list
 - restart the ADB Server from the UI as a recovery action
 - drag APK files into the window to install them on a device
