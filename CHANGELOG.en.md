@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.5.1] - 2026-05-09
+
+### Added
+- a new default device-name rule: alias > manufacturer + model > serial
+- current foreground-app detection directly from the device list
+- foreground-app quick actions for force-stop, clear data, and uninstall
+- confirmation dialogs for destructive foreground-app actions
+- automatic grouping of USB and Wi-Fi ADB transports that belong to the same physical device
+
+### Changed
+- removed the dedicated "Selected device" detail panel to further simplify the Devices page
+- moved device-alias editing into the device-row `More` menu
+- updated the device-list hint to emphasize row selection as the default drop target plus `More` for device actions
+- when the same device is available over both USB and Wi-Fi, the device list now prefers the USB transport
+- version bumped to `0.5.1`
+
 ## [0.5.0] - 2026-05-06
 
 ### Added

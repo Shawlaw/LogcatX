@@ -3,7 +3,10 @@ use crate::{
     config::{self, AppConfig, AppPaths},
     fs_utils,
     i18n::I18n,
-    models::{AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, SharedChild, StatusMessage},
+    models::{
+        AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, ForegroundApp, ForegroundAppAction,
+        SharedChild, StatusMessage,
+    },
 };
 use eframe::egui::{self, Align, Color32, RichText};
 use rfd::FileDialog;
@@ -36,6 +39,13 @@ impl DroppedPayload {
     fn total_count(&self) -> usize {
         self.apk_paths.len() + self.file_paths.len()
     }
+}
+
+#[derive(Clone, Debug)]
+struct PendingForegroundConfirm {
+    serial: String,
+    action: ForegroundAppAction,
+    app: ForegroundApp,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +82,7 @@ pub struct AdbCollectorApp {
     require_initial_setup: bool,
     active_page: NavigationPage,
     show_clear_confirm: bool,
+    show_alias_dialog: bool,
     show_connect_dialog: bool,
     selected_serial: Option<String>,
     version: String,
@@ -83,7 +94,10 @@ pub struct AdbCollectorApp {
     alias_input_value: String,
     pending_drop_payload: Option<DroppedPayload>,
     pending_drop_target_serial: Option<String>,
+    pending_foreground_confirm: Option<PendingForegroundConfirm>,
     drop_task_in_progress: bool,
+    foreground_task_in_progress: bool,
+    devices_page_has_vertical_scroll: bool,
     device_poll_in_flight: bool,
     last_device_poll_at: Option<Instant>,
     last_device_snapshot: Vec<DeviceInfo>,
@@ -128,6 +142,7 @@ impl AdbCollectorApp {
             require_initial_setup,
             active_page: NavigationPage::Devices,
             show_clear_confirm: false,
+            show_alias_dialog: false,
             show_connect_dialog: false,
             selected_serial: None,
             version: bootstrap.version.to_owned(),
@@ -139,7 +154,10 @@ impl AdbCollectorApp {
             alias_input_value: String::new(),
             pending_drop_payload: None,
             pending_drop_target_serial: None,
+            pending_foreground_confirm: None,
             drop_task_in_progress: false,
+            foreground_task_in_progress: false,
+            devices_page_has_vertical_scroll: false,
             device_poll_in_flight: false,
             last_device_poll_at: None,
             last_device_snapshot: Vec::new(),
@@ -264,6 +282,71 @@ impl AdbCollectorApp {
                                 ("message", message),
                             ],
                         )),
+                        Err(err) => self.set_error(err),
+                    }
+                }
+                AppEvent::ForegroundAppResolved {
+                    serial,
+                    action,
+                    result,
+                } => {
+                    self.foreground_task_in_progress = false;
+                    match result {
+                        Ok(app) => match action {
+                            ForegroundAppAction::Inspect => self.set_info(self.tr_args(
+                                "status.foreground_app_inspected",
+                                &[
+                                    ("serial", self.device_identity_label(&serial)),
+                                    ("app", self.foreground_app_label(&app)),
+                                ],
+                            )),
+                            ForegroundAppAction::ForceStop => {
+                                self.start_foreground_app_execution(serial, action, app);
+                            }
+                            ForegroundAppAction::ClearData | ForegroundAppAction::Uninstall => {
+                                self.pending_foreground_confirm = Some(PendingForegroundConfirm {
+                                    serial,
+                                    action,
+                                    app,
+                                });
+                            }
+                        },
+                        Err(err) => self.set_error(err),
+                    }
+                }
+                AppEvent::ForegroundAppActionFinished {
+                    serial,
+                    action,
+                    app,
+                    result,
+                } => {
+                    self.foreground_task_in_progress = false;
+                    match result {
+                        Ok(message) => {
+                            let status_key = match action {
+                                ForegroundAppAction::ForceStop => {
+                                    "status.foreground_app_force_stopped"
+                                }
+                                ForegroundAppAction::ClearData => {
+                                    "status.foreground_app_data_cleared"
+                                }
+                                ForegroundAppAction::Uninstall => {
+                                    "status.foreground_app_uninstalled"
+                                }
+                                ForegroundAppAction::Inspect => "status.foreground_app_inspected",
+                            };
+                            self.set_info(self.tr_args(
+                                status_key,
+                                &[
+                                    ("serial", self.device_identity_label(&serial)),
+                                    ("app", self.foreground_app_label(&app)),
+                                    ("message", message),
+                                ],
+                            ));
+                            if matches!(action, ForegroundAppAction::Uninstall) {
+                                self.refresh_devices();
+                            }
+                        }
                         Err(err) => self.set_error(err),
                     }
                 }
@@ -628,7 +711,6 @@ impl AdbCollectorApp {
                             self.set_error(err);
                         }
                     }
-
                 });
             });
     }
@@ -639,11 +721,17 @@ impl AdbCollectorApp {
                 // BottomPanel 已从底部扣除日志面板空间，CentralPanel 可用高度自动正确
                 // 直接在 CentralPanel 内容区使用 ScrollArea，无需手动 allocate_exact_size
                 ui.spacing_mut().scroll.floating = false;
-                egui::ScrollArea::vertical()
+                let scrollbar_gutter = if self.devices_page_has_vertical_scroll {
+                    0.0
+                } else {
+                    ui.spacing().scroll.allocated_width()
+                };
+                let output = egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ui.set_max_width(ui.available_width());
+                    .show_viewport(ui, |ui, _viewport| {
+                        let full_width = ui.available_width();
+                        ui.set_min_width(full_width);
+                        ui.set_max_width(full_width);
                         // bar_inner_margin 让视口缩窄，但 clip_rect 也同步缩窄，
                         // 需要右扩一点给描边和圆角抗锯齿留空间
                         let mut clip = ui.clip_rect();
@@ -653,10 +741,29 @@ impl AdbCollectorApp {
                         ui.add_space(14.0);
                         self.ui_action_row(ui);
                         ui.add_space(14.0);
-                        self.ui_devices(ui);
-                        ui.add_space(14.0);
-                        self.ui_selected_device(ui);
+
+                        let devices_width = content_view_width(full_width, scrollbar_gutter);
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(full_width, 0.0),
+                            egui::Layout::left_to_right(Align::Min),
+                            |ui| {
+                                ui.allocate_ui_with_layout(
+                                    egui::vec2(devices_width, 0.0),
+                                    egui::Layout::top_down(Align::LEFT),
+                                    |ui| {
+                                        ui.set_min_width(devices_width);
+                                        ui.set_max_width(devices_width);
+                                        self.ui_devices(ui);
+                                    },
+                                );
+                                if scrollbar_gutter > 0.0 {
+                                    ui.add_space(scrollbar_gutter);
+                                }
+                            },
+                        );
                     });
+                self.devices_page_has_vertical_scroll =
+                    output.content_size.y > output.inner_rect.height() + 0.5;
             }
             NavigationPage::Logs => self.ui_logs_page(ui),
             NavigationPage::LogFiles => self.ui_log_files_page(ui),
@@ -707,326 +814,9 @@ impl AdbCollectorApp {
                     } else {
                         Color32::from_rgb(51, 162, 94)
                     };
-                    ui.colored_label(
-                        color,
-                        format!("[{}] {}", entry.timestamp, entry.text),
-                    );
+                    ui.colored_label(color, format!("[{}] {}", entry.timestamp, entry.text));
                 }
             });
-    }
-
-    fn ui_selected_device(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let selected = self
-            .selected_serial
-            .as_deref()
-            .and_then(|serial| self.find_device(serial).cloned());
-        let heading = self.tr("device.selected");
-        let alias_label = self.tr("device.alias");
-        let display_label = self.tr("device.display_name");
-        let serial_label = self.tr("device.serial");
-        let android_version_label = self.tr("device.android_version");
-        let state_label = self.tr("device.state");
-        let session_label = self.tr("device.session");
-        let started_label = self.tr("device.started");
-        let latest_file_label = self.tr("device.latest_file");
-        let never_text = self.tr("misc.never");
-        let no_file_text = self.tr("device.no_file");
-        let open_file_text = self.tr("device.action.open_file");
-        let open_folder_text = self.tr("device.action.open_folder");
-        let save_alias_text = self.tr("device.action.save_alias");
-        let clear_alias_text = self.tr("device.action.clear_alias");
-        let pin_text = self.tr("device.action.pin");
-        let unpin_text = self.tr("device.action.unpin");
-        let copy_serial_text = self.tr("device.action.copy_serial");
-        let open_shell_text = self.tr("device.action.open_shell");
-        let disconnect_text = self.tr("device.action.disconnect");
-        let none_selected_text = self.tr("device.none_selected");
-        let pinned_text = self.tr("device.pinned");
-        let mut alias_save_serial = None;
-        let mut alias_clear_serial = None;
-        let mut toggle_pin_serial = None;
-        let mut copy_serial = None;
-        let mut open_shell_serial = None;
-        let mut disconnect_serial = None;
-
-        content_card_frame().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.heading(heading);
-            ui.add_space(12.0);
-
-            if let Some(device) = selected {
-                let serial = device.info.serial.clone();
-                self.sync_alias_editor(&serial);
-                let display_name = self.device_identity_label(&serial);
-                let alias_text = self
-                    .device_alias(&serial)
-                    .unwrap_or_else(|| self.tr("device.alias.empty"));
-                let android_version_text = self.device_android_version_text(&device.info);
-                let run_state_text = self.run_state_text(&device.run_state);
-                let started_at_text = device
-                    .started_at
-                    .map(format_system_time)
-                    .unwrap_or_else(|| never_text.clone());
-                let latest_file_text = device
-                    .output_path
-                    .as_ref()
-                    .and_then(|path| path.file_name().and_then(|name| name.to_str()))
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| no_file_text.clone());
-                let state_text_value = self.device_state_text(&device.info.state);
-                let state_color = self.device_state_color(&device.info.state);
-                let is_pinned = self.is_pinned_device(&device.info.serial);
-                let visual_ready = device.info.state == "device";
-                let status_card_title = self.tr("device.status_card.title");
-                let status_card_subtitle = self.tr("device.status_card.subtitle");
-                let secondary_button = |text: String| {
-                    egui::Button::new(text)
-                        .corner_radius(egui::CornerRadius::same(10))
-                        .min_size(egui::vec2(82.0, 34.0))
-                };
-                let side_by_side = ui.available_width() >= 560.0;
-                let visual_col_w = 216.0;
-                let gutter = 10.0 * 2.0 + ui.spacing().item_spacing.x;
-                let summary_width = (ui.available_width() - visual_col_w - gutter).max(0.0);
-
-                // 提取 alias_input_value 到局部变量，避免闭包借用冲突
-                let mut alias_input_value = std::mem::take(&mut self.alias_input_value);
-                let mut alias_save_serial_local: Option<String> = None;
-                let mut alias_clear_serial_local: Option<String> = None;
-
-                let render_summary = |ui: &mut egui::Ui| {
-                    selected_device_text_row(ui, &display_label, display_name);
-                    selected_device_text_row(ui, &alias_label, alias_text.clone());
-                    selected_device_text_row(ui, &serial_label, serial.clone());
-                    selected_device_text_row(ui, &android_version_label, android_version_text);
-                    selected_device_detail_row(ui, &state_label, |ui| {
-                        ui.horizontal_wrapped(|ui| {
-                            draw_state_badge(ui, &state_text_value, state_color);
-                            if is_pinned {
-                                ui.small(RichText::new(pinned_text.clone()).strong());
-                            }
-                        });
-                    });
-                    ui.add_space(12.0);
-                    selected_device_text_row(ui, &session_label, run_state_text);
-                    selected_device_text_row(ui, &started_label, started_at_text);
-                    selected_device_text_row(ui, &latest_file_label, latest_file_text);
-
-                    // 别名编辑区（3 行形式：标签、输入框、按钮）
-                    ui.add_space(14.0);
-                    selected_device_detail_row(ui, &alias_label, |ui| {
-                        ui.add(
-                            egui::TextEdit::singleline(&mut alias_input_value)
-                                .vertical_align(Align::Center)
-                                .return_key(None),
-                        );
-                    });
-                    ui.add_space(6.0);
-                    ui.horizontal_wrapped(|ui| {
-                        let primary = egui::Button::new(
-                            RichText::new(save_alias_text.clone())
-                                .color(Color32::WHITE)
-                                .strong(),
-                        )
-                        .fill(Color32::from_rgb(56, 116, 255))
-                        .stroke(egui::Stroke::NONE)
-                        .corner_radius(egui::CornerRadius::same(10))
-                        .min_size(egui::vec2(62.0, 34.0));
-                        if ui.add(primary).clicked() {
-                            alias_save_serial_local = Some(serial.clone());
-                        }
-                        if ui.add(secondary_button(clear_alias_text.clone())).clicked() {
-                            alias_clear_serial_local = Some(serial.clone());
-                        }
-                    });
-                };
-
-                if side_by_side {
-                    ui.horizontal_top(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(summary_width, 0.0),
-                            egui::Layout::top_down(Align::LEFT),
-                            render_summary,
-                        );
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(10.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width().max(0.0), 0.0),
-                            egui::Layout::top_down(Align::Center),
-                            |ui| {
-                                draw_device_visual(
-                                    ui,
-                                    &status_card_title,
-                                    &status_card_subtitle,
-                                    visual_ready,
-                                );
-                            },
-                        );
-                    });
-                } else {
-                    render_summary(ui);
-                    ui.add_space(16.0);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 0.0),
-                        egui::Layout::top_down(Align::Center),
-                        |ui| {
-                            draw_device_visual(
-                                ui,
-                                &status_card_title,
-                                &status_card_subtitle,
-                                visual_ready,
-                            );
-                        },
-                    );
-                }
-
-                // 写回 alias 状态
-                self.alias_input_value = alias_input_value;
-                alias_save_serial = alias_save_serial_local;
-                alias_clear_serial = alias_clear_serial_local;
-
-                ui.add_space(14.0);
-                ui.horizontal_wrapped(|ui| {
-                    let pin_button_text = if self.is_pinned_device(&device.info.serial) {
-                        unpin_text.clone()
-                    } else {
-                        pin_text.clone()
-                    };
-                    if ui.add(secondary_button(pin_button_text)).clicked() {
-                        toggle_pin_serial = Some(device.info.serial.clone());
-                    }
-                    if ui.add(secondary_button(copy_serial_text.clone())).clicked() {
-                        copy_serial = Some(device.info.serial.clone());
-                    }
-                    if ui
-                        .add_enabled(
-                            device.info.state == "device",
-                            secondary_button(open_shell_text.clone()),
-                        )
-                        .clicked()
-                    {
-                        open_shell_serial = Some(device.info.serial.clone());
-                    }
-                    if adb::is_network_device_serial(&device.info.serial)
-                        && ui
-                            .add_enabled(
-                                self.disconnecting_serial.as_deref()
-                                    != Some(device.info.serial.as_str()),
-                                secondary_button(disconnect_text.clone()),
-                            )
-                            .clicked()
-                    {
-                        disconnect_serial = Some(device.info.serial.clone());
-                    }
-                    if let Some(path) = &device.output_path {
-                        if ui.add(secondary_button(open_file_text.clone())).clicked() {
-                            if let Err(err) = fs_utils::open_path(path) {
-                                self.set_error(err);
-                            }
-                        }
-                    }
-                    {
-                        let device_dir = fs_utils::device_log_dir(
-                            PathBuf::from(self.config.log_dir.as_str()).as_path(),
-                            &device.info.serial,
-                            self.device_alias(&device.info.serial).as_deref(),
-                        );
-                        if device_dir.exists()
-                            && ui.add(secondary_button(open_folder_text.clone())).clicked()
-                        {
-                            if let Err(err) = fs_utils::open_path(&device_dir) {
-                                self.set_error(err);
-                            }
-                        }
-                    }
-                });
-            } else {
-                let side_by_side = ui.available_width() >= 560.0;
-                let summary_width = (ui.available_width() - 216.0).max(260.0);
-                let status_card_title = self.tr("device.status_card.title");
-                let status_card_subtitle = self.tr("device.status_card.subtitle");
-
-                if side_by_side {
-                    ui.horizontal_top(|ui| {
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(summary_width, 220.0),
-                            egui::Layout::top_down(Align::LEFT),
-                            |ui| {
-                                ui.add_space(34.0);
-                                ui.add(
-                                    egui::Label::new(
-                                        RichText::new(none_selected_text.clone())
-                                            .size(16.0)
-                                            .strong()
-                                            .color(Color32::from_rgb(54, 60, 72)),
-                                    )
-                                    .wrap(),
-                                );
-                            },
-                        );
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(10.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width().max(0.0), 0.0),
-                            egui::Layout::top_down(Align::Center),
-                            |ui| {
-                                draw_device_visual(
-                                    ui,
-                                    &status_card_title,
-                                    &status_card_subtitle,
-                                    false,
-                                );
-                            },
-                        );
-                    });
-                } else {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(none_selected_text)
-                                .size(16.0)
-                                .strong()
-                                .color(Color32::from_rgb(54, 60, 72)),
-                        )
-                        .wrap(),
-                    );
-                    ui.add_space(16.0);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), 0.0),
-                        egui::Layout::top_down(Align::Center),
-                        |ui| {
-                            draw_device_visual(
-                                ui,
-                                &status_card_title,
-                                &status_card_subtitle,
-                                false,
-                            );
-                        },
-                    );
-                }
-            }
-        });
-
-        if let Some(serial) = alias_save_serial {
-            self.save_device_alias(&serial, self.alias_input_value.clone());
-        }
-        if let Some(serial) = alias_clear_serial {
-            self.save_device_alias(&serial, String::new());
-        }
-        if let Some(serial) = toggle_pin_serial {
-            self.toggle_pinned_device(&serial);
-        }
-        if let Some(serial) = copy_serial {
-            self.copy_serial_to_clipboard(&ctx, serial);
-        }
-        if let Some(serial) = open_shell_serial {
-            self.open_device_shell(serial);
-        }
-        if let Some(serial) = disconnect_serial {
-            self.start_disconnect(serial);
-        }
     }
 
     fn ui_devices(&mut self, ui: &mut egui::Ui) {
@@ -1055,6 +845,8 @@ impl AdbCollectorApp {
             let mut open_shell_serial: Option<String> = None;
             let mut disconnect_serial: Option<String> = None;
             let mut toggle_pin_serial: Option<String> = None;
+            let mut open_alias_serial: Option<String> = None;
+            let mut foreground_action: Option<(String, ForegroundAppAction)> = None;
             let i18n = self.i18n.clone();
             let serial_text = self.tr("device.column.serial");
             let android_version_text = self.tr("device.column.android_version");
@@ -1074,7 +866,12 @@ impl AdbCollectorApp {
             let stopping_text = self.tr("run_state.stopping");
             let pin_text = self.tr("device.action.pin");
             let unpin_text = self.tr("device.action.unpin");
+            let edit_alias_text = self.tr("device.action.edit_alias");
             let open_folder_text = self.tr("device.action.open_folder");
+            let inspect_foreground_app_text = self.tr("device.action.inspect_foreground_app");
+            let stop_foreground_app_text = self.tr("device.action.stop_foreground_app");
+            let clear_foreground_app_data_text = self.tr("device.action.clear_foreground_app_data");
+            let uninstall_foreground_app_text = self.tr("device.action.uninstall_foreground_app");
 
             // Fixed widths for secondary columns (tightened for better fit).
             // First column is flexible: fills remaining space, min 180 px.
@@ -1087,327 +884,361 @@ impl AdbCollectorApp {
 
             // Header row: 12px left indent to align with row frame inner margin
             ui.horizontal(|ui| {
-                        ui.add_space(12.0);
-                        for (idx, title) in [
-                            serial_text.clone(),
-                            actions_text.clone(),
-                            session_text.clone(),
-                            state_text.clone(),
-                            output_text.clone(),
-                            android_version_text.clone(),
-                            started_text.clone(),
-                        ]
-                        .into_iter()
-                        .enumerate()
-                        {
+                ui.add_space(12.0);
+                for (idx, title) in [
+                    serial_text.clone(),
+                    actions_text.clone(),
+                    session_text.clone(),
+                    state_text.clone(),
+                    output_text.clone(),
+                    android_version_text.clone(),
+                    started_text.clone(),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(widths[idx], 24.0),
+                        egui::Layout::top_down(Align::Center),
+                        |ui| {
+                            ui.label(
+                                RichText::new(title)
+                                    .strong()
+                                    .color(Color32::from_rgb(89, 96, 110)),
+                            );
+                        },
+                    );
+                }
+            }); // end horizontal header
+            ui.add_space(8.0);
+
+            let rounded_secondary = |text: String| {
+                egui::Button::new(text)
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .min_size(egui::vec2(56.0, 30.0))
+            };
+            for index in 0..self.devices.len() {
+                let serial = self.devices[index].info.serial.clone();
+                let device_id = self.devices[index].info.identity_key.clone();
+                let state = self.devices[index].info.state.clone();
+                let android_version = self.devices[index].info.android_version.clone();
+                let run_state = self.devices[index].run_state.clone();
+                let started_at = self.devices[index].started_at;
+                let output_path = self.devices[index].output_path.clone();
+                let selected = self.selected_serial.as_deref() == Some(device_id.as_str());
+                let primary_name = self.device_primary_name(&device_id);
+                let is_pinned = self.is_pinned_device(&device_id);
+                let row_fill = if selected {
+                    Color32::from_rgb(243, 247, 255)
+                } else {
+                    Color32::from_rgb(250, 251, 254)
+                };
+
+                egui::Frame::new()
+                    .fill(row_fill)
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(233, 237, 244)))
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .inner_margin(egui::Margin::symmetric(12, 10))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            let label = if is_pinned {
+                                format!("{} ({})", primary_name, self.tr("device.pinned_short"))
+                            } else {
+                                primary_name.clone()
+                            };
+                            let cell_text = if primary_name != serial {
+                                format!("{}\n{}", label, serial)
+                            } else {
+                                label.clone()
+                            };
+                            let name_response = ui.add_sized(
+                                [widths[0], 44.0],
+                                egui::SelectableLabel::new(
+                                    selected,
+                                    RichText::new(cell_text).size(14.5),
+                                ),
+                            );
+                            if name_response.clicked() {
+                                if selected {
+                                    self.selected_serial = None;
+                                } else {
+                                    self.selected_serial = Some(device_id.clone());
+                                }
+                            }
+                            if name_response.double_clicked() {
+                                start_serial = Some(device_id.clone());
+                            }
+
+                            // Helper closure for centered cell (painter-based for reliable H+V centering)
+                            let centered_cell = |ui: &mut egui::Ui, w: f32, text: String| {
+                                let (rect, _) = ui
+                                    .allocate_exact_size(egui::vec2(w, 44.0), egui::Sense::hover());
+                                if ui.is_rect_visible(rect) {
+                                    let font_id = egui::TextStyle::Body.resolve(ui.style());
+                                    let color = ui.visuals().text_color();
+                                    ui.painter().text(
+                                        rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        text,
+                                        font_id,
+                                        color,
+                                    );
+                                }
+                            };
+
+                            // Actions column: vertical centering via top_down(Center) wrapper,
+                            // horizontal centering via narrower group_w allocation for
+                            // Idle/Running states so the button group aligns with the header.
                             ui.allocate_ui_with_layout(
-                                egui::vec2(widths[idx], 24.0),
+                                egui::vec2(widths[1], 44.0),
                                 egui::Layout::top_down(Align::Center),
                                 |ui| {
-                                    ui.label(
-                                        RichText::new(title)
-                                            .strong()
-                                            .color(Color32::from_rgb(89, 96, 110)),
+                                    // Vertical center: button height ~30px, cell 44px → pad 7px
+                                    ui.add_space(7.0);
+                                    // group_w = Stopping uses full column (may overflow as before);
+                                    // Idle/Error = Start(52)+gap(10)+More(44) ≈ 106;
+                                    // Starting/Running = Stop(56)+gap(10)+More(44) ≈ 110.
+                                    let group_w = match &run_state {
+                                        DeviceRunState::Stopping => widths[1],
+                                        DeviceRunState::Idle | DeviceRunState::Error(_) => 106.0,
+                                        _ => 110.0,
+                                    };
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(group_w, 30.0),
+                                        egui::Layout::left_to_right(Align::Center),
+                                        |ui| {
+                                            match run_state {
+                                                DeviceRunState::Idle | DeviceRunState::Error(_) => {
+                                                    let can_start = state == "device";
+                                                    let start_button = egui::Button::new(
+                                                        RichText::new(start_text.clone())
+                                                            .color(Color32::WHITE)
+                                                            .strong(),
+                                                    )
+                                                    .fill(Color32::from_rgb(56, 116, 255))
+                                                    .stroke(egui::Stroke::NONE)
+                                                    .corner_radius(egui::CornerRadius::same(8))
+                                                    .min_size(egui::vec2(52.0, 30.0));
+                                                    if ui
+                                                        .add_enabled(can_start, start_button)
+                                                        .clicked()
+                                                    {
+                                                        start_serial = Some(serial.clone());
+                                                    }
+                                                }
+                                                DeviceRunState::Starting
+                                                | DeviceRunState::Running => {
+                                                    if ui
+                                                        .add(rounded_secondary(stop_text.clone()))
+                                                        .clicked()
+                                                    {
+                                                        stop_serial = Some(serial.clone());
+                                                    }
+                                                }
+                                                DeviceRunState::Stopping => {
+                                                    ui.label(stopping_text.clone());
+                                                }
+                                            }
+
+                                            ui.menu_button(&more_text, |ui| {
+                                                let is_pinned = self.is_pinned_device(&device_id);
+                                                let pin_label = if is_pinned {
+                                                    unpin_text.clone()
+                                                } else {
+                                                    pin_text.clone()
+                                                };
+                                                if ui.add(rounded_secondary(pin_label)).clicked() {
+                                                    toggle_pin_serial = Some(device_id.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .add(rounded_secondary(edit_alias_text.clone()))
+                                                    .clicked()
+                                                {
+                                                    open_alias_serial = Some(device_id.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .add(rounded_secondary(copy_text.clone()))
+                                                    .clicked()
+                                                {
+                                                    copy_serial = Some(device_id.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        state == "device",
+                                                        rounded_secondary(shell_text.clone()),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    open_shell_serial = Some(device_id.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if let Some(path) = &output_path {
+                                                    if ui
+                                                        .add(rounded_secondary(open_text.clone()))
+                                                        .clicked()
+                                                    {
+                                                        open_output = Some(path.clone());
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                                {
+                                                    let device_dir = fs_utils::device_log_dir(
+                                                        PathBuf::from(self.config.log_dir.as_str())
+                                                            .as_path(),
+                                                        &device_id,
+                                                        self.device_alias(&device_id).as_deref(),
+                                                    );
+                                                    if device_dir.exists()
+                                                        && ui
+                                                            .add(rounded_secondary(
+                                                                open_folder_text.clone(),
+                                                            ))
+                                                            .clicked()
+                                                    {
+                                                        if let Err(err) =
+                                                            fs_utils::open_path(&device_dir)
+                                                        {
+                                                            self.set_error(err);
+                                                        }
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                                ui.separator();
+                                                if ui
+                                                    .add_enabled(
+                                                        state == "device"
+                                                            && !self.foreground_task_in_progress,
+                                                        rounded_secondary(
+                                                            inspect_foreground_app_text.clone(),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    foreground_action = Some((
+                                                        device_id.clone(),
+                                                        ForegroundAppAction::Inspect,
+                                                    ));
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        state == "device"
+                                                            && !self.foreground_task_in_progress,
+                                                        rounded_secondary(
+                                                            stop_foreground_app_text.clone(),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    foreground_action = Some((
+                                                        device_id.clone(),
+                                                        ForegroundAppAction::ForceStop,
+                                                    ));
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        state == "device"
+                                                            && !self.foreground_task_in_progress,
+                                                        rounded_secondary(
+                                                            clear_foreground_app_data_text.clone(),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    foreground_action = Some((
+                                                        device_id.clone(),
+                                                        ForegroundAppAction::ClearData,
+                                                    ));
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        state == "device"
+                                                            && !self.foreground_task_in_progress,
+                                                        rounded_secondary(
+                                                            uninstall_foreground_app_text.clone(),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    foreground_action = Some((
+                                                        device_id.clone(),
+                                                        ForegroundAppAction::Uninstall,
+                                                    ));
+                                                    ui.close_menu();
+                                                }
+                                                if let Some(network_serial) =
+                                                    self.device_network_transport_serial(&device_id)
+                                                {
+                                                    if ui
+                                                        .add_enabled(
+                                                            self.disconnecting_serial.as_deref()
+                                                                != Some(network_serial.as_str()),
+                                                            rounded_secondary(
+                                                                disconnect_text.clone(),
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        disconnect_serial = Some(network_serial);
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                            });
+                                        },
                                     );
                                 },
                             );
-                        }
-                    }); // end horizontal header
-                    ui.add_space(8.0);
-
-                    let rounded_secondary = |text: String| {
-                        egui::Button::new(text)
-                            .corner_radius(egui::CornerRadius::same(8))
-                            .min_size(egui::vec2(56.0, 30.0))
-                    };
-                    for index in 0..self.devices.len() {
-                        let serial = self.devices[index].info.serial.clone();
-                        let state = self.devices[index].info.state.clone();
-                        let android_version = self.devices[index].info.android_version.clone();
-                        let run_state = self.devices[index].run_state.clone();
-                        let started_at = self.devices[index].started_at;
-                        let output_path = self.devices[index].output_path.clone();
-                        let selected = self.selected_serial.as_deref() == Some(serial.as_str());
-                        let primary_name = self.device_primary_name(&serial);
-                        let is_pinned = self.is_pinned_device(&serial);
-                        let row_fill = if selected {
-                            Color32::from_rgb(243, 247, 255)
-                        } else {
-                            Color32::from_rgb(250, 251, 254)
-                        };
-
-                        egui::Frame::new()
-                            .fill(row_fill)
-                            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(233, 237, 244)))
-                            .corner_radius(egui::CornerRadius::same(10))
-                            .inner_margin(egui::Margin::symmetric(12, 10))
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ui.horizontal(|ui| {
-                                    let label = if is_pinned {
-                                        format!(
-                                            "{} ({})",
-                                            primary_name,
-                                            self.tr("device.pinned_short")
-                                        )
-                                    } else {
-                                        primary_name.clone()
-                                    };
-                                    let cell_text = if primary_name != serial {
-                                        format!("{}\n{}", label, serial)
-                                    } else {
-                                        label.clone()
-                                    };
-                                    let name_response = ui.add_sized(
-                                        [widths[0], 44.0],
-                                        egui::SelectableLabel::new(
-                                            selected,
-                                            RichText::new(cell_text).size(14.5),
-                                        ),
-                                    );
-                                    if name_response.clicked() {
-                                        if selected {
-                                            self.selected_serial = None;
-                                            self.alias_input_serial = None;
-                                            self.alias_input_value.clear();
-                                        } else {
-                                            self.selected_serial = Some(serial.clone());
-                                            self.sync_alias_editor(&serial);
-                                        }
-                                    }
-                                    if name_response.double_clicked() {
-                                        start_serial = Some(serial.clone());
-                                    }
-
-                                    // Helper closure for centered cell (painter-based for reliable H+V centering)
-                                    let centered_cell =
-                                        |ui: &mut egui::Ui, w: f32, text: String| {
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(w, 44.0),
-                                                egui::Sense::hover(),
-                                            );
-                                            if ui.is_rect_visible(rect) {
-                                                let font_id =
-                                                    egui::TextStyle::Body.resolve(ui.style());
-                                                let color = ui.visuals().text_color();
-                                                ui.painter().text(
-                                                    rect.center(),
-                                                    egui::Align2::CENTER_CENTER,
-                                                    text,
-                                                    font_id,
-                                                    color,
-                                                );
-                                            }
-                                        };
-
-                                    // Actions column: vertical centering via top_down(Center) wrapper,
-                                    // horizontal centering via narrower group_w allocation for
-                                    // Idle/Running states so the button group aligns with the header.
-                                    ui.allocate_ui_with_layout(
-                                        egui::vec2(widths[1], 44.0),
-                                        egui::Layout::top_down(Align::Center),
-                                        |ui| {
-                                            // Vertical center: button height ~30px, cell 44px → pad 7px
-                                            ui.add_space(7.0);
-                                            // group_w = Stopping uses full column (may overflow as before);
-                                            // Idle/Error = Start(52)+gap(10)+More(44) ≈ 106;
-                                            // Starting/Running = Stop(56)+gap(10)+More(44) ≈ 110.
-                                            let group_w = match &run_state {
-                                                DeviceRunState::Stopping => widths[1],
-                                                DeviceRunState::Idle | DeviceRunState::Error(_) => {
-                                                    106.0
-                                                }
-                                                _ => 110.0,
-                                            };
-                                            ui.allocate_ui_with_layout(
-                                                egui::vec2(group_w, 30.0),
-                                                egui::Layout::left_to_right(Align::Center),
-                                                |ui| {
-                                                    match run_state {
-                                                        DeviceRunState::Idle
-                                                        | DeviceRunState::Error(_) => {
-                                                            let can_start = state == "device";
-                                                            let start_button = egui::Button::new(
-                                                                RichText::new(start_text.clone())
-                                                                    .color(Color32::WHITE)
-                                                                    .strong(),
-                                                            )
-                                                            .fill(Color32::from_rgb(56, 116, 255))
-                                                            .stroke(egui::Stroke::NONE)
-                                                            .corner_radius(
-                                                                egui::CornerRadius::same(8),
-                                                            )
-                                                            .min_size(egui::vec2(52.0, 30.0));
-                                                            if ui
-                                                                .add_enabled(
-                                                                    can_start,
-                                                                    start_button,
-                                                                )
-                                                                .clicked()
-                                                            {
-                                                                start_serial = Some(serial.clone());
-                                                            }
-                                                        }
-                                                        DeviceRunState::Starting
-                                                        | DeviceRunState::Running => {
-                                                            if ui
-                                                                .add(rounded_secondary(
-                                                                    stop_text.clone(),
-                                                                ))
-                                                                .clicked()
-                                                            {
-                                                                stop_serial = Some(serial.clone());
-                                                            }
-                                                        }
-                                                        DeviceRunState::Stopping => {
-                                                            ui.label(stopping_text.clone());
-                                                        }
-                                                    }
-
-                                                    ui.menu_button(&more_text, |ui| {
-                                                        let is_pinned = self.is_pinned_device(&serial);
-                                                        let pin_label = if is_pinned {
-                                                            unpin_text.clone()
-                                                        } else {
-                                                            pin_text.clone()
-                                                        };
-                                                        if ui
-                                                            .add(rounded_secondary(pin_label))
-                                                            .clicked()
-                                                        {
-                                                            toggle_pin_serial =
-                                                                Some(serial.clone());
-                                                            ui.close_menu();
-                                                        }
-                                                        if ui
-                                                            .add(rounded_secondary(
-                                                                copy_text.clone(),
-                                                            ))
-                                                            .clicked()
-                                                        {
-                                                            copy_serial = Some(serial.clone());
-                                                            ui.close_menu();
-                                                        }
-                                                        if ui
-                                                            .add_enabled(
-                                                                state == "device",
-                                                                rounded_secondary(
-                                                                    shell_text.clone(),
-                                                                ),
-                                                            )
-                                                            .clicked()
-                                                        {
-                                                            open_shell_serial =
-                                                                Some(serial.clone());
-                                                            ui.close_menu();
-                                                        }
-                                                        if let Some(path) = &output_path {
-                                                            if ui
-                                                                .add(rounded_secondary(
-                                                                    open_text.clone(),
-                                                                ))
-                                                                .clicked()
-                                                            {
-                                                                open_output = Some(path.clone());
-                                                                ui.close_menu();
-                                                            }
-                                                        }
-                                                        {
-                                                            let device_dir = fs_utils::device_log_dir(
-                                                                PathBuf::from(self.config.log_dir.as_str()).as_path(),
-                                                                &serial,
-                                                                self.device_alias(&serial).as_deref(),
-                                                            );
-                                                            if device_dir.exists() && ui
-                                                                .add(rounded_secondary(
-                                                                    open_folder_text.clone(),
-                                                                ))
-                                                                .clicked()
-                                                            {
-                                                                if let Err(err) =
-                                                                    fs_utils::open_path(&device_dir)
-                                                                {
-                                                                    self.set_error(err);
-                                                                }
-                                                                ui.close_menu();
-                                                            }
-                                                        }
-                                                        if adb::is_network_device_serial(&serial)
-                                                            && ui
-                                                                .add_enabled(
-                                                                    self.disconnecting_serial
-                                                                        .as_deref()
-                                                                        != Some(serial.as_str()),
-                                                                    rounded_secondary(
-                                                                        disconnect_text.clone(),
-                                                                    ),
-                                                                )
-                                                                .clicked()
-                                                        {
-                                                            disconnect_serial =
-                                                                Some(serial.clone());
-                                                            ui.close_menu();
-                                                        }
-                                                    });
-                                                },
-                                            );
-                                        },
-                                    );
-                                    centered_cell(
+                            centered_cell(ui, widths[2], run_state_text_with(&i18n, &run_state));
+                            {
+                                let (badge_cell_rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(widths[3], 44.0),
+                                    egui::Sense::hover(),
+                                );
+                                if ui.is_rect_visible(badge_cell_rect) {
+                                    draw_state_badge_centered(
                                         ui,
-                                        widths[2],
-                                        run_state_text_with(&i18n, &run_state),
+                                        badge_cell_rect,
+                                        &self.device_state_text(&state),
+                                        self.device_state_color(&state),
                                     );
-                                    {
-                                        let (badge_cell_rect, _) = ui.allocate_exact_size(
-                                            egui::vec2(widths[3], 44.0),
-                                            egui::Sense::hover(),
-                                        );
-                                        if ui.is_rect_visible(badge_cell_rect) {
-                                            draw_state_badge_centered(
-                                                ui,
-                                                badge_cell_rect,
-                                                &self.device_state_text(&state),
-                                                self.device_state_color(&state),
-                                            );
-                                        }
-                                    }
-                                    let output_name = output_path
-                                        .as_ref()
-                                        .map(|path| {
-                                            path.file_name()
-                                                .and_then(|name| name.to_str())
-                                                .map(str::to_owned)
-                                                .unwrap_or_else(|| {
-                                                    path.to_string_lossy().into_owned()
-                                                })
-                                        })
-                                        .unwrap_or_else(|| "-".to_owned());
-                                    let _ = ui.add_sized(
-                                        [widths[4], 44.0],
-                                        egui::Label::new(
-                                            RichText::new(output_name).size(13.0),
-                                        )
-                                        .truncate(),
-                                    );
-                                    centered_cell(
-                                        ui,
-                                        widths[5],
-                                        android_version.unwrap_or_else(|| {
-                                            self.tr("device.android_version.unknown")
-                                        }),
-                                    );
-                                    centered_cell(
-                                        ui,
-                                        widths[6],
-                                        started_at
-                                            .map(format_system_time)
-                                            .unwrap_or_else(|| never_text.clone()),
-                                    );
-                                });
-                            });
-                        ui.add_space(8.0);
-                    }
+                                }
+                            }
+                            let output_name = output_path
+                                .as_ref()
+                                .map(|path| {
+                                    path.file_name()
+                                        .and_then(|name| name.to_str())
+                                        .map(str::to_owned)
+                                        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+                                })
+                                .unwrap_or_else(|| "-".to_owned());
+                            let _ = ui.add_sized(
+                                [widths[4], 44.0],
+                                egui::Label::new(RichText::new(output_name).size(13.0)).truncate(),
+                            );
+                            centered_cell(
+                                ui,
+                                widths[5],
+                                android_version
+                                    .unwrap_or_else(|| self.tr("device.android_version.unknown")),
+                            );
+                            centered_cell(
+                                ui,
+                                widths[6],
+                                started_at
+                                    .map(format_system_time)
+                                    .unwrap_or_else(|| never_text.clone()),
+                            );
+                        });
+                    });
+                ui.add_space(8.0);
+            }
 
             if let Some(serial) = start_serial {
                 self.start_collection(serial);
@@ -1431,6 +1262,12 @@ impl AdbCollectorApp {
             }
             if let Some(serial) = toggle_pin_serial {
                 self.toggle_pinned_device(&serial);
+            }
+            if let Some(serial) = open_alias_serial {
+                self.open_alias_editor(&serial);
+            }
+            if let Some((serial, action)) = foreground_action {
+                self.start_foreground_app_action(serial, action);
             }
         });
     }
@@ -1686,6 +1523,124 @@ impl AdbCollectorApp {
             });
     }
 
+    fn ui_alias_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_alias_dialog {
+            return;
+        }
+
+        let Some(serial) = self.alias_input_serial.clone() else {
+            self.show_alias_dialog = false;
+            return;
+        };
+        let mut save = false;
+        let mut clear = false;
+        let mut cancel = false;
+        egui::Window::new(self.tr("alias.title"))
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([440.0, 170.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(440.0);
+                ui.label(self.tr_args(
+                    "alias.target",
+                    &[("serial", self.device_identity_label(&serial))],
+                ));
+                ui.add_space(10.0);
+                ui.label(self.tr("alias.input"));
+                ui.text_edit_singleline(&mut self.alias_input_value);
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button(self.tr("settings.cancel")).clicked() {
+                        cancel = true;
+                    }
+                    if ui.button(self.tr("device.action.clear_alias")).clicked() {
+                        clear = true;
+                    }
+                    if ui.button(self.tr("device.action.save_alias")).clicked() {
+                        save = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.show_alias_dialog = false;
+            self.alias_input_serial = None;
+            self.alias_input_value.clear();
+        } else if clear {
+            self.show_alias_dialog = false;
+            self.save_device_alias(&serial, String::new());
+            self.alias_input_serial = None;
+        } else if save {
+            self.show_alias_dialog = false;
+            self.save_device_alias(&serial, self.alias_input_value.clone());
+            self.alias_input_serial = None;
+        }
+    }
+
+    fn ui_foreground_confirm_dialog(&mut self, ctx: &egui::Context) {
+        let Some(pending) = self.pending_foreground_confirm.clone() else {
+            return;
+        };
+
+        let action_text = self.foreground_action_text(pending.action);
+        let warning_text = self.foreground_action_warning_text(pending.action);
+        let mut confirm = false;
+        let mut cancel = false;
+        egui::Window::new(self.tr_args(
+            "foreground.confirm.title",
+            &[("action", action_text.clone())],
+        ))
+        .collapsible(false)
+        .resizable(false)
+        .fixed_size([460.0, 210.0])
+        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+        .show(ctx, |ui| {
+            ui.set_max_width(460.0);
+            ui.label(self.tr_args(
+                "foreground.confirm.body",
+                &[
+                    ("action", action_text.clone()),
+                    ("app", self.foreground_app_label(&pending.app)),
+                ],
+            ));
+            ui.add_space(10.0);
+            ui.label(self.tr_args(
+                "foreground.confirm.device",
+                &[("serial", self.device_identity_label(&pending.serial))],
+            ));
+            ui.label(self.tr_args(
+                "foreground.confirm.package",
+                &[("package", pending.app.package_name.clone())],
+            ));
+            if let Some(activity) = pending.app.activity_name.clone() {
+                ui.label(self.tr_args("foreground.confirm.activity", &[("activity", activity)]));
+            }
+            ui.add_space(10.0);
+            ui.colored_label(Color32::from_rgb(200, 90, 50), warning_text);
+            ui.add_space(12.0);
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                let confirm_label = self.tr_args(
+                    "foreground.confirm.confirm",
+                    &[("action", action_text.clone())],
+                );
+                if ui.button(confirm_label).clicked() {
+                    confirm = true;
+                }
+                if ui.button(self.tr("foreground.confirm.cancel")).clicked() {
+                    cancel = true;
+                }
+            });
+        });
+
+        if cancel {
+            self.pending_foreground_confirm = None;
+        } else if confirm {
+            self.pending_foreground_confirm = None;
+            self.start_foreground_app_execution(pending.serial, pending.action, pending.app);
+        }
+    }
+
     fn ui_connect_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_connect_dialog {
             return;
@@ -1763,7 +1718,7 @@ impl AdbCollectorApp {
             return;
         };
 
-        let ready_devices = self.ready_device_serials();
+        let ready_devices = self.ready_device_ids();
         if ready_devices.is_empty() {
             self.pending_drop_payload = None;
             self.pending_drop_target_serial = None;
@@ -2088,44 +2043,151 @@ impl AdbCollectorApp {
     }
 
     fn copy_serial_to_clipboard(&mut self, ctx: &egui::Context, serial: String) {
-        ctx.copy_text(serial.clone());
+        let copied = self
+            .device_primary_transport_serial(&serial)
+            .unwrap_or_else(|| serial.clone());
+        ctx.copy_text(copied);
         self.set_info(self.tr_args(
             "status.serial_copied",
             &[("serial", self.device_identity_label(&serial))],
         ));
     }
 
-    fn open_device_shell(&mut self, serial: String) {
+    fn open_device_shell(&mut self, device_id: String) {
         if self.require_initial_setup {
             self.set_error(self.tr("status.finish_initial_setup"));
             self.show_settings = true;
             return;
         }
 
-        let Some(device) = self.find_device(&serial).cloned() else {
+        let Some(device) = self.find_device(&device_id).cloned() else {
             return;
         };
         if device.info.state != "device" {
             self.set_error(self.tr_args(
                 "status.device_invalid_state",
                 &[
-                    ("serial", self.device_identity_label(&serial)),
+                    ("serial", self.device_identity_label(&device_id)),
                     ("state", self.device_state_text(&device.info.state)),
                 ],
             ));
             return;
         }
 
-        match fs_utils::open_device_shell(&self.config.adb_path, &serial) {
+        let Some(transport_serial) = self.device_primary_transport_serial(&device_id) else {
+            return;
+        };
+        match fs_utils::open_device_shell(&self.config.adb_path, &transport_serial) {
             Ok(message) => self.set_info(self.tr_args(
                 "status.device_shell_opened",
                 &[
-                    ("serial", self.device_identity_label(&serial)),
+                    ("serial", self.device_identity_label(&device_id)),
                     ("message", message),
                 ],
             )),
             Err(err) => self.set_error(err),
         }
+    }
+
+    fn start_foreground_app_action(&mut self, device_id: String, action: ForegroundAppAction) {
+        if self.require_initial_setup {
+            self.set_error(self.tr("status.finish_initial_setup"));
+            self.show_settings = true;
+            return;
+        }
+        if self.foreground_task_in_progress {
+            return;
+        }
+
+        let Some(device) = self.find_device(&device_id).cloned() else {
+            return;
+        };
+        if device.info.state != "device" {
+            self.set_error(self.tr_args(
+                "status.device_invalid_state",
+                &[
+                    ("serial", self.device_identity_label(&device_id)),
+                    ("state", self.device_state_text(&device.info.state)),
+                ],
+            ));
+            return;
+        }
+
+        self.foreground_task_in_progress = true;
+        self.set_info(self.tr_args(
+            "status.foreground_app_resolving",
+            &[("serial", self.device_identity_label(&device_id))],
+        ));
+
+        let tx = self.tx.clone();
+        let adb_path = self.config.adb_path.clone();
+        let Some(transport_serial) = self.device_primary_transport_serial(&device_id) else {
+            self.foreground_task_in_progress = false;
+            return;
+        };
+        thread::spawn(move || {
+            let result = adb::query_foreground_app(&adb_path, &transport_serial);
+            let _ = tx.send(AppEvent::ForegroundAppResolved {
+                serial: device_id,
+                action,
+                result,
+            });
+        });
+    }
+
+    fn start_foreground_app_execution(
+        &mut self,
+        device_id: String,
+        action: ForegroundAppAction,
+        app: ForegroundApp,
+    ) {
+        if self.foreground_task_in_progress {
+            return;
+        }
+
+        self.foreground_task_in_progress = true;
+        self.set_info(self.tr_args(
+            "status.foreground_app_action_started",
+            &[
+                ("serial", self.device_identity_label(&device_id)),
+                ("action", self.foreground_action_text(action)),
+                ("app", self.foreground_app_label(&app)),
+            ],
+        ));
+
+        let tx = self.tx.clone();
+        let adb_path = self.config.adb_path.clone();
+        let app_for_thread = app.clone();
+        let Some(transport_serial) = self.device_primary_transport_serial(&device_id) else {
+            self.foreground_task_in_progress = false;
+            return;
+        };
+        thread::spawn(move || {
+            let result = match action {
+                ForegroundAppAction::ForceStop => adb::force_stop_package(
+                    &adb_path,
+                    &transport_serial,
+                    &app_for_thread.package_name,
+                ),
+                ForegroundAppAction::ClearData => adb::clear_package_data(
+                    &adb_path,
+                    &transport_serial,
+                    &app_for_thread.package_name,
+                ),
+                ForegroundAppAction::Uninstall => adb::uninstall_package(
+                    &adb_path,
+                    &transport_serial,
+                    &app_for_thread.package_name,
+                ),
+                ForegroundAppAction::Inspect => Ok(app_for_thread.package_name.clone()),
+            };
+            let _ = tx.send(AppEvent::ForegroundAppActionFinished {
+                serial: device_id,
+                action,
+                app: app_for_thread,
+                result,
+            });
+        });
     }
 
     fn handle_dropped_files(&mut self, ctx: &egui::Context) {
@@ -2155,7 +2217,7 @@ impl AdbCollectorApp {
             return;
         }
 
-        let ready_devices = self.ready_device_serials();
+        let ready_devices = self.ready_device_ids();
         if ready_devices.is_empty() {
             self.set_error(self.tr("status.drop_no_ready_device"));
             return;
@@ -2175,7 +2237,7 @@ impl AdbCollectorApp {
         self.pending_drop_payload = Some(payload);
     }
 
-    fn start_drop_task(&mut self, serial: String, payload: DroppedPayload) {
+    fn start_drop_task(&mut self, device_id: String, payload: DroppedPayload) {
         if payload.is_empty() || self.drop_task_in_progress {
             return;
         }
@@ -2185,28 +2247,35 @@ impl AdbCollectorApp {
             "status.drop_processing",
             &[
                 ("count", payload.total_count().to_string()),
-                ("serial", self.device_identity_label(&serial)),
+                ("serial", self.device_identity_label(&device_id)),
             ],
         ));
 
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
+        let Some(transport_serial) = self.device_primary_transport_serial(&device_id) else {
+            self.drop_task_in_progress = false;
+            return;
+        };
         thread::spawn(move || {
-            let result = process_dropped_payload(&adb_path, &serial, payload);
-            let _ = tx.send(AppEvent::DeviceDropFinished { serial, result });
+            let result = process_dropped_payload(&adb_path, &transport_serial, payload);
+            let _ = tx.send(AppEvent::DeviceDropFinished {
+                serial: device_id,
+                result,
+            });
         });
     }
 
-    fn start_collection(&mut self, serial: String) {
+    fn start_collection(&mut self, device_id: String) {
         if self.require_initial_setup {
             self.set_error(self.tr("status.finish_initial_setup"));
             self.show_settings = true;
             return;
         }
 
-        let device_name = self.device_identity_label(&serial);
+        let device_name = self.device_identity_label(&device_id);
 
-        if let Some(device) = self.find_device(&serial) {
+        if let Some(device) = self.find_device(&device_id) {
             if device.info.state != "device" {
                 self.set_error(self.tr_args(
                     "status.device_invalid_state",
@@ -2219,12 +2288,16 @@ impl AdbCollectorApp {
             }
         }
 
+        let Some(transport_serial) = self.device_primary_transport_serial(&device_id) else {
+            return;
+        };
+        let config_key = self.device_identity_key(&device_id);
         let output_path = fs_utils::session_log_path(
             PathBuf::from(self.config.log_dir.as_str()).as_path(),
-            &serial,
-            self.device_alias(&serial).as_deref(),
+            &config_key,
+            self.device_alias(&device_id).as_deref(),
         );
-        if let Some(device) = self.find_device_mut(&serial) {
+        if let Some(device) = self.find_device_mut(&device_id) {
             if device.is_active() {
                 self.set_info(self.tr_args(
                     "status.device_already_collecting",
@@ -2238,18 +2311,18 @@ impl AdbCollectorApp {
 
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
-        let serial_for_thread = serial.clone();
+        let device_id_for_thread = device_id.clone();
 
         thread::spawn(move || {
             let child_holder: SharedChild = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-            match adb::spawn_logcat(&adb_path, &serial_for_thread, &output_path) {
+            match adb::spawn_logcat(&adb_path, &transport_serial, &output_path) {
                 Ok(child) => {
                     if let Ok(mut guard) = child_holder.lock() {
                         *guard = Some(child);
                     } else {
                         let _ = tx.send(AppEvent::CollectionEnded {
-                            serial: serial_for_thread,
+                            serial: device_id_for_thread,
                             exit_code: None,
                             error: Some("Failed to store collector process handle.".to_owned()),
                         });
@@ -2257,21 +2330,21 @@ impl AdbCollectorApp {
                     }
 
                     let _ = tx.send(AppEvent::CollectionSpawned {
-                        serial: serial_for_thread.clone(),
+                        serial: device_id_for_thread.clone(),
                         output_path: output_path.clone(),
                         child: child_holder.clone(),
                     });
 
                     let (exit_code, error) = wait_for_process_exit(&child_holder);
                     let _ = tx.send(AppEvent::CollectionEnded {
-                        serial: serial_for_thread,
+                        serial: device_id_for_thread,
                         exit_code,
                         error,
                     });
                 }
                 Err(err) => {
                     let _ = tx.send(AppEvent::CollectionEnded {
-                        serial: serial_for_thread,
+                        serial: device_id_for_thread,
                         exit_code: None,
                         error: Some(err),
                     });
@@ -2280,11 +2353,11 @@ impl AdbCollectorApp {
         });
     }
 
-    fn stop_collection(&mut self, serial: &str) {
+    fn stop_collection(&mut self, device_id: &str) {
         let Some(index) = self
             .devices
             .iter()
-            .position(|device| device.info.serial == serial)
+            .position(|device| device.matches_serial(device_id))
         else {
             return;
         };
@@ -2295,7 +2368,7 @@ impl AdbCollectorApp {
         };
 
         self.devices[index].run_state = DeviceRunState::Stopping;
-        let device_name = self.device_identity_label(serial);
+        let device_name = self.device_identity_label(device_id);
         match child.lock() {
             Ok(mut guard) => {
                 if let Some(process) = guard.as_mut() {
@@ -2331,21 +2404,52 @@ impl AdbCollectorApp {
     }
 
     fn merge_devices(&mut self, devices: Vec<DeviceInfo>) {
+        let previous_selected_identity = self
+            .selected_serial
+            .as_deref()
+            .and_then(|serial| self.find_device(serial))
+            .map(|device| device.info.identity_key.clone());
         let mut existing: HashMap<String, DeviceEntry> = self
             .devices
             .drain(..)
-            .map(|device| (device.info.serial.clone(), device))
+            .map(|device| (device.info.identity_key.clone(), device))
             .collect();
 
-        let mut merged = Vec::with_capacity(devices.len() + existing.len());
-
+        let mut grouped: HashMap<String, Vec<DeviceInfo>> = HashMap::new();
         for info in devices {
-            if let Some(mut current) = existing.remove(&info.serial) {
-                current.info.state = info.state;
-                current.info.android_version = info.android_version;
+            grouped
+                .entry(info.identity_key.clone())
+                .or_default()
+                .push(info);
+        }
+
+        let mut merged = Vec::with_capacity(grouped.len() + existing.len());
+        for (identity_key, infos) in grouped {
+            let primary = pick_primary_device_info(&infos);
+            let transport_serials = infos
+                .iter()
+                .map(|info| info.serial.clone())
+                .collect::<Vec<_>>();
+
+            if let Some(mut current) = existing.remove(&identity_key) {
+                current.info.serial = primary.serial;
+                current.info.identity_key = primary.identity_key;
+                current.info.state = primary.state;
+                if primary.android_version.is_some() {
+                    current.info.android_version = primary.android_version;
+                }
+                if primary.manufacturer.is_some() {
+                    current.info.manufacturer = primary.manufacturer;
+                }
+                if primary.model.is_some() {
+                    current.info.model = primary.model;
+                }
+                current.transport_serials = transport_serials;
                 merged.push(current);
             } else {
-                merged.push(DeviceEntry::new(info));
+                let mut entry = DeviceEntry::new(primary);
+                entry.transport_serials = transport_serials;
+                merged.push(entry);
             }
         }
 
@@ -2364,23 +2468,21 @@ impl AdbCollectorApp {
             .map(|serial| self.find_device(serial).is_some())
             .unwrap_or(false);
         if !selected_exists {
+            self.selected_serial = previous_selected_identity
+                .as_deref()
+                .and_then(|identity| self.find_device(identity))
+                .map(|device| device.info.identity_key.clone());
+        }
+        if self.selected_serial.is_none() {
             self.selected_serial = self
                 .devices
                 .first()
-                .map(|device| device.info.serial.clone());
-            if let Some(serial) = self.selected_serial.clone() {
-                self.sync_alias_editor(&serial);
-            } else {
-                self.alias_input_serial = None;
-                self.alias_input_value.clear();
-            }
+                .map(|device| device.info.identity_key.clone());
         }
-    }
-
-    fn device_android_version_text(&self, info: &DeviceInfo) -> String {
-        info.android_version
-            .clone()
-            .unwrap_or_else(|| self.tr("device.android_version.unknown"))
+        if self.selected_serial.is_none() {
+            self.alias_input_serial = None;
+            self.alias_input_value.clear();
+        }
     }
 
     fn collect_log_entries(&self) -> Vec<String> {
@@ -2408,44 +2510,106 @@ impl AdbCollectorApp {
         Ok(())
     }
 
-    fn sync_alias_editor(&mut self, serial: &str) {
-        if self.alias_input_serial.as_deref() == Some(serial) {
-            return;
-        }
-
-        self.alias_input_serial = Some(serial.to_owned());
-        self.alias_input_value = self.device_alias(serial).unwrap_or_default();
+    fn open_alias_editor(&mut self, serial: &str) {
+        let identity_key = self.device_identity_key(serial);
+        self.alias_input_serial = Some(identity_key.clone());
+        self.alias_input_value = self.device_alias(&identity_key).unwrap_or_default();
+        self.show_alias_dialog = true;
     }
 
     fn device_alias(&self, serial: &str) -> Option<String> {
-        self.config.device_aliases.get(serial).cloned()
+        let identity_key = self.device_identity_key(serial);
+        self.config.device_aliases.get(&identity_key).cloned()
     }
 
     fn device_primary_name(&self, serial: &str) -> String {
         self.device_alias(serial)
+            .or_else(|| {
+                self.find_device(serial)
+                    .and_then(|device| device_display_name(&device.info))
+            })
             .unwrap_or_else(|| serial.to_owned())
     }
 
     fn device_identity_label(&self, serial: &str) -> String {
-        match self.device_alias(serial) {
-            Some(alias) if alias != serial => format!("{alias} ({serial})"),
-            _ => serial.to_owned(),
+        let primary_serial = self
+            .device_primary_transport_serial(serial)
+            .unwrap_or_else(|| serial.to_owned());
+        if let Some(alias) = self.device_alias(serial) {
+            if alias != primary_serial {
+                return format!("{alias} ({primary_serial})");
+            }
+        }
+
+        match self
+            .find_device(serial)
+            .and_then(|device| device_display_name(&device.info))
+        {
+            Some(name) if name != primary_serial => format!("{name} ({primary_serial})"),
+            _ => primary_serial,
         }
     }
 
     fn is_pinned_device(&self, serial: &str) -> bool {
+        let identity_key = self.device_identity_key(serial);
         self.config
             .pinned_devices
             .iter()
-            .any(|value| value == serial)
+            .any(|value| value == &identity_key)
     }
 
-    fn ready_device_serials(&self) -> Vec<String> {
+    fn ready_device_ids(&self) -> Vec<String> {
         self.devices
             .iter()
             .filter(|device| device.info.state == "device")
-            .map(|device| device.info.serial.clone())
+            .map(|device| device.info.identity_key.clone())
             .collect()
+    }
+
+    fn device_identity_key(&self, serial_or_identity: &str) -> String {
+        self.find_device(serial_or_identity)
+            .map(|device| device.info.identity_key.clone())
+            .unwrap_or_else(|| serial_or_identity.to_owned())
+    }
+
+    fn device_primary_transport_serial(&self, serial_or_identity: &str) -> Option<String> {
+        self.find_device(serial_or_identity)
+            .map(|device| device.info.serial.clone())
+    }
+
+    fn device_network_transport_serial(&self, serial_or_identity: &str) -> Option<String> {
+        self.find_device(serial_or_identity).and_then(|device| {
+            device
+                .transport_serials
+                .iter()
+                .find(|serial| adb::is_network_device_serial(serial))
+                .cloned()
+        })
+    }
+
+    fn foreground_action_text(&self, action: ForegroundAppAction) -> String {
+        match action {
+            ForegroundAppAction::Inspect => self.tr("foreground.action.inspect"),
+            ForegroundAppAction::ForceStop => self.tr("foreground.action.force_stop"),
+            ForegroundAppAction::ClearData => self.tr("foreground.action.clear_data"),
+            ForegroundAppAction::Uninstall => self.tr("foreground.action.uninstall"),
+        }
+    }
+
+    fn foreground_action_warning_text(&self, action: ForegroundAppAction) -> String {
+        match action {
+            ForegroundAppAction::ForceStop => self.tr("foreground.confirm.warning.force_stop"),
+            ForegroundAppAction::ClearData => self.tr("foreground.confirm.warning.clear_data"),
+            ForegroundAppAction::Uninstall => self.tr("foreground.confirm.warning.uninstall"),
+            ForegroundAppAction::Inspect => String::new(),
+        }
+    }
+
+    fn foreground_app_label(&self, app: &ForegroundApp) -> String {
+        match app.activity_name.as_deref() {
+            Some(activity) => format!("{} ({activity})", app.package_name),
+            None => app.package_name.clone(),
+        }
     }
 
     fn remember_recent_connection(&mut self, target: &str) -> Result<(), String> {
@@ -2462,13 +2626,16 @@ impl AdbCollectorApp {
     }
 
     fn toggle_pinned_device(&mut self, serial: &str) {
-        let was_pinned = self.is_pinned_device(serial);
+        let identity_key = self.device_identity_key(serial);
+        let was_pinned = self.is_pinned_device(&identity_key);
         let previous = self.config.pinned_devices.clone();
 
         if was_pinned {
-            self.config.pinned_devices.retain(|value| value != serial);
+            self.config
+                .pinned_devices
+                .retain(|value| value != &identity_key);
         } else {
-            self.config.pinned_devices.push(serial.to_owned());
+            self.config.pinned_devices.push(identity_key);
         }
 
         if let Err(err) = self.persist_config() {
@@ -2490,8 +2657,9 @@ impl AdbCollectorApp {
     }
 
     fn save_device_alias(&mut self, serial: &str, alias: String) {
+        let identity_key = self.device_identity_key(serial);
         let next_alias = alias.trim().to_owned();
-        let previous_alias = self.device_alias(serial);
+        let previous_alias = self.device_alias(&identity_key);
         let previous_alias_text = previous_alias.clone().unwrap_or_default();
 
         if previous_alias.as_deref() == Some(next_alias.as_str())
@@ -2502,23 +2670,23 @@ impl AdbCollectorApp {
         }
 
         if self
-            .find_device(serial)
+            .find_device(&identity_key)
             .map(|device| device.is_active())
             .unwrap_or(false)
         {
             self.set_error(self.tr_args(
                 "status.alias_change_requires_idle",
-                &[("serial", self.device_identity_label(serial))],
+                &[("serial", self.device_identity_label(&identity_key))],
             ));
             self.alias_input_value = previous_alias_text;
             return;
         }
 
         let base_dir = PathBuf::from(self.config.log_dir.as_str());
-        let old_dir = fs_utils::device_log_dir(&base_dir, serial, previous_alias.as_deref());
+        let old_dir = fs_utils::device_log_dir(&base_dir, &identity_key, previous_alias.as_deref());
         let renamed_dir = match fs_utils::rename_device_log_dir(
             &base_dir,
-            serial,
+            &identity_key,
             previous_alias.as_deref(),
             (!next_alias.is_empty()).then_some(next_alias.as_str()),
         ) {
@@ -2532,11 +2700,11 @@ impl AdbCollectorApp {
 
         let previous_aliases = self.config.device_aliases.clone();
         if next_alias.is_empty() {
-            self.config.device_aliases.remove(serial);
+            self.config.device_aliases.remove(&identity_key);
         } else {
             self.config
                 .device_aliases
-                .insert(serial.to_owned(), next_alias.clone());
+                .insert(identity_key.clone(), next_alias.clone());
         }
 
         if let Err(err) = self.persist_config() {
@@ -2553,12 +2721,12 @@ impl AdbCollectorApp {
 
         if let Some(new_dir) = renamed_dir.as_deref() {
             if old_dir != new_dir {
-                self.update_device_output_dir(serial, &old_dir, new_dir);
+                self.update_device_output_dir(&identity_key, &old_dir, new_dir);
             }
         }
 
         self.sort_devices();
-        self.alias_input_value = self.device_alias(serial).unwrap_or_default();
+        self.alias_input_value = self.device_alias(&identity_key).unwrap_or_default();
         let status_key = if next_alias.is_empty() {
             "status.alias_cleared"
         } else {
@@ -2566,7 +2734,7 @@ impl AdbCollectorApp {
         };
         self.set_info(self.tr_args(
             status_key,
-            &[("serial", self.device_identity_label(serial))],
+            &[("serial", self.device_identity_label(&identity_key))],
         ));
     }
 
@@ -2586,21 +2754,24 @@ impl AdbCollectorApp {
         let aliases = self.config.device_aliases.clone();
         let pinned = self.config.pinned_devices.clone();
         self.devices.sort_by(|left, right| {
-            let left_pinned = pinned.iter().any(|value| value == &left.info.serial);
-            let right_pinned = pinned.iter().any(|value| value == &right.info.serial);
+            let left_pinned = pinned.iter().any(|value| value == &left.info.identity_key);
+            let right_pinned = pinned.iter().any(|value| value == &right.info.identity_key);
+            let left_name = aliases
+                .get(&left.info.identity_key)
+                .cloned()
+                .or_else(|| device_display_name(&left.info))
+                .unwrap_or_else(|| left.info.serial.clone());
+            let right_name = aliases
+                .get(&right.info.identity_key)
+                .cloned()
+                .or_else(|| device_display_name(&right.info))
+                .unwrap_or_else(|| right.info.serial.clone());
             right_pinned
                 .cmp(&left_pinned)
                 .then_with(|| {
-                    aliases
-                        .get(&left.info.serial)
-                        .unwrap_or(&left.info.serial)
+                    left_name
                         .to_ascii_lowercase()
-                        .cmp(
-                            &aliases
-                                .get(&right.info.serial)
-                                .unwrap_or(&right.info.serial)
-                                .to_ascii_lowercase(),
-                        )
+                        .cmp(&right_name.to_ascii_lowercase())
                 })
                 .then_with(|| left.info.serial.cmp(&right.info.serial))
         });
@@ -2641,13 +2812,13 @@ impl AdbCollectorApp {
     fn find_device(&self, serial: &str) -> Option<&DeviceEntry> {
         self.devices
             .iter()
-            .find(|device| device.info.serial == serial)
+            .find(|device| device.matches_serial(serial))
     }
 
     fn find_device_mut(&mut self, serial: &str) -> Option<&mut DeviceEntry> {
         self.devices
             .iter_mut()
-            .find(|device| device.info.serial == serial)
+            .find(|device| device.matches_serial(serial))
     }
 
     fn set_info(&mut self, text: impl Into<String>) {
@@ -2680,10 +2851,6 @@ impl AdbCollectorApp {
             "zh-CN" => self.tr("language.zh-CN"),
             _ => self.tr("language.english"),
         }
-    }
-
-    fn run_state_text(&self, run_state: &DeviceRunState) -> String {
-        run_state_text_with(&self.i18n, run_state)
     }
 
     fn stat_card(
@@ -2809,55 +2976,56 @@ fn button_label(icon: &str, text: String) -> String {
     format!("{icon}  {text}")
 }
 
+fn content_view_width(available_width: f32, right_gutter: f32) -> f32 {
+    (available_width - right_gutter).max(0.0)
+}
+
 fn detail_label(ui: &mut egui::Ui, label: &str) {
     ui.label(RichText::new(label).color(Color32::from_rgb(122, 128, 142)));
 }
 
-fn selected_device_detail_row<R>(
-    ui: &mut egui::Ui,
-    label: &str,
-    add_value: impl FnOnce(&mut egui::Ui) -> R,
-) -> R {
-    const LABEL_WIDTH: f32 = 112.0;
-
-    ui.horizontal_top(|ui| {
-        ui.allocate_ui_with_layout(
-            egui::vec2(LABEL_WIDTH, 0.0),
-            egui::Layout::top_down(Align::LEFT),
-            |ui| {
-                ui.add(
-                    egui::Label::new(RichText::new(label).color(Color32::from_rgb(122, 128, 142)))
-                        .wrap(),
-                );
-            },
-        );
-        let value_width = ui.available_width().max(0.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(value_width, 0.0),
-            egui::Layout::top_down(Align::LEFT),
-            add_value,
-        )
-        .inner
-    })
-    .inner
+fn device_display_name(info: &DeviceInfo) -> Option<String> {
+    format_device_model_name(info.manufacturer.as_deref(), info.model.as_deref())
 }
 
-fn selected_device_text_row(ui: &mut egui::Ui, label: &str, value: impl Into<egui::WidgetText>) {
-    selected_device_detail_row(ui, label, |ui| {
-        ui.add(egui::Label::new(value).wrap());
-    });
-    ui.add_space(12.0);
+fn format_device_model_name(manufacturer: Option<&str>, model: Option<&str>) -> Option<String> {
+    let manufacturer = manufacturer
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let model = model.map(str::trim).filter(|value| !value.is_empty());
+
+    match (manufacturer, model) {
+        (Some(manufacturer), Some(model))
+            if manufacturer.eq_ignore_ascii_case(model)
+                || model
+                    .to_ascii_lowercase()
+                    .starts_with(&manufacturer.to_ascii_lowercase()) =>
+        {
+            Some(model.to_owned())
+        }
+        (Some(manufacturer), Some(model)) => Some(format!("{manufacturer} {model}")),
+        (Some(manufacturer), None) => Some(manufacturer.to_owned()),
+        (None, Some(model)) => Some(model.to_owned()),
+        (None, None) => None,
+    }
 }
 
-fn draw_state_badge(ui: &mut egui::Ui, text: &str, color: Color32) {
-    egui::Frame::new()
-        .fill(color.gamma_multiply(0.18))
-        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.45)))
-        .corner_radius(egui::CornerRadius::same(8))
-        .inner_margin(egui::Margin::symmetric(8, 4))
-        .show(ui, |ui| {
-            ui.label(RichText::new(text).color(color).strong());
-        });
+fn pick_primary_device_info(infos: &[DeviceInfo]) -> DeviceInfo {
+    infos
+        .iter()
+        .min_by_key(|info| device_transport_rank(info))
+        .cloned()
+        .unwrap_or_else(|| infos[0].clone())
+}
+
+fn device_transport_rank(info: &DeviceInfo) -> (u8, u8, String) {
+    let state_rank = if info.state == "device" { 0 } else { 1 };
+    let transport_rank = if adb::is_network_device_serial(&info.serial) {
+        1
+    } else {
+        0
+    };
+    (state_rank, transport_rank, info.serial.clone())
 }
 
 /// Painter-based badge that is guaranteed to be centered within `cell_rect`.
@@ -2877,75 +3045,6 @@ fn draw_state_badge_centered(ui: &mut egui::Ui, cell_rect: egui::Rect, text: &st
         egui::epaint::StrokeKind::Middle,
     );
     painter.galley(badge_rect.min + egui::vec2(8.0, 4.0), galley, color);
-}
-
-fn draw_device_visual(ui: &mut egui::Ui, title: &str, subtitle: &str, ready: bool) {
-    ui.vertical_centered(|ui| {
-        ui.add_space(8.0);
-        egui::Frame::new()
-            .fill(Color32::from_rgb(251, 252, 255))
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(234, 237, 245)))
-            .corner_radius(egui::CornerRadius::same(16))
-            .inner_margin(egui::Margin::symmetric(24, 20))
-            .show(ui, |ui| {
-                ui.vertical_centered(|ui| {
-                    let phone_rect_size = egui::vec2(78.0, 124.0);
-                    let (rect, _) = ui.allocate_exact_size(phone_rect_size, egui::Sense::hover());
-                    ui.painter().rect(
-                        rect,
-                        egui::CornerRadius::same(16),
-                        Color32::from_rgb(245, 246, 250),
-                        egui::Stroke::new(1.0, Color32::from_rgb(223, 228, 237)),
-                        egui::epaint::StrokeKind::Middle,
-                    );
-                    ui.painter().rect_filled(
-                        egui::Rect::from_center_size(
-                            rect.center_top() + egui::vec2(0.0, 10.0),
-                            egui::vec2(18.0, 4.0),
-                        ),
-                        egui::CornerRadius::same(2),
-                        Color32::from_rgb(217, 221, 229),
-                    );
-                    ui.painter().rect_filled(
-                        rect.shrink2(egui::vec2(7.0, 9.0)),
-                        egui::CornerRadius::same(12),
-                        Color32::WHITE,
-                    );
-                    let badge_center = rect.center_bottom() - egui::vec2(0.0, 22.0);
-                    let badge_color = if ready {
-                        Color32::from_rgb(51, 162, 94)
-                    } else {
-                        Color32::from_rgb(126, 133, 149)
-                    };
-                    ui.painter().circle_filled(
-                        badge_center,
-                        14.0,
-                        badge_color.gamma_multiply(0.14),
-                    );
-                    ui.painter().circle_filled(badge_center, 12.0, badge_color);
-                    ui.painter().text(
-                        badge_center,
-                        egui::Align2::CENTER_CENTER,
-                        if ready { "✓" } else { "…" },
-                        egui::FontId::proportional(17.0),
-                        Color32::WHITE,
-                    );
-                    ui.add_space(16.0);
-                    ui.label(
-                        RichText::new(title)
-                            .size(20.0)
-                            .strong()
-                            .color(Color32::from_rgb(44, 49, 59)),
-                    );
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new(subtitle)
-                            .size(13.0)
-                            .color(Color32::from_rgb(116, 123, 136)),
-                    );
-                });
-            });
-    });
 }
 
 impl eframe::App for AdbCollectorApp {
@@ -2997,6 +3096,8 @@ impl eframe::App for AdbCollectorApp {
 
         self.ui_settings_dialog(ctx);
         self.ui_clear_confirm_dialog(ctx);
+        self.ui_alias_dialog(ctx);
+        self.ui_foreground_confirm_dialog(ctx);
         self.ui_connect_dialog(ctx);
         self.ui_drop_target_dialog(ctx);
         self.ui_drag_overlay(ctx);
@@ -3131,7 +3232,11 @@ fn format_system_time(time: std::time::SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_device_push_destination, classify_dropped_paths};
+    use super::{
+        build_device_push_destination, classify_dropped_paths, content_view_width,
+        device_transport_rank, format_device_model_name, pick_primary_device_info,
+    };
+    use crate::models::DeviceInfo;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -3151,5 +3256,73 @@ mod tests {
         let remote =
             build_device_push_destination(Path::new("/tmp/demo.txt")).expect("remote destination");
         assert_eq!(remote, "/sdcard/Download/demo.txt");
+    }
+
+    #[test]
+    fn format_device_model_name_prefers_readable_combination() {
+        assert_eq!(
+            format_device_model_name(Some("Google"), Some("Pixel 8")),
+            Some("Google Pixel 8".to_owned())
+        );
+        assert_eq!(
+            format_device_model_name(Some("Google"), Some("Google Pixel 8")),
+            Some("Google Pixel 8".to_owned())
+        );
+        assert_eq!(
+            format_device_model_name(None, Some("Pixel 8")),
+            Some("Pixel 8".to_owned())
+        );
+        assert_eq!(format_device_model_name(None, None), None);
+    }
+
+    #[test]
+    fn pick_primary_device_info_prefers_ready_usb_over_ready_wifi() {
+        let wifi = DeviceInfo {
+            serial: "192.168.0.8:5555".to_owned(),
+            identity_key: "ZY223JQ9K".to_owned(),
+            state: "device".to_owned(),
+            android_version: None,
+            manufacturer: None,
+            model: None,
+        };
+        let usb = DeviceInfo {
+            serial: "ZY223JQ9K".to_owned(),
+            identity_key: "ZY223JQ9K".to_owned(),
+            state: "device".to_owned(),
+            android_version: None,
+            manufacturer: None,
+            model: None,
+        };
+
+        let primary = pick_primary_device_info(&[wifi, usb.clone()]);
+        assert_eq!(primary.serial, usb.serial);
+    }
+
+    #[test]
+    fn device_transport_rank_prefers_ready_wifi_over_offline_usb() {
+        let wifi_ready = DeviceInfo {
+            serial: "192.168.0.8:5555".to_owned(),
+            identity_key: "ZY223JQ9K".to_owned(),
+            state: "device".to_owned(),
+            android_version: None,
+            manufacturer: None,
+            model: None,
+        };
+        let usb_offline = DeviceInfo {
+            serial: "ZY223JQ9K".to_owned(),
+            identity_key: "ZY223JQ9K".to_owned(),
+            state: "offline".to_owned(),
+            android_version: None,
+            manufacturer: None,
+            model: None,
+        };
+
+        assert!(device_transport_rank(&wifi_ready) < device_transport_rank(&usb_offline));
+    }
+
+    #[test]
+    fn content_view_width_reserves_right_gutter_without_going_negative() {
+        assert_eq!(content_view_width(320.0, 28.0), 292.0);
+        assert_eq!(content_view_width(20.0, 28.0), 0.0);
     }
 }

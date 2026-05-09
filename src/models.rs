@@ -10,13 +10,17 @@ pub type SharedChild = Arc<Mutex<Option<Child>>>;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {
     pub serial: String,
+    pub identity_key: String,
     pub state: String,
     pub android_version: Option<String>,
+    pub manufacturer: Option<String>,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug)]
 pub struct DeviceEntry {
     pub info: DeviceInfo,
+    pub transport_serials: Vec<String>,
     pub run_state: DeviceRunState,
     pub output_path: Option<PathBuf>,
     pub started_at: Option<SystemTime>,
@@ -25,8 +29,10 @@ pub struct DeviceEntry {
 
 impl DeviceEntry {
     pub fn new(info: DeviceInfo) -> Self {
+        let primary_serial = info.serial.clone();
         Self {
             info,
+            transport_serials: vec![primary_serial],
             run_state: DeviceRunState::Idle,
             output_path: None,
             started_at: None,
@@ -40,6 +46,15 @@ impl DeviceEntry {
             DeviceRunState::Starting | DeviceRunState::Running | DeviceRunState::Stopping
         )
     }
+
+    pub fn matches_serial(&self, serial_or_identity: &str) -> bool {
+        self.info.identity_key == serial_or_identity
+            || self.info.serial == serial_or_identity
+            || self
+                .transport_serials
+                .iter()
+                .any(|serial| serial == serial_or_identity)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +64,20 @@ pub enum DeviceRunState {
     Running,
     Stopping,
     Error(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ForegroundApp {
+    pub package_name: String,
+    pub activity_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForegroundAppAction {
+    Inspect,
+    ForceStop,
+    ClearData,
+    Uninstall,
 }
 
 #[derive(Debug)]
@@ -69,6 +98,17 @@ pub enum AppEvent {
         serial: String,
         result: Result<String, String>,
     },
+    ForegroundAppResolved {
+        serial: String,
+        action: ForegroundAppAction,
+        result: Result<ForegroundApp, String>,
+    },
+    ForegroundAppActionFinished {
+        serial: String,
+        action: ForegroundAppAction,
+        app: ForegroundApp,
+        result: Result<String, String>,
+    },
     CollectionSpawned {
         serial: String,
         output_path: PathBuf,
@@ -80,6 +120,36 @@ pub enum AppEvent {
         error: Option<String>,
     },
     CleanupFinished(Result<(), String>),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DeviceEntry, DeviceInfo, DeviceRunState};
+
+    #[test]
+    fn device_entry_matches_identity_primary_and_secondary_serials() {
+        let mut entry = DeviceEntry {
+            info: DeviceInfo {
+                serial: "ZY223JQ9K".to_owned(),
+                identity_key: "ZY223JQ9K".to_owned(),
+                state: "device".to_owned(),
+                android_version: None,
+                manufacturer: None,
+                model: None,
+            },
+            transport_serials: vec!["ZY223JQ9K".to_owned(), "192.168.0.8:5555".to_owned()],
+            run_state: DeviceRunState::Idle,
+            output_path: None,
+            started_at: None,
+            child: None,
+        };
+
+        assert!(entry.matches_serial("ZY223JQ9K"));
+        assert!(entry.matches_serial("192.168.0.8:5555"));
+
+        entry.info.identity_key = "ABC123".to_owned();
+        assert!(entry.matches_serial("ABC123"));
+    }
 }
 
 #[derive(Clone, Debug)]

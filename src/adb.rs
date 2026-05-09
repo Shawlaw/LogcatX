@@ -1,4 +1,4 @@
-use crate::models::DeviceInfo;
+use crate::models::{DeviceInfo, ForegroundApp};
 use std::{
     fs::File,
     path::Path,
@@ -45,10 +45,109 @@ pub fn list_devices(adb_path: &str) -> Result<Vec<DeviceInfo>, String> {
     let mut devices = parse_devices_output(&stdout);
     for device in &mut devices {
         if device.state == "device" {
-            device.android_version = query_android_version(adb_path, &device.serial);
+            let metadata = query_device_metadata(adb_path, &device.serial);
+            if let Some(identity_key) = metadata.identity_key {
+                device.identity_key = identity_key;
+            }
+            device.android_version = metadata.android_version;
+            device.manufacturer = metadata.manufacturer;
+            device.model = metadata.model;
         }
     }
     Ok(devices)
+}
+
+pub fn query_foreground_app(adb_path: &str, serial: &str) -> Result<ForegroundApp, String> {
+    let activity_output =
+        adb_shell_command(adb_path, serial, &["dumpsys", "activity", "activities"])
+            .map_err(|err| format!("Failed to query foreground app for {serial}: {err}"))?;
+    if activity_output.status.success() {
+        let stdout = String::from_utf8_lossy(&activity_output.stdout);
+        if let Some(app) = parse_foreground_app_from_activity_dump(&stdout) {
+            return Ok(app);
+        }
+    }
+
+    let window_output = adb_shell_command(adb_path, serial, &["dumpsys", "window", "windows"])
+        .map_err(|err| format!("Failed to query foreground app for {serial}: {err}"))?;
+    if window_output.status.success() {
+        let stdout = String::from_utf8_lossy(&window_output.stdout);
+        if let Some(app) = parse_foreground_app_from_window_dump(&stdout) {
+            return Ok(app);
+        }
+    }
+
+    let activity_output_text = combined_output(&activity_output);
+    let window_output_text = combined_output(&window_output);
+    let activity_details = activity_output_text.if_empty("no output");
+    let window_details = window_output_text.if_empty("no output");
+    Err(format!(
+        "Failed to determine the current foreground app for {serial}. Activity dump: {activity_details}; window dump: {window_details}"
+    ))
+}
+
+pub fn force_stop_package(adb_path: &str, serial: &str, package: &str) -> Result<String, String> {
+    let output =
+        adb_shell_command(adb_path, serial, &["am", "force-stop", package]).map_err(|err| {
+            format!("Failed to run `{adb_path} -s {serial} shell am force-stop {package}`: {err}")
+        })?;
+
+    let combined = combined_output(&output);
+    if output.status.success() {
+        if combined.is_empty() {
+            Ok(format!("Force-stopped {package}."))
+        } else {
+            Ok(combined)
+        }
+    } else {
+        Err(format!(
+            "Failed to force-stop {package} on {serial}: {}",
+            combined.if_empty("unknown error")
+        ))
+    }
+}
+
+pub fn clear_package_data(adb_path: &str, serial: &str, package: &str) -> Result<String, String> {
+    let output = adb_shell_command(adb_path, serial, &["pm", "clear", package]).map_err(|err| {
+        format!("Failed to run `{adb_path} -s {serial} shell pm clear {package}`: {err}")
+    })?;
+
+    let combined = combined_output(&output);
+    let lower = combined.to_ascii_lowercase();
+    if output.status.success() && (combined.is_empty() || lower.contains("success")) {
+        if combined.is_empty() {
+            Ok(format!("Cleared data for {package}."))
+        } else {
+            Ok(combined)
+        }
+    } else {
+        Err(format!(
+            "Failed to clear data for {package} on {serial}: {}",
+            combined.if_empty("unknown error")
+        ))
+    }
+}
+
+pub fn uninstall_package(adb_path: &str, serial: &str, package: &str) -> Result<String, String> {
+    let output =
+        adb_shell_command(adb_path, serial, &["pm", "uninstall", package]).map_err(|err| {
+            format!("Failed to run `{adb_path} -s {serial} shell pm uninstall {package}`: {err}")
+        })?;
+
+    let combined = combined_output(&output);
+    let lower = combined.to_ascii_lowercase();
+    if output.status.success() && (combined.is_empty() || lower.contains("success")) {
+        if combined.is_empty() {
+            Ok(format!("Uninstalled {package}."))
+        } else {
+            Ok(combined)
+        }
+    } else {
+        Err(format!(
+            "Failed to uninstall {package} on {serial}: {}",
+            combined.if_empty("unknown error")
+        ))
+    }
 }
 
 pub fn connect_device(adb_path: &str, target: &str) -> Result<String, String> {
@@ -216,6 +315,19 @@ fn adb_command(adb_path: &str) -> Command {
     command
 }
 
+fn adb_shell_command(adb_path: &str, serial: &str, args: &[&str]) -> Result<Output, String> {
+    adb_command(adb_path)
+        .args(["-s", serial, "shell"])
+        .args(args)
+        .output()
+        .map_err(|err| {
+            format!(
+                "Failed to run `{adb_path} -s {serial} shell {}`: {err}",
+                args.join(" ")
+            )
+        })
+}
+
 #[cfg(target_os = "windows")]
 fn hide_window(command: &mut Command) {
     use std::os::windows::process::CommandExt;
@@ -249,6 +361,14 @@ impl EmptyStringExt for str {
     }
 }
 
+#[derive(Default)]
+struct DeviceMetadata {
+    identity_key: Option<String>,
+    android_version: Option<String>,
+    manufacturer: Option<String>,
+    model: Option<String>,
+}
+
 fn parse_devices_output(stdout: &str) -> Vec<DeviceInfo> {
     stdout
         .lines()
@@ -263,11 +383,29 @@ fn parse_devices_output(stdout: &str) -> Vec<DeviceInfo> {
             let state = parts.next().unwrap_or("unknown");
             Some(DeviceInfo {
                 serial: serial.to_owned(),
+                identity_key: serial.to_owned(),
                 state: state.to_owned(),
                 android_version: None,
+                manufacturer: None,
+                model: None,
             })
         })
         .collect()
+}
+
+fn query_device_metadata(adb_path: &str, serial: &str) -> DeviceMetadata {
+    DeviceMetadata {
+        identity_key: query_device_identity(adb_path, serial),
+        android_version: query_android_version(adb_path, serial),
+        manufacturer: adb_shell_getprop(adb_path, serial, "ro.product.manufacturer")
+            .or_else(|| adb_shell_getprop(adb_path, serial, "ro.product.brand")),
+        model: adb_shell_getprop(adb_path, serial, "ro.product.model"),
+    }
+}
+
+fn query_device_identity(adb_path: &str, serial: &str) -> Option<String> {
+    adb_shell_getprop(adb_path, serial, "ro.serialno")
+        .or_else(|| adb_shell_getprop(adb_path, serial, "ro.boot.serialno"))
 }
 
 fn query_android_version(adb_path: &str, serial: &str) -> Option<String> {
@@ -297,12 +435,12 @@ fn adb_shell_getprop(adb_path: &str, serial: &str, key: &str) -> Option<String> 
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value = stdout.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value.to_owned())
-    }
+    let value = normalize_shell_value(stdout.as_ref());
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn normalize_shell_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn format_android_version(version: &str) -> String {
@@ -370,11 +508,83 @@ fn parse_disconnect_output(target: &str, output: &Output) -> Result<String, Stri
     }
 }
 
+fn parse_foreground_app_from_activity_dump(output: &str) -> Option<ForegroundApp> {
+    for line in output.lines() {
+        let line = line.trim();
+        if !line.contains("ResumedActivity") && !line.contains("topResumedActivity") {
+            continue;
+        }
+        if let Some(app) = extract_foreground_app_from_line(line) {
+            return Some(app);
+        }
+    }
+    None
+}
+
+fn parse_foreground_app_from_window_dump(output: &str) -> Option<ForegroundApp> {
+    for line in output.lines() {
+        let line = line.trim();
+        if !line.contains("mCurrentFocus") && !line.contains("mFocusedApp") {
+            continue;
+        }
+        if let Some(app) = extract_foreground_app_from_line(line) {
+            return Some(app);
+        }
+    }
+    None
+}
+
+fn extract_foreground_app_from_line(line: &str) -> Option<ForegroundApp> {
+    line.split_whitespace().find_map(parse_component_token)
+}
+
+fn parse_component_token(token: &str) -> Option<ForegroundApp> {
+    let cleaned = token.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '{' | '}' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '"' | '\''
+        )
+    });
+    let (package, activity) = cleaned.split_once('/')?;
+    if !is_valid_package_name(package) {
+        return None;
+    }
+
+    let activity = activity.trim_matches(|ch: char| {
+        matches!(
+            ch,
+            '{' | '}' | '(' | ')' | '[' | ']' | ',' | ';' | ':' | '"' | '\''
+        )
+    });
+    if activity.is_empty() {
+        return None;
+    }
+
+    let activity_name = if activity.starts_with('.') {
+        format!("{package}{activity}")
+    } else {
+        activity.to_owned()
+    };
+
+    Some(ForegroundApp {
+        package_name: package.to_owned(),
+        activity_name: Some(activity_name),
+    })
+}
+
+fn is_valid_package_name(package: &str) -> bool {
+    (package == "android" || package.contains('.'))
+        && package
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '$' | '-'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        format_android_version, is_network_device_serial, parse_connect_output,
-        parse_devices_output, parse_disconnect_output,
+        format_android_version, is_network_device_serial, parse_component_token,
+        parse_connect_output, parse_devices_output, parse_disconnect_output,
+        parse_foreground_app_from_activity_dump, parse_foreground_app_from_window_dump,
     };
     use std::process::Output;
 
@@ -390,8 +600,11 @@ ZY223JQ9K\toffline
         let devices = parse_devices_output(output);
         assert_eq!(devices.len(), 3);
         assert_eq!(devices[0].serial, "emulator-5554");
+        assert_eq!(devices[0].identity_key, "emulator-5554");
         assert_eq!(devices[0].state, "device");
         assert_eq!(devices[0].android_version, None);
+        assert_eq!(devices[0].manufacturer, None);
+        assert_eq!(devices[0].model, None);
         assert_eq!(devices[1].state, "offline");
         assert_eq!(devices[2].state, "unauthorized");
     }
@@ -457,6 +670,45 @@ ZY223JQ9K\toffline
         assert!(is_network_device_serial("localhost:5555"));
         assert!(!is_network_device_serial("emulator-5554"));
         assert!(!is_network_device_serial("ZY223JQ9K"));
+    }
+
+    #[test]
+    fn parse_component_token_expands_relative_activity_names() {
+        let app =
+            parse_component_token("com.example/.MainActivity}").expect("foreground component");
+        assert_eq!(app.package_name, "com.example");
+        assert_eq!(
+            app.activity_name.as_deref(),
+            Some("com.example.MainActivity")
+        );
+    }
+
+    #[test]
+    fn parse_foreground_app_from_activity_dump_detects_resumed_activity() {
+        let output = "\
+mResumedActivity: ActivityRecord{829f731 u0 com.tencent.mm/com.tencent.mm.ui.LauncherUI t198}
+";
+
+        let app = parse_foreground_app_from_activity_dump(output).expect("foreground app");
+        assert_eq!(app.package_name, "com.tencent.mm");
+        assert_eq!(
+            app.activity_name.as_deref(),
+            Some("com.tencent.mm.ui.LauncherUI")
+        );
+    }
+
+    #[test]
+    fn parse_foreground_app_from_window_dump_detects_current_focus() {
+        let output = "\
+mCurrentFocus=Window{41dff5a u0 com.android.settings/com.android.settings.Settings}
+";
+
+        let app = parse_foreground_app_from_window_dump(output).expect("foreground app");
+        assert_eq!(app.package_name, "com.android.settings");
+        assert_eq!(
+            app.activity_name.as_deref(),
+            Some("com.android.settings.Settings")
+        );
     }
 
     #[cfg(unix)]
