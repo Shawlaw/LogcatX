@@ -60,10 +60,8 @@ jobs:
           fi
           TAG_NAME="${TAG_REF#refs/tags/}"
 
-          if ! git show-ref --verify --quiet "$TAG_REF"; then
-            echo "Tag ref '$TAG_REF' was not present locally. Fetching it from origin for validation..."
-            git fetch --no-tags origin "+${TAG_REF}:${TAG_REF}"
-          fi
+          echo "Refreshing tag ref '${TAG_REF}' from origin before validation..."
+          git fetch --force --no-tags origin "+${TAG_REF}:${TAG_REF}"
 
           TAG_OBJECT_TYPE="$(git cat-file -t "$TAG_REF" 2>/dev/null || true)"
           TAG_OBJECT_ID="$(git rev-parse -q --verify "${TAG_REF}^{tag}" 2>/dev/null || true)"
