@@ -48,12 +48,28 @@ jobs:
         shell: bash
         run: ./scripts/package_windows_release.sh
 
+      - name: Read annotated tag notes
+        id: tag_notes
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG_REF="refs/tags/${GITHUB_REF_NAME}"
+          if [[ "$(git cat-file -t "$TAG_REF")" != "tag" ]]; then
+            echo "GitHub Release notes must come from an annotated tag, but ${GITHUB_REF_NAME} is not annotated." >&2
+            exit 1
+          fi
+          {
+            echo "body<<EOF"
+            git for-each-ref "$TAG_REF" --format='%(contents)'
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/LogcatX.exe
             dist/LogcatX-${{ github.ref_name }}-win64.zip
-          generate_release_notes: true
+          body: ${{ steps.tag_notes.outputs.body }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
