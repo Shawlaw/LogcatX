@@ -10,6 +10,9 @@ mod fs_utils;
 mod i18n;
 mod models;
 
+const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 820.0];
+const MIN_WINDOW_SIZE: [f32; 2] = [1100.0, 720.0];
+
 fn main() -> eframe::Result<()> {
     let console_mode = cfg!(feature = "console") || std::env::args().any(|arg| arg == "--console");
     let paths = config::resolve_app_paths().unwrap_or_else(|err| fatal_error(&err));
@@ -48,7 +51,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("LogcatX")
-            .with_inner_size([1280.0, 820.0])
+            .with_inner_size(DEFAULT_WINDOW_SIZE)
+            .with_min_inner_size(MIN_WINDOW_SIZE)
             .with_icon(icon),
         ..Default::default()
     };
