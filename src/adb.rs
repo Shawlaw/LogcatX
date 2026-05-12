@@ -112,20 +112,41 @@ pub fn clear_package_data(adb_path: &str, serial: &str, package: &str) -> Result
         format!("Failed to run `{adb_path} -s {serial} shell pm clear {package}`: {err}")
     })?;
 
-    let combined = combined_output(&output);
-    let lower = combined.to_ascii_lowercase();
-    if output.status.success() && (combined.is_empty() || lower.contains("success")) {
-        if combined.is_empty() {
-            Ok(format!("Cleared data for {package}."))
-        } else {
-            Ok(combined)
-        }
-    } else {
-        Err(format!(
-            "Failed to clear data for {package} on {serial}: {}",
-            combined.if_empty("unknown error")
-        ))
+    if package_command_succeeded(&output) {
+        return Ok(package_command_success_message(
+            &output,
+            format!("Cleared data for {package}."),
+        ));
     }
+
+    let primary_error = format!(
+        "Failed to clear data for {package} on {serial}: {}",
+        combined_output(&output).if_empty("unknown error")
+    );
+    if !should_retry_clear_with_run_as(&output) {
+        return Err(primary_error);
+    }
+
+    let run_as_output = adb_shell_command(adb_path, serial, &["run-as", package, "pm", "clear", package])
+        .map_err(|err| {
+            format!(
+                "{primary_error}\nFailed to run `{adb_path} -s {serial} shell run-as {package} pm clear {package}`: {err}"
+            )
+        })?;
+
+    if package_command_succeeded(&run_as_output) {
+        let combined = combined_output(&run_as_output);
+        return Ok(if combined.is_empty() {
+            format!("Cleared data for {package} via run-as fallback.")
+        } else {
+            format!("{combined}\n(run-as fallback)")
+        });
+    }
+
+    Err(format!(
+        "{primary_error}\nRetry via `run-as {package} pm clear {package}` also failed: {}",
+        combined_output(&run_as_output).if_empty("unknown error")
+    ))
 }
 
 pub fn uninstall_package(adb_path: &str, serial: &str, package: &str) -> Result<String, String> {
@@ -134,18 +155,15 @@ pub fn uninstall_package(adb_path: &str, serial: &str, package: &str) -> Result<
             format!("Failed to run `{adb_path} -s {serial} shell pm uninstall {package}`: {err}")
         })?;
 
-    let combined = combined_output(&output);
-    let lower = combined.to_ascii_lowercase();
-    if output.status.success() && (combined.is_empty() || lower.contains("success")) {
-        if combined.is_empty() {
-            Ok(format!("Uninstalled {package}."))
-        } else {
-            Ok(combined)
-        }
+    if package_command_succeeded(&output) {
+        Ok(package_command_success_message(
+            &output,
+            format!("Uninstalled {package}."),
+        ))
     } else {
         Err(format!(
             "Failed to uninstall {package} on {serial}: {}",
-            combined.if_empty("unknown error")
+            combined_output(&output).if_empty("unknown error")
         ))
     }
 }
@@ -464,6 +482,29 @@ fn combined_output(output: &Output) -> String {
         .join("\n")
 }
 
+fn package_command_succeeded(output: &Output) -> bool {
+    let combined = combined_output(output);
+    let lower = combined.to_ascii_lowercase();
+    output.status.success() && (combined.is_empty() || lower.contains("success"))
+}
+
+fn package_command_success_message(output: &Output, fallback: String) -> String {
+    let combined = combined_output(output);
+    if combined.is_empty() {
+        fallback
+    } else {
+        combined
+    }
+}
+
+fn should_retry_clear_with_run_as(output: &Output) -> bool {
+    let lower = combined_output(output).to_ascii_lowercase();
+    lower.contains("android.permission.clear_app_user_data")
+        || (lower.contains("securityexception")
+            && lower.contains("clear")
+            && (lower.contains("user data") || lower.contains("applicationuserdata")))
+}
+
 fn parse_connect_output(target: &str, output: &Output) -> Result<String, String> {
     let combined = combined_output(output);
     let lower = combined.to_ascii_lowercase();
@@ -582,9 +623,10 @@ fn is_valid_package_name(package: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_android_version, is_network_device_serial, parse_component_token,
-        parse_connect_output, parse_devices_output, parse_disconnect_output,
+        format_android_version, is_network_device_serial, package_command_succeeded,
+        parse_component_token, parse_connect_output, parse_devices_output, parse_disconnect_output,
         parse_foreground_app_from_activity_dump, parse_foreground_app_from_window_dump,
+        should_retry_clear_with_run_as,
     };
     use std::process::Output;
 
@@ -709,6 +751,51 @@ mCurrentFocus=Window{41dff5a u0 com.android.settings/com.android.settings.Settin
             app.activity_name.as_deref(),
             Some("com.android.settings.Settings")
         );
+    }
+
+    #[test]
+    fn clear_data_run_as_fallback_detects_permission_failure() {
+        let output = Output {
+            status: exit_status(1),
+            stdout: Vec::new(),
+            stderr: b"Exception occurred while executing 'clear':\njava.lang.SecurityException: PID 16791 does not have permission android.permission.CLEAR_APP_USER_DATA to clear data of package com.example.app".to_vec(),
+        };
+
+        assert!(should_retry_clear_with_run_as(&output));
+    }
+
+    #[test]
+    fn clear_data_run_as_fallback_ignores_unrelated_failures() {
+        let output = Output {
+            status: exit_status(1),
+            stdout: Vec::new(),
+            stderr: b"Failed\nUnknown package: com.example.app".to_vec(),
+        };
+
+        assert!(!should_retry_clear_with_run_as(&output));
+    }
+
+    #[test]
+    fn package_command_succeeded_accepts_empty_or_success_output() {
+        let empty_success = Output {
+            status: exit_status(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        let explicit_success = Output {
+            status: exit_status(0),
+            stdout: b"Success".to_vec(),
+            stderr: Vec::new(),
+        };
+        let failed = Output {
+            status: exit_status(1),
+            stdout: b"Success".to_vec(),
+            stderr: Vec::new(),
+        };
+
+        assert!(package_command_succeeded(&empty_success));
+        assert!(package_command_succeeded(&explicit_success));
+        assert!(!package_command_succeeded(&failed));
     }
 
     #[cfg(unix)]
