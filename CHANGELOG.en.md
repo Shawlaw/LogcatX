@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.5.2] - 2026-05-12
+
+### Added
+- a minimum main-window size constraint so the UI cannot be resized down to an unusable state
+
+### Fixed
+- clearing foreground-app data now retries via `run-as <package> pm clear <package>` when direct `pm clear` fails with the expected permission error
+- version bumped to `0.5.2`
+
 ## [0.5.1] - 2026-05-09
 
 ### Added

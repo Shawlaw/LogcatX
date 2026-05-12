@@ -4,6 +4,15 @@
 
 - English changelog: [`CHANGELOG.en.md`](./CHANGELOG.en.md)
 
+## [0.5.2] - 2026-05-12
+
+### 新增
+- 为主窗口增加最小尺寸约束，避免窗口被缩小到几乎无法使用
+
+### 修复
+- 清除当前前台 App 数据时，若直接执行 `pm clear` 因权限不足失败，会自动回退尝试 `run-as <package> pm clear <package>`
+- 版本号升级为 `0.5.2`
+
 ## [0.5.1] - 2026-05-09
 
 ### 新增
