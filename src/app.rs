@@ -2355,11 +2355,17 @@ impl AdbCollectorApp {
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
         let device_id_for_thread = device_id.clone();
+        let logcat_args = self
+            .config
+            .device_logcat_args
+            .get(&config_key)
+            .map(|s| adb::parse_logcat_args(s))
+            .unwrap_or_default();
 
         thread::spawn(move || {
             let child_holder: SharedChild = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-            match adb::spawn_logcat(&adb_path, &transport_serial, &output_path) {
+            match adb::spawn_logcat(&adb_path, &transport_serial, &output_path, &logcat_args) {
                 Ok(child) => {
                     if let Ok(mut guard) = child_holder.lock() {
                         *guard = Some(child);

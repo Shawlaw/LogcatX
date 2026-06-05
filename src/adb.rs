@@ -299,7 +299,12 @@ pub fn push_file(
     }
 }
 
-pub fn spawn_logcat(adb_path: &str, serial: &str, output_path: &Path) -> Result<Child, String> {
+pub fn spawn_logcat(
+    adb_path: &str,
+    serial: &str,
+    output_path: &Path,
+    extra_args: &[String],
+) -> Result<Child, String> {
     let parent = output_path
         .parent()
         .ok_or_else(|| format!("Invalid output path: {}", output_path.display()))?;
@@ -319,12 +324,66 @@ pub fn spawn_logcat(adb_path: &str, serial: &str, output_path: &Path) -> Result<
         )
     })?;
 
-    adb_command(adb_path)
-        .args(["-s", serial, "logcat"])
+    let mut cmd = adb_command(adb_path);
+    cmd.args(["-s", serial, "logcat"])
+        .args(extra_args)
         .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file))
-        .spawn()
+        .stderr(Stdio::from(stderr_file));
+
+    cmd.spawn()
         .map_err(|err| format!("Failed to start logcat for {serial}: {err}"))
+}
+
+pub fn parse_logcat_args(input: &str) -> Vec<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Vec::new();
+    }
+
+    let mut args = Vec::new();
+    let mut chars = input.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() {
+            chars.next();
+            continue;
+        }
+
+        if ch == '"' {
+            chars.next();
+            let mut token = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == '"' {
+                    chars.next();
+                    break;
+                }
+                token.push(chars.next().unwrap());
+            }
+            args.push(token);
+        } else if ch == '\'' {
+            chars.next();
+            let mut token = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == '\'' {
+                    chars.next();
+                    break;
+                }
+                token.push(chars.next().unwrap());
+            }
+            args.push(token);
+        } else {
+            let mut token = String::new();
+            while let Some(&c) = chars.peek() {
+                if c.is_whitespace() {
+                    break;
+                }
+                token.push(chars.next().unwrap());
+            }
+            args.push(token);
+        }
+    }
+
+    args
 }
 
 fn adb_command(adb_path: &str) -> Command {
@@ -626,7 +685,7 @@ mod tests {
         format_android_version, is_network_device_serial, package_command_succeeded,
         parse_component_token, parse_connect_output, parse_devices_output, parse_disconnect_output,
         parse_foreground_app_from_activity_dump, parse_foreground_app_from_window_dump,
-        should_retry_clear_with_run_as,
+        parse_logcat_args, should_retry_clear_with_run_as,
     };
     use std::process::Output;
 
@@ -796,6 +855,44 @@ mCurrentFocus=Window{41dff5a u0 com.android.settings/com.android.settings.Settin
         assert!(package_command_succeeded(&empty_success));
         assert!(package_command_succeeded(&explicit_success));
         assert!(!package_command_succeeded(&failed));
+    }
+
+    #[test]
+    fn parse_logcat_args_splits_simple_flags() {
+        assert_eq!(
+            parse_logcat_args("-v threadtime -t 100"),
+            vec!["-v", "threadtime", "-t", "100"],
+        );
+    }
+
+    #[test]
+    fn parse_logcat_args_handles_double_quoted_values() {
+        assert_eq!(
+            parse_logcat_args("-e \"some pattern\" -s Tag:V"),
+            vec!["-e", "some pattern", "-s", "Tag:V"],
+        );
+    }
+
+    #[test]
+    fn parse_logcat_args_handles_single_quoted_values() {
+        assert_eq!(
+            parse_logcat_args("-e 'hello world'"),
+            vec!["-e", "hello world"],
+        );
+    }
+
+    #[test]
+    fn parse_logcat_args_returns_empty_for_blank_input() {
+        assert_eq!(parse_logcat_args(""), Vec::<String>::new());
+        assert_eq!(parse_logcat_args("   "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_logcat_args_handles_mixed_quotes_and_flags() {
+        assert_eq!(
+            parse_logcat_args("-v threadtime -e \"WindowManager:*\" *:E"),
+            vec!["-v", "threadtime", "-e", "WindowManager:*", "*:E"],
+        );
     }
 
     #[cfg(unix)]
