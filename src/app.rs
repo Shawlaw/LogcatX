@@ -83,6 +83,7 @@ pub struct AdbCollectorApp {
     active_page: NavigationPage,
     show_clear_confirm: bool,
     show_alias_dialog: bool,
+    show_logcat_args_dialog: bool,
     show_connect_dialog: bool,
     selected_serial: Option<String>,
     version: String,
@@ -92,6 +93,8 @@ pub struct AdbCollectorApp {
     disconnecting_serial: Option<String>,
     alias_input_serial: Option<String>,
     alias_input_value: String,
+    logcat_args_input_serial: Option<String>,
+    logcat_args_input_value: String,
     pending_drop_payload: Option<DroppedPayload>,
     pending_drop_target_serial: Option<String>,
     pending_foreground_confirm: Option<PendingForegroundConfirm>,
@@ -143,6 +146,7 @@ impl AdbCollectorApp {
             active_page: NavigationPage::Devices,
             show_clear_confirm: false,
             show_alias_dialog: false,
+            show_logcat_args_dialog: false,
             show_connect_dialog: false,
             selected_serial: None,
             version: bootstrap.version.to_owned(),
@@ -152,6 +156,8 @@ impl AdbCollectorApp {
             disconnecting_serial: None,
             alias_input_serial: None,
             alias_input_value: String::new(),
+            logcat_args_input_serial: None,
+            logcat_args_input_value: String::new(),
             pending_drop_payload: None,
             pending_drop_target_serial: None,
             pending_foreground_confirm: None,
@@ -847,6 +853,7 @@ impl AdbCollectorApp {
             let mut disconnect_serial: Option<String> = None;
             let mut toggle_pin_serial: Option<String> = None;
             let mut open_alias_serial: Option<String> = None;
+            let mut open_logcat_args_serial: Option<String> = None;
             let mut foreground_action: Option<(String, ForegroundAppAction)> = None;
             let i18n = self.i18n.clone();
             let serial_text = self.tr("device.column.serial");
@@ -869,6 +876,7 @@ impl AdbCollectorApp {
             let pin_text = self.tr("device.action.pin");
             let unpin_text = self.tr("device.action.unpin");
             let edit_alias_text = self.tr("device.action.edit_alias");
+            let edit_logcat_args_text = self.tr("device.action.edit_logcat_args");
             let open_folder_text = self.tr("device.action.open_folder");
             let inspect_foreground_app_text = self.tr("device.action.inspect_foreground_app");
             let stop_foreground_app_text = self.tr("device.action.stop_foreground_app");
@@ -1059,6 +1067,16 @@ impl AdbCollectorApp {
                                                     .clicked()
                                                 {
                                                     open_alias_serial = Some(device_id.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .add(rounded_secondary(
+                                                        edit_logcat_args_text.clone(),
+                                                    ))
+                                                    .clicked()
+                                                {
+                                                    open_logcat_args_serial =
+                                                        Some(device_id.clone());
                                                     ui.close_menu();
                                                 }
                                                 if ui
@@ -1286,6 +1304,9 @@ impl AdbCollectorApp {
             }
             if let Some(serial) = open_alias_serial {
                 self.open_alias_editor(&serial);
+            }
+            if let Some(serial) = open_logcat_args_serial {
+                self.open_logcat_args_editor(&serial);
             }
             if let Some((serial, action)) = foreground_action {
                 self.start_foreground_app_action(serial, action);
@@ -1596,6 +1617,67 @@ impl AdbCollectorApp {
             self.show_alias_dialog = false;
             self.save_device_alias(&serial, self.alias_input_value.clone());
             self.alias_input_serial = None;
+        }
+    }
+
+    fn ui_logcat_args_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_logcat_args_dialog {
+            return;
+        }
+
+        let Some(serial) = self.logcat_args_input_serial.clone() else {
+            self.show_logcat_args_dialog = false;
+            return;
+        };
+        let mut save = false;
+        let mut clear = false;
+        let mut cancel = false;
+        egui::Window::new(self.tr("logcat_args.title"))
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([520.0, 200.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(520.0);
+                ui.label(self.tr_args(
+                    "logcat_args.target",
+                    &[("serial", self.device_identity_label(&serial))],
+                ));
+                ui.add_space(10.0);
+                ui.label(self.tr("logcat_args.input"));
+                ui.text_edit_singleline(&mut self.logcat_args_input_value);
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(self.tr("logcat_args.hint"))
+                        .small()
+                        .color(ui.style().visuals.noninteractive().fg_stroke.color),
+                );
+                ui.add_space(12.0);
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    if ui.button(self.tr("settings.cancel")).clicked() {
+                        cancel = true;
+                    }
+                    if ui.button(self.tr("device.action.clear_alias")).clicked() {
+                        clear = true;
+                    }
+                    if ui.button(self.tr("device.action.save_alias")).clicked() {
+                        save = true;
+                    }
+                });
+            });
+
+        if cancel {
+            self.show_logcat_args_dialog = false;
+            self.logcat_args_input_serial = None;
+            self.logcat_args_input_value.clear();
+        } else if clear {
+            self.show_logcat_args_dialog = false;
+            self.save_device_logcat_args(&serial, String::new());
+            self.logcat_args_input_serial = None;
+        } else if save {
+            self.show_logcat_args_dialog = false;
+            self.save_device_logcat_args(&serial, self.logcat_args_input_value.clone());
+            self.logcat_args_input_serial = None;
         }
     }
 
@@ -2566,6 +2648,18 @@ impl AdbCollectorApp {
         self.show_alias_dialog = true;
     }
 
+    fn open_logcat_args_editor(&mut self, serial: &str) {
+        let identity_key = self.device_identity_key(serial);
+        self.logcat_args_input_serial = Some(identity_key.clone());
+        self.logcat_args_input_value = self
+            .config
+            .device_logcat_args
+            .get(&identity_key)
+            .cloned()
+            .unwrap_or_default();
+        self.show_logcat_args_dialog = true;
+    }
+
     fn device_alias(&self, serial: &str) -> Option<String> {
         let identity_key = self.device_identity_key(serial);
         self.config.device_aliases.get(&identity_key).cloned()
@@ -2780,6 +2874,46 @@ impl AdbCollectorApp {
             "status.alias_cleared"
         } else {
             "status.alias_saved"
+        };
+        self.set_info(self.tr_args(
+            status_key,
+            &[("serial", self.device_identity_label(&identity_key))],
+        ));
+    }
+
+    fn save_device_logcat_args(&mut self, serial: &str, args: String) {
+        let identity_key = self.device_identity_key(serial);
+        let trimmed = args.trim().to_owned();
+        let previous = self
+            .config
+            .device_logcat_args
+            .get(&identity_key)
+            .cloned()
+            .unwrap_or_default();
+
+        if trimmed == previous {
+            return;
+        }
+
+        let previous_args = self.config.device_logcat_args.clone();
+        if trimmed.is_empty() {
+            self.config.device_logcat_args.remove(&identity_key);
+        } else {
+            self.config
+                .device_logcat_args
+                .insert(identity_key.clone(), trimmed.clone());
+        }
+
+        if let Err(err) = self.persist_config() {
+            self.config.device_logcat_args = previous_args;
+            self.set_error(err);
+            return;
+        }
+
+        let status_key = if trimmed.is_empty() {
+            "status.logcat_args_cleared"
+        } else {
+            "status.logcat_args_saved"
         };
         self.set_info(self.tr_args(
             status_key,
@@ -3146,6 +3280,7 @@ impl eframe::App for AdbCollectorApp {
         self.ui_settings_dialog(ctx);
         self.ui_clear_confirm_dialog(ctx);
         self.ui_alias_dialog(ctx);
+        self.ui_logcat_args_dialog(ctx);
         self.ui_foreground_confirm_dialog(ctx);
         self.ui_connect_dialog(ctx);
         self.ui_drop_target_dialog(ctx);
