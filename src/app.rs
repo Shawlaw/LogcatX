@@ -842,6 +842,7 @@ impl AdbCollectorApp {
             let mut stop_serial: Option<String> = None;
             let mut open_output: Option<PathBuf> = None;
             let mut copy_serial: Option<String> = None;
+            let mut copy_log_path_serial: Option<String> = None;
             let mut open_shell_serial: Option<String> = None;
             let mut disconnect_serial: Option<String> = None;
             let mut toggle_pin_serial: Option<String> = None;
@@ -860,6 +861,7 @@ impl AdbCollectorApp {
             let stop_text = self.tr("device.action.stop");
             let open_text = self.tr("device.action.open");
             let copy_text = self.tr("device.action.copy_serial");
+            let copy_log_path_text = self.tr("device.action.copy_latest_log_path");
             let shell_text = self.tr("device.action.open_shell");
             let disconnect_text = self.tr("device.action.disconnect");
             let more_text = self.tr("device.action.more");
@@ -1066,6 +1068,22 @@ impl AdbCollectorApp {
                                                     copy_serial = Some(device_id.clone());
                                                     ui.close_menu();
                                                 }
+                                                {
+                                                    let has_log_path = output_path.is_some();
+                                                    if ui
+                                                        .add_enabled(
+                                                            has_log_path,
+                                                            rounded_secondary(
+                                                                copy_log_path_text.clone(),
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        copy_log_path_serial =
+                                                            Some(device_id.clone());
+                                                        ui.close_menu();
+                                                    }
+                                                }
                                                 if ui
                                                     .add_enabled(
                                                         state == "device",
@@ -1253,6 +1271,9 @@ impl AdbCollectorApp {
             }
             if let Some(serial) = copy_serial {
                 self.copy_serial_to_clipboard(&ctx, serial);
+            }
+            if let Some(serial) = copy_log_path_serial {
+                self.copy_log_path_to_clipboard(&ctx, &serial);
             }
             if let Some(serial) = open_shell_serial {
                 self.open_device_shell(serial);
@@ -2051,6 +2072,26 @@ impl AdbCollectorApp {
             "status.serial_copied",
             &[("serial", self.device_identity_label(&serial))],
         ));
+    }
+
+    fn copy_log_path_to_clipboard(&mut self, ctx: &egui::Context, device_id: &str) {
+        let device_name = self.device_identity_label(device_id);
+        let Some(device) = self.find_device(device_id) else {
+            return;
+        };
+        if let Some(path) = &device.output_path {
+            let display = fs_utils::display_path(path);
+            ctx.copy_text(display);
+            self.set_info(self.tr_args(
+                "status.log_path_copied",
+                &[("serial", device_name)],
+            ));
+        } else {
+            self.set_info(self.tr_args(
+                "status.log_path_not_available",
+                &[("serial", device_name)],
+            ));
+        }
     }
 
     fn open_device_shell(&mut self, device_id: String) {
