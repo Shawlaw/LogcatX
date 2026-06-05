@@ -107,6 +107,8 @@
     "logcat_args.target": "当前设备：{serial}",
     "logcat_args.input": "logcat 参数",
     "logcat_args.hint": "这些额外参数会追加到 adb logcat 命令后面。例如：-v threadtime -s WindowManager:V *:E",
+    "logcat_args.save": "保存",
+    "logcat_args.clear": "清空",
     "settings.initial_title": "首次配置",
     "settings.title": "设置",
     "settings.intro": "请确认 adb 可执行文件、设备日志目录和界面语言。",

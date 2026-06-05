@@ -1657,10 +1657,10 @@ impl AdbCollectorApp {
                     if ui.button(self.tr("settings.cancel")).clicked() {
                         cancel = true;
                     }
-                    if ui.button(self.tr("device.action.clear_alias")).clicked() {
+                    if ui.button(self.tr("logcat_args.clear")).clicked() {
                         clear = true;
                     }
-                    if ui.button(self.tr("device.action.save_alias")).clicked() {
+                    if ui.button(self.tr("logcat_args.save")).clicked() {
                         save = true;
                     }
                 });

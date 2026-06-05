@@ -107,6 +107,8 @@
     "logcat_args.target": "Target device: {serial}",
     "logcat_args.input": "Logcat arguments",
     "logcat_args.hint": "These extra arguments are appended after the adb logcat command. For example: -v threadtime -s WindowManager:V *:E",
+    "logcat_args.save": "Save",
+    "logcat_args.clear": "Clear",
     "settings.initial_title": "Initial setup",
     "settings.title": "Settings",
     "settings.intro": "Confirm the adb executable, device log directory, and interface language.",
