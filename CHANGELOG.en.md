@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.5.3] - 2026-06-06
+
+### Added
+- "Copy latest log file path" action in the device more menu to copy the current or most recent log file path to clipboard
+- Per-device logcat command arguments (e.g. `-v threadtime -s Tag:V *:E`) persisted in config and applied automatically on reconnection
+- Logcat arguments edit dialog with save and clear actions
+
 ## [0.5.2] - 2026-05-12
 
 ### Added

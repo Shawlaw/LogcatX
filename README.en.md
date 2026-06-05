@@ -15,7 +15,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 
 - platform: **Windows**
 - distribution: **portable zip + single exe**
-- current milestone: **v0.5.2**
+- current milestone: **v0.5.3**
 
 ## Screenshots
 
