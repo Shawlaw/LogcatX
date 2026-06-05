@@ -1863,6 +1863,7 @@ impl AdbCollectorApp {
             device_aliases: self.config.device_aliases.clone(),
             pinned_devices: self.config.pinned_devices.clone(),
             recent_connections: self.config.recent_connections.clone(),
+            device_logcat_args: self.config.device_logcat_args.clone(),
         };
 
         if candidate.adb_path.is_empty() || candidate.log_dir.is_empty() {
@@ -1892,6 +1893,7 @@ impl AdbCollectorApp {
             device_aliases: candidate.device_aliases.clone(),
             pinned_devices: candidate.pinned_devices.clone(),
             recent_connections: candidate.recent_connections.clone(),
+            device_logcat_args: candidate.device_logcat_args.clone(),
         };
 
         if let Err(err) = config::save_config(&self.app_paths.config_path, &saved) {

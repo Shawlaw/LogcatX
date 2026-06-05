@@ -25,6 +25,8 @@ pub struct AppConfig {
     pub pinned_devices: Vec<String>,
     #[serde(default)]
     pub recent_connections: Vec<String>,
+    #[serde(default)]
+    pub device_logcat_args: BTreeMap<String, String>,
 }
 
 impl AppConfig {
@@ -41,6 +43,7 @@ impl AppConfig {
             device_aliases: BTreeMap::new(),
             pinned_devices: Vec::new(),
             recent_connections: Vec::new(),
+            device_logcat_args: BTreeMap::new(),
         }
     }
 
@@ -69,6 +72,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
     normalized.device_aliases = normalize_aliases(normalized.device_aliases);
     normalized.pinned_devices = normalize_serial_list(normalized.pinned_devices);
     normalized.recent_connections = normalize_recent_connections(normalized.recent_connections);
+    normalized.device_logcat_args = normalize_logcat_args(normalized.device_logcat_args);
 
     desktop_config::save_pretty_json(path, &normalized)
 }
@@ -121,6 +125,7 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
     config.device_aliases = normalize_aliases(config.device_aliases);
     config.pinned_devices = normalize_serial_list(config.pinned_devices);
     config.recent_connections = normalize_recent_connections(config.recent_connections);
+    config.device_logcat_args = normalize_logcat_args(config.device_logcat_args);
 
     config
 }
@@ -157,6 +162,19 @@ fn normalize_serial_list(values: Vec<String>) -> Vec<String> {
 fn normalize_recent_connections(values: Vec<String>) -> Vec<String> {
     let mut normalized = normalize_serial_list(values);
     normalized.truncate(MAX_RECENT_CONNECTIONS);
+    normalized
+}
+
+fn normalize_logcat_args(args: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut normalized = BTreeMap::new();
+    for (serial, args_str) in args {
+        let serial = serial.trim();
+        let args_str = args_str.trim();
+        if serial.is_empty() || args_str.is_empty() {
+            continue;
+        }
+        normalized.insert(serial.to_owned(), args_str.to_owned());
+    }
     normalized
 }
 
@@ -245,7 +263,7 @@ fn is_executable_file(path: &Path) -> bool {
 mod tests {
     use super::{
         MAX_RECENT_CONNECTIONS, default_app_log_max_size_mb, is_executable_file, normalize_aliases,
-        normalize_recent_connections, normalize_serial_list,
+        normalize_logcat_args, normalize_recent_connections, normalize_serial_list,
     };
     use std::{collections::BTreeMap, fs, path::PathBuf};
 
@@ -310,5 +328,56 @@ mod tests {
         let normalized = normalize_recent_connections(values);
         assert_eq!(normalized.len(), MAX_RECENT_CONNECTIONS);
         assert_eq!(normalized[0], "192.168.0.0:5555");
+    }
+
+    #[test]
+    fn normalize_logcat_args_trims_values_and_discards_empty() {
+        let raw = BTreeMap::from([
+            ("serial-1".to_owned(), "  -v threadtime  ".to_owned()),
+            ("serial-2".to_owned(), "   ".to_owned()),
+            ("serial-3".to_owned(), "-s Tag:V".to_owned()),
+        ]);
+        let normalized = normalize_logcat_args(raw);
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(
+            normalized.get("serial-1"),
+            Some(&"-v threadtime".to_owned())
+        );
+        assert_eq!(
+            normalized.get("serial-3"),
+            Some(&"-s Tag:V".to_owned())
+        );
+    }
+
+    #[test]
+    fn normalize_logcat_args_discards_empty_serials() {
+        let raw = BTreeMap::from([
+            ("".to_owned(), "-v threadtime".to_owned()),
+            (" ".to_owned(), "-s Tag:V".to_owned()),
+        ]);
+        let normalized = normalize_logcat_args(raw);
+        assert!(normalized.is_empty());
+    }
+
+    #[test]
+    fn config_round_trips_device_logcat_args() {
+        let mut config = super::AppConfig::default();
+        config
+            .device_logcat_args
+            .insert("serial-1".into(), "-v threadtime".into());
+        let json = serde_json::to_string(&config).unwrap();
+        let loaded: super::AppConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.device_logcat_args.len(), 1);
+        assert_eq!(
+            loaded.device_logcat_args.get("serial-1"),
+            Some(&"-v threadtime".to_owned())
+        );
+    }
+
+    #[test]
+    fn config_deserializes_without_logcat_args_field() {
+        let json = r#"{"adb_path":"","log_dir":"","app_log_max_size_mb":2,"language":"","device_aliases":{},"pinned_devices":[],"recent_connections":[]}"#;
+        let loaded: super::AppConfig = serde_json::from_str(json).unwrap();
+        assert!(loaded.device_logcat_args.is_empty());
     }
 }
