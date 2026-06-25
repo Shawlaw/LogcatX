@@ -8,6 +8,7 @@ mod app;
 mod config;
 mod fs_utils;
 mod i18n;
+mod managed_child;
 mod models;
 
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 820.0];

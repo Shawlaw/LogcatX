@@ -1,11 +1,11 @@
+use crate::managed_child::ManagedChild;
 use std::{
     path::PathBuf,
-    process::Child,
     sync::{Arc, Mutex},
     time::SystemTime,
 };
 
-pub type SharedChild = Arc<Mutex<Option<Child>>>;
+pub type SharedChild = Arc<Mutex<Option<ManagedChild>>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {

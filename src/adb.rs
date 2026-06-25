@@ -1,8 +1,11 @@
-use crate::models::{DeviceInfo, ForegroundApp};
+use crate::{
+    managed_child::ManagedChild,
+    models::{DeviceInfo, ForegroundApp},
+};
 use std::{
     fs::File,
     path::Path,
-    process::{Child, Command, Output, Stdio},
+    process::{Command, Output, Stdio},
 };
 
 pub fn validate_adb_path(adb_path: &str) -> Result<(), String> {
@@ -304,7 +307,7 @@ pub fn spawn_logcat(
     serial: &str,
     output_path: &Path,
     extra_args: &[String],
-) -> Result<Child, String> {
+) -> Result<ManagedChild, String> {
     let parent = output_path
         .parent()
         .ok_or_else(|| format!("Invalid output path: {}", output_path.display()))?;
@@ -331,6 +334,7 @@ pub fn spawn_logcat(
         .stderr(Stdio::from(stderr_file));
 
     cmd.spawn()
+        .map(ManagedChild::new)
         .map_err(|err| format!("Failed to start logcat for {serial}: {err}"))
 }
 

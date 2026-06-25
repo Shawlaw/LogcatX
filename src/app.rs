@@ -2534,6 +2534,39 @@ impl AdbCollectorApp {
         }
     }
 
+    fn stop_all_collections_for_shutdown(&mut self) {
+        for device in &mut self.devices {
+            let device_label = device.info.serial.clone();
+            if let Some(child) = device.child.take() {
+                Self::stop_child_for_shutdown(&child, &device_label);
+            }
+            if device.is_active() {
+                device.run_state = DeviceRunState::Idle;
+            }
+            device.started_at = None;
+        }
+    }
+
+    fn stop_child_for_shutdown(child: &SharedChild, device_label: &str) {
+        match child.lock() {
+            Ok(mut guard) => {
+                if let Some(process) = guard.as_mut()
+                    && let Err(err) = process.kill()
+                {
+                    log::warn!(
+                        "Failed to stop collector process for {device_label} during shutdown: {err}"
+                    );
+                }
+                *guard = None;
+            }
+            Err(_) => {
+                log::warn!(
+                    "Collector process lock for {device_label} was poisoned during shutdown"
+                );
+            }
+        }
+    }
+
     fn merge_devices(&mut self, devices: Vec<DeviceInfo>) {
         let previous_selected_identity = self
             .selected_serial
@@ -3286,6 +3319,16 @@ impl eframe::App for AdbCollectorApp {
         self.ui_drop_target_dialog(ctx);
         self.ui_drag_overlay(ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stop_all_collections_for_shutdown();
+    }
+}
+
+impl Drop for AdbCollectorApp {
+    fn drop(&mut self) {
+        self.stop_all_collections_for_shutdown();
     }
 }
 
