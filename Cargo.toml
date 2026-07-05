@@ -6,10 +6,10 @@ description = "LogcatX - Windows-first desktop GUI tool for collecting adb logca
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-desktop-config = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.0", package = "desktop-config" }
-desktop-fs = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.0", package = "desktop-fs" }
-desktop-i18n = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.0", package = "desktop-i18n" }
-desktop-logger = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.0", package = "desktop-logger" }
+desktop-config = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.1", package = "desktop-config" }
+desktop-fs = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.1", package = "desktop-fs" }
+desktop-i18n = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.1", package = "desktop-i18n" }
+desktop-logger = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.1", package = "desktop-logger" }
 directories = "5"
 eframe = "0.31"
 log = { version = "0.4", features = ["std"] }

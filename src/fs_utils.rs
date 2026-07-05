@@ -345,6 +345,18 @@ mod tests {
     }
 
     #[test]
+    fn session_log_path_preserves_unicode_alias_in_path_components() {
+        let path = session_log_path(Path::new("/tmp/logs"), "serial:1", Some("小米 14"));
+        assert_eq!(path.parent(), Some(Path::new("/tmp/logs/小米_14")));
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        assert!(file_name.starts_with("小米_14-"));
+        assert!(file_name.ends_with(".log"));
+    }
+
+    #[test]
     fn format_bytes_uses_readable_units() {
         assert_eq!(format_bytes(512), "512 B");
         assert_eq!(format_bytes(2048), "2.00 KB");
