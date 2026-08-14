@@ -3,13 +3,15 @@ name = "logcatx"
 version = "0.5.3"
 edition = "2024"
 description = "LogcatX - Windows-first desktop GUI tool for collecting adb logcat from multiple devices"
+default-run = "logcatx"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-desktop-config = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.1", package = "desktop-config" }
-desktop-fs = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.1", package = "desktop-fs" }
-desktop-i18n = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.1", package = "desktop-i18n" }
-desktop-logger = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.1", package = "desktop-logger" }
+desktop-config = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-config" }
+desktop-fs = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-fs" }
+desktop-i18n = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-i18n" }
+desktop-logger = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-logger" }
+desktop-updater = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-updater" }
 directories = "5"
 eframe = "0.31"
 log = { version = "0.4", features = ["std"] }
