@@ -1,0 +1,16 @@
+# DeskFoundry desktop-updater product contract.
+app_id = "com.logcatx.app"
+channel = "stable"
+archive_root = ""
+replace_files = [
+  "LogcatX.exe",
+  "LogcatX.Updater.exe",
+  "README.md",
+  "README.en.md",
+  "CHANGELOG.md",
+  "CHANGELOG.en.md",
+  "LICENSE",
+  "config.example.json",
+  "icons/icon_128.png"
+]
+preserve_files = []
