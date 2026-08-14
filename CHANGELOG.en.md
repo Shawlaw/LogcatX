@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.6.0] - 2026-08-15
+
+### Added
+- In-app update checks: the sidebar version badge opens the "Application update" dialog for manual checks and release notes
+- Automatic update checks: a silent background check the first time the window opens after 08:00 local time each day; new versions light up the version badge and show a notice, with an opt-out in settings
+- Download and restart updates: packages are Ed25519-signature and SHA-256 verified, then replaced by the new `LogcatX.Updater.exe` helper after the app exits, with rollback copies kept until the new build starts successfully
+- "Later" silences the notice for the offered version until a newer one is published
+
+### Changed
+- The release is now a single portable zip (`LogcatX_<version>_windows_x64_portable_<commit>.zip` containing the app, update helper, and docs); the bare exe is no longer uploaded separately
+- GitHub Release notes are now extracted from the matching `CHANGELOG.md` section instead of the annotated tag message
+- CI releases now build natively on windows-latest and run tests on tag builds
+- 0.5.x and earlier builds ship without the update helper: download this zip manually one last time; later versions can update in-app
+- Signing key generation and repository setup live in `docs/update-signing.md`; the public key is injected at build time via `LOGCATX_UPDATE_PUBLIC_KEY`, and builds without it report "Application updates are not configured in this build" and never contact update servers
+
 ## [0.5.3] - 2026-06-06
 
 ### Added

@@ -3,6 +3,7 @@
   "log_dir": ".\\logs",
   "app_log_max_size_mb": 2,
   "language": "en",
+  "auto_check_updates": true,
   "device_aliases": {
     "emulator-5554": "Pixel 8 Pro"
   },

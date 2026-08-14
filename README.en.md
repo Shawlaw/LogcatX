@@ -9,13 +9,14 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - [English Changelog](./CHANGELOG.en.md)
 - [中文 README](./README.md)
 - [中文更新日志](./CHANGELOG.md)
+- [Update signing & release guide](./docs/update-signing.md) (中文)
 - [MIT License](./LICENSE)
 
 ## Release target
 
 - platform: **Windows**
-- distribution: **portable zip + single exe**
-- current milestone: **v0.5.3**
+- distribution: **portable zip** (ships the app plus an update helper; in-app updates included)
+- current milestone: **v0.6.0**
 
 ## Screenshots
 
@@ -54,6 +55,7 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - clear historical device logs while protecting active sessions
 - write a separate **application runtime log** for diagnostics
 - embedded English and Simplified Chinese UI with system-language default on first launch
+- in-app update checks plus a once-daily automatic check (first window open after 08:00); updates are signature-verified and install with one download-and-restart action
 - shared infrastructure now comes from the public [DeskFoundry](https://github.com/Shawlaw/DeskFoundry) monorepo
 
 ## Portable behavior

@@ -11,6 +11,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 - [English README](./README.en.md)
 - [更新日志](./CHANGELOG.md)
 - [English Changelog](./CHANGELOG.en.md)
+- [应用更新签名与发版说明](./docs/update-signing.md)
 - [MIT License](./LICENSE)
 - [配置示例](./config.example.json)
 - [Windows 打包脚本](./scripts/package_windows_release.sh)
@@ -18,8 +19,8 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 ## 当前发布形态
 
 - 平台：**Windows**
-- 分发方式：**绿色版 zip + 单 exe**
-- 当前里程碑：**v0.5.3**
+- 分发方式：**绿色版 zip**（内含主程序与更新助手，支持应用内检查并安装更新）
+- 当前里程碑：**v0.6.0**
 
 ## 运行截图
 
@@ -58,6 +59,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 - 支持清理历史设备日志，同时保护正在写入的日志
 - 支持独立的应用运行日志，便于排障
 - 内置简体中文与英文界面，首次启动按系统语言选择默认值
+- 支持应用内检查更新与每日自动检查（每天 08:00 后首次打开窗口时），更新包经签名校验后可一键下载并重启完成升级
 - 底层公共能力已拆分到 [DeskFoundry](https://github.com/Shawlaw/DeskFoundry) 统一维护
 
 ## 便携模式说明
