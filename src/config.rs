@@ -27,6 +27,8 @@ pub struct AppConfig {
     pub recent_connections: Vec<String>,
     #[serde(default)]
     pub device_logcat_args: BTreeMap<String, String>,
+    #[serde(default = "default_auto_check_updates")]
+    pub auto_check_updates: bool,
 }
 
 impl AppConfig {
@@ -44,6 +46,7 @@ impl AppConfig {
             pinned_devices: Vec::new(),
             recent_connections: Vec::new(),
             device_logcat_args: BTreeMap::new(),
+            auto_check_updates: default_auto_check_updates(),
         }
     }
 
@@ -180,6 +183,10 @@ fn normalize_logcat_args(args: BTreeMap<String, String>) -> BTreeMap<String, Str
 
 fn default_app_log_max_size_mb() -> u32 {
     2
+}
+
+fn default_auto_check_updates() -> bool {
+    true
 }
 
 pub fn detect_adb_path() -> Option<String> {
@@ -376,5 +383,16 @@ mod tests {
         let json = r#"{"adb_path":"","log_dir":"","app_log_max_size_mb":2,"language":"","device_aliases":{},"pinned_devices":[],"recent_connections":[]}"#;
         let loaded: super::AppConfig = serde_json::from_str(json).unwrap();
         assert!(loaded.device_logcat_args.is_empty());
+    }
+
+    #[test]
+    fn config_defaults_auto_check_updates_for_existing_files() {
+        let json = r#"{"adb_path":"","log_dir":"","app_log_max_size_mb":2,"language":"","device_aliases":{},"pinned_devices":[],"recent_connections":[],"device_logcat_args":{}}"#;
+        let loaded: super::AppConfig = serde_json::from_str(json).unwrap();
+        assert!(loaded.auto_check_updates);
+
+        let json = r#"{"adb_path":"","log_dir":"","app_log_max_size_mb":2,"language":"","device_aliases":{},"pinned_devices":[],"recent_connections":[],"device_logcat_args":{},"auto_check_updates":false}"#;
+        let loaded: super::AppConfig = serde_json::from_str(json).unwrap();
+        assert!(!loaded.auto_check_updates);
     }
 }

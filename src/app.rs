@@ -77,6 +77,7 @@ pub struct AdbCollectorApp {
     adb_path_input: String,
     log_dir_input: String,
     language_input: String,
+    auto_update_input: bool,
     i18n: I18n,
     show_settings: bool,
     require_initial_setup: bool,
@@ -140,6 +141,7 @@ impl AdbCollectorApp {
             tx,
             rx,
             language_input: String::new(),
+            auto_update_input: false,
             i18n: I18n::new("en"),
             show_settings: require_initial_setup,
             require_initial_setup,
@@ -171,6 +173,7 @@ impl AdbCollectorApp {
             sidebar_icon,
         };
         app.language_input = app.config.language.clone();
+        app.auto_update_input = app.config.auto_check_updates;
         app.i18n.set_language(&app.config.language);
 
         if !app.require_initial_setup {
@@ -1522,6 +1525,12 @@ impl AdbCollectorApp {
             self.tr("settings.mode.appdata")
         });
 
+        ui.add_space(8.0);
+        ui.label(self.tr("update.dialog_title"));
+        let auto_check_label = self.tr("update.auto_check");
+        ui.checkbox(&mut self.auto_update_input, auto_check_label);
+        ui.small(self.tr("update.auto_check_hint"));
+
         ui.add_space(12.0);
         ui.horizontal(|ui| {
             if ui.button(self.tr("settings.save")).clicked() {
@@ -1980,6 +1989,7 @@ impl AdbCollectorApp {
             pinned_devices: self.config.pinned_devices.clone(),
             recent_connections: self.config.recent_connections.clone(),
             device_logcat_args: self.config.device_logcat_args.clone(),
+            auto_check_updates: self.auto_update_input,
         };
 
         if candidate.adb_path.is_empty() || candidate.log_dir.is_empty() {
@@ -2010,6 +2020,7 @@ impl AdbCollectorApp {
             pinned_devices: candidate.pinned_devices.clone(),
             recent_connections: candidate.recent_connections.clone(),
             device_logcat_args: candidate.device_logcat_args.clone(),
+            auto_check_updates: candidate.auto_check_updates,
         };
 
         if let Err(err) = config::save_config(&self.app_paths.config_path, &saved) {
@@ -2036,6 +2047,7 @@ impl AdbCollectorApp {
         self.adb_path_input = self.config.adb_path.clone();
         self.log_dir_input = self.config.log_dir.clone();
         self.language_input = self.config.language.clone();
+        self.auto_update_input = self.config.auto_check_updates;
     }
 
     fn refresh_devices(&mut self) {

@@ -208,6 +208,27 @@
     "misc.never": "Never",
     "misc.last_error": "Last error",
     "misc.version": "Version",
-    "misc.click_to_open": "Use the action buttons to open the related folder or file directly."
+    "misc.click_to_open": "Use the action buttons to open the related folder or file directly.",
+    "update.dialog_title": "Application update",
+    "update.current_version": "Current version: {version}",
+    "update.auto_check": "Automatically check for application updates",
+    "update.auto_check_hint": "Checks once in the background when the window is first opened after 08:00 local time. It never downloads or restarts automatically.",
+    "update.check": "Check for updates",
+    "update.checking": "Checking...",
+    "update.up_to_date": "LogcatX is up to date.",
+    "update.available": "Version {version} is available.",
+    "update.download": "Download update",
+    "update.downloading": "Downloading update...",
+    "update.downloaded": "Update downloaded. Restart the app to apply it.",
+    "update.restart_apply": "Restart and update",
+    "update.notes": "Release notes",
+    "update.not_configured": "Application updates are not configured in this build.",
+    "update.check_failed": "Failed to check application updates: {error}",
+    "update.download_failed": "Failed to download application update: {error}",
+    "update.apply_failed": "Failed to start the updater: {error}",
+    "update.last_auto_check": "Last automatic check: {time}",
+    "update.auto_check_failed_hint": "The last automatic check failed. You can try again manually.",
+    "update.later": "Later",
+    "update.new_version_tooltip": "New version available"
   }
 }

@@ -208,6 +208,27 @@
     "misc.never": "从未",
     "misc.last_error": "最近错误",
     "misc.version": "版本",
-    "misc.click_to_open": "需要操作时请直接点击按钮打开对应的文件或文件夹。"
+    "misc.click_to_open": "需要操作时请直接点击按钮打开对应的文件或文件夹。",
+    "update.dialog_title": "应用更新",
+    "update.current_version": "当前版本：{version}",
+    "update.auto_check": "自动检查应用更新",
+    "update.auto_check_hint": "每天本地时间 08:00 后首次打开窗口时在后台检查一次；不会自动下载或重启。",
+    "update.check": "检查更新",
+    "update.checking": "正在检查...",
+    "update.up_to_date": "LogcatX 已是最新版本。",
+    "update.available": "发现新版本 {version}。",
+    "update.download": "下载更新",
+    "update.downloading": "正在下载更新...",
+    "update.downloaded": "更新已下载，重启应用后生效。",
+    "update.restart_apply": "重启并更新",
+    "update.notes": "查看发行说明",
+    "update.not_configured": "此构建尚未配置应用更新。",
+    "update.check_failed": "检查应用更新失败：{error}",
+    "update.download_failed": "下载应用更新失败：{error}",
+    "update.apply_failed": "启动更新失败：{error}",
+    "update.last_auto_check": "上次自动检查：{time}",
+    "update.auto_check_failed_hint": "最近一次自动检查失败，可手动重试。",
+    "update.later": "稍后",
+    "update.new_version_tooltip": "有新版本可用"
   }
 }
