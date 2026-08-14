@@ -1,6 +1,13 @@
-name: Build and Release
+name: release
 
 on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: Run tests before building
+        required: true
+        default: true
+        type: boolean
   push:
     tags:
       - "v*"
@@ -9,27 +16,20 @@ permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
-
+  windows:
+    name: Build Windows portable zip
+    runs-on: windows-latest
+    env:
+      LOGCATX_UPDATE_PUBLIC_KEY: ${{ vars.LOGCATX_UPDATE_PUBLIC_KEY }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
+        uses: actions/checkout@v5
 
-      - name: Install Rust toolchain
+      - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-pc-windows-msvc
-
-      - name: Install cargo-xwin
-        run: cargo install cargo-xwin --locked
-
-      - name: Install LLVM
-        run: sudo apt-get update && sudo apt-get install -y llvm
 
       - name: Verify tag matches Cargo version
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           set -euo pipefail
@@ -44,48 +44,72 @@ jobs:
             exit 1
           fi
 
-      - name: Build release artifacts
+      - name: Test
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.run_tests)
+        run: cargo test
+
+      - name: Compute release metadata
+        id: release_meta
+        shell: pwsh
+        run: |
+          $versionName = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          if (-not $versionName) { throw "Failed to detect version from Cargo.toml" }
+          $commitId = "${{ github.sha }}".Substring(0, 7)
+          "version=$versionName" >> $env:GITHUB_OUTPUT
+          "artifact_name=logcatx-release($($versionName)_$commitId)" >> $env:GITHUB_OUTPUT
+          "zip_name=LogcatX_$($versionName)_windows_x64_portable_$commitId.zip" >> $env:GITHUB_OUTPUT
+
+      - name: Build portable zip
         shell: bash
         run: ./scripts/package_windows_release.sh
 
-      - name: Read annotated tag notes
-        id: tag_notes
+      - name: Verify expected artifact
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           set -euo pipefail
-          TAG_REF="${GITHUB_REF}"
-          if [[ "$TAG_REF" != refs/tags/* ]]; then
-            echo "Expected a tag ref in GITHUB_REF, got '${TAG_REF}'." >&2
+          mkdir -p artifacts
+          if [[ ! -f "dist/${{ steps.release_meta.outputs.zip_name }}" ]]; then
+            echo "Expected ${{ steps.release_meta.outputs.zip_name }} was not produced:" >&2
+            ls dist >&2
             exit 1
           fi
-          TAG_NAME="${TAG_REF#refs/tags/}"
+          cp "dist/${{ steps.release_meta.outputs.zip_name }}" artifacts/
 
-          echo "Refreshing tag ref '${TAG_REF}' from origin before validation..."
-          git fetch --force --no-tags origin "+${TAG_REF}:${TAG_REF}"
+      - name: Generate release notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $versionName = "${{ steps.release_meta.outputs.version }}"
+          $changelog = Get-Content CHANGELOG.md -Raw
+          $pattern = "(?ms)^## \[$([regex]::Escape($versionName))\].*?(?=^## \[|\z)"
+          $notes = [regex]::Match($changelog, $pattern)
+          if (-not $notes.Success) { throw "CHANGELOG.md does not contain release notes for $versionName" }
+          Set-Content -Path artifacts/release-notes.md -Value $notes.Value.Trim()
 
-          TAG_OBJECT_TYPE="$(git cat-file -t "$TAG_REF" 2>/dev/null || true)"
-          TAG_OBJECT_ID="$(git rev-parse -q --verify "${TAG_REF}^{tag}" 2>/dev/null || true)"
-          TAG_COMMIT_ID="$(git rev-parse -q --verify "${TAG_REF}^{commit}" 2>/dev/null || true)"
-          if [[ -z "$TAG_OBJECT_ID" ]]; then
-            echo "GitHub Release notes must come from an annotated tag, but '${TAG_NAME}' is not annotated." >&2
-            echo "Debug: ref=${TAG_REF}, object_type=${TAG_OBJECT_TYPE:-<missing>}, commit=${TAG_COMMIT_ID:-<missing>}" >&2
-            echo "Hint: create and push an annotated tag: git tag -a ${TAG_NAME} -m \"Release ${TAG_NAME}\" && git push origin ${TAG_NAME}" >&2
-            exit 1
-          fi
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ steps.release_meta.outputs.artifact_name }}
+          path: dist/${{ steps.release_meta.outputs.zip_name }}
 
-          echo "Validated annotated tag '${TAG_NAME}': tag_object=${TAG_OBJECT_ID}, commit=${TAG_COMMIT_ID}"
-          {
-            echo "body<<EOF"
-            git for-each-ref "$TAG_REF" --format='%(contents)'
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Publish GitHub release
+      - name: Upload GitHub Release asset
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/LogcatX.exe
-            dist/LogcatX-${{ github.ref_name }}-win64.zip
-          body: ${{ steps.tag_notes.outputs.body }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: artifacts/${{ steps.release_meta.outputs.zip_name }}
+          body_path: artifacts/release-notes.md
+
+      - name: Publish signed application update manifest
+        if: startsWith(github.ref, 'refs/tags/v') && vars.LOGCATX_UPDATE_PUBLIC_KEY != ''
+        uses: Shawlaw/DeskFoundry/actions/publish-portable-update@v0.1.4
+        with:
+          app-id: com.logcatx.app
+          version: ${{ steps.release_meta.outputs.version }}
+          asset-path: artifacts/${{ steps.release_meta.outputs.zip_name }}
+          asset-url: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.release_meta.outputs.zip_name }}
+          notes-url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+          private-key: ${{ secrets.DESKTOP_UPDATE_PRIVATE_KEY }}
+          public-key: ${{ vars.LOGCATX_UPDATE_PUBLIC_KEY }}
+          branch: master
