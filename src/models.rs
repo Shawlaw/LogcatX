@@ -1,4 +1,5 @@
 use crate::managed_child::ManagedChild;
+use desktop_updater::UpdateCandidate;
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -120,6 +121,10 @@ pub enum AppEvent {
         error: Option<String>,
     },
     CleanupFinished(Result<(), String>),
+    UpdateCheckFinished {
+        automatic: bool,
+        result: Result<Option<UpdateCandidate>, String>,
+    },
 }
 
 #[cfg(test)]

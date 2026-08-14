@@ -7,7 +7,9 @@ use crate::{
         AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, ForegroundApp, ForegroundAppAction,
         SharedChild, StatusMessage,
     },
+    updater,
 };
+use desktop_updater::{CheckResult, UpdateCandidate};
 use eframe::egui::{self, Align, Color32, RichText};
 use rfd::FileDialog;
 use std::{
@@ -46,6 +48,25 @@ struct PendingForegroundConfirm {
     serial: String,
     action: ForegroundAppAction,
     app: ForegroundApp,
+}
+
+/// Display-ready facts about an available update; the full candidate is kept
+/// separately because only a fresh, signature-verified check may be downloaded.
+#[derive(Clone, Debug)]
+struct UpdateInfo {
+    version: String,
+    notes_url: Option<String>,
+}
+
+/// Outcome of the most recent update check; availability is tracked separately
+/// through `update_info` so a restored session can show a known update without
+/// having contacted the network yet.
+#[derive(Clone, Debug)]
+enum UpdatePhase {
+    Idle,
+    Checking,
+    UpToDate,
+    Failed(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,6 +128,13 @@ pub struct AdbCollectorApp {
     last_device_snapshot: Vec<DeviceInfo>,
     last_auto_poll_error: Option<String>,
     sidebar_icon: Option<egui::TextureHandle>,
+    update_phase: UpdatePhase,
+    update_info: Option<UpdateInfo>,
+    update_candidate: Option<UpdateCandidate>,
+    update_dismissed: bool,
+    update_cache: updater::UpdateStatusCache,
+    show_update_dialog: bool,
+    viewport_focused: Option<bool>,
 }
 
 impl AdbCollectorApp {
@@ -127,6 +155,18 @@ impl AdbCollectorApp {
                     cc.egui_ctx
                         .load_texture("sidebar_icon", image, egui::TextureOptions::LINEAR)
                 });
+
+        let update_cache = updater::load_status_cache(&updater::status_cache_path(
+            &bootstrap.app_paths.config_dir,
+        ));
+        let restored_update = update_cache
+            .is_available_for(bootstrap.version)
+            .then(|| UpdateInfo {
+                version: update_cache.version.clone().unwrap_or_default(),
+                notes_url: update_cache.notes_url.clone(),
+            })
+            .filter(|info| !info.version.is_empty());
+        let update_dismissed = update_cache.is_dismissed();
 
         let mut app = Self {
             adb_path_input: config.adb_path.clone(),
@@ -171,6 +211,13 @@ impl AdbCollectorApp {
             last_device_snapshot: Vec::new(),
             last_auto_poll_error: None,
             sidebar_icon,
+            update_phase: UpdatePhase::Idle,
+            update_info: restored_update,
+            update_candidate: None,
+            update_dismissed,
+            update_cache,
+            show_update_dialog: false,
+            viewport_focused: None,
         };
         app.language_input = app.config.language.clone();
         app.auto_update_input = app.config.auto_check_updates;
@@ -436,6 +483,9 @@ impl AdbCollectorApp {
                     }
                     Err(err) => self.set_error(err),
                 },
+                AppEvent::UpdateCheckFinished { automatic, result } => {
+                    self.handle_update_check_finished(automatic, result);
+                }
             }
         }
     }
@@ -460,18 +510,37 @@ impl AdbCollectorApp {
                             .color(Color32::from_rgb(31, 37, 49)),
                     );
                     ui.add_space(6.0);
-                    egui::Frame::new()
+                    let update_available = self.update_info.is_some() && !self.update_dismissed;
+                    let mut pill_text = egui::text::LayoutJob::default();
+                    if update_available {
+                        pill_text.append(
+                            "● ",
+                            0.0,
+                            egui::TextFormat::simple(
+                                egui::FontId::proportional(10.0),
+                                Color32::from_rgb(255, 200, 60),
+                            ),
+                        );
+                    }
+                    pill_text.append(
+                        &format!("v{}", self.version),
+                        0.0,
+                        egui::TextFormat::simple(egui::FontId::proportional(11.5), Color32::WHITE),
+                    );
+                    let pill_button = egui::Button::new(pill_text)
                         .fill(Color32::from_rgb(49, 106, 255))
                         .corner_radius(egui::CornerRadius::same(8))
-                        .inner_margin(egui::Margin::symmetric(7, 3))
-                        .show(ui, |ui| {
-                            ui.label(
-                                RichText::new(format!("v{}", self.version))
-                                    .color(Color32::WHITE)
-                                    .size(11.5)
-                                    .strong(),
-                            );
-                        });
+                        .min_size(egui::vec2(0.0, 22.0));
+                    let mut pill_response = ui
+                        .add(pill_button)
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    if update_available {
+                        pill_response =
+                            pill_response.on_hover_text(self.tr("update.new_version_tooltip"));
+                    }
+                    if pill_response.clicked() {
+                        self.show_update_dialog = true;
+                    }
                 });
             });
         ui.add_space(12.0);
@@ -1548,6 +1617,121 @@ impl AdbCollectorApp {
         });
     }
 
+    fn ui_update_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_update_dialog {
+            return;
+        }
+
+        let mut open = true;
+        let mut check_clicked = false;
+        let mut later_clicked = false;
+        let mut open_notes_url: Option<String> = None;
+
+        egui::Window::new(self.tr("update.dialog_title"))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(400.0);
+                ui.label(self.tr_args(
+                    "update.current_version",
+                    &[("version", self.version.clone())],
+                ));
+                ui.add_space(6.0);
+
+                if !updater::updates_configured() {
+                    ui.label(self.tr("update.not_configured"));
+                } else {
+                    match self.update_phase.clone() {
+                        UpdatePhase::Checking => {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(self.tr("update.checking"));
+                            });
+                        }
+                        UpdatePhase::UpToDate => {
+                            ui.label(self.tr("update.up_to_date"));
+                        }
+                        UpdatePhase::Failed(error) => {
+                            ui.label(
+                                RichText::new(
+                                    self.tr_args("update.check_failed", &[("error", error)]),
+                                )
+                                .color(Color32::from_rgb(192, 57, 43)),
+                            );
+                        }
+                        UpdatePhase::Idle => {}
+                    }
+
+                    if let Some(info) = &self.update_info {
+                        ui.label(
+                            RichText::new(
+                                self.tr_args(
+                                    "update.available",
+                                    &[("version", info.version.clone())],
+                                ),
+                            )
+                            .strong()
+                            .color(Color32::from_rgb(210, 120, 10)),
+                        );
+                        if let Some(notes_url) = info.notes_url.clone() {
+                            if ui.button(self.tr("update.notes")).clicked() {
+                                open_notes_url = Some(notes_url);
+                            }
+                        }
+                    }
+
+                    if matches!(self.update_phase, UpdatePhase::Idle)
+                        && self.update_cache.error.is_some()
+                    {
+                        ui.small(self.tr("update.auto_check_failed_hint"));
+                    }
+                    if let Some(checked_at) = self.formatted_last_update_check() {
+                        ui.small(self.tr_args("update.last_auto_check", &[("time", checked_at)]));
+                    }
+                }
+
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    later_clicked = ui.button(self.tr("update.later")).clicked();
+                    let checking = matches!(self.update_phase, UpdatePhase::Checking);
+                    check_clicked = ui
+                        .add_enabled(!checking, egui::Button::new(self.tr("update.check")))
+                        .clicked();
+                });
+            });
+
+        if check_clicked {
+            self.request_update_check(false);
+        }
+        if let Some(notes_url) = open_notes_url {
+            if let Err(err) = fs_utils::open_url(&notes_url) {
+                self.set_error(err);
+            }
+        }
+        if later_clicked || !open {
+            self.show_update_dialog = false;
+            self.dismiss_update_notice();
+        }
+    }
+
+    fn formatted_last_update_check(&self) -> Option<String> {
+        let checked_at = self.update_cache.checked_at.as_deref()?;
+        if self.update_cache.current_version.as_deref() != Some(self.version.as_str()) {
+            return None;
+        }
+        chrono::DateTime::parse_from_rfc3339(checked_at)
+            .ok()
+            .map(|checked_at| {
+                checked_at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .or_else(|| Some(checked_at.to_owned()))
+    }
+
     fn ui_clear_confirm_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_clear_confirm {
             return;
@@ -2099,6 +2283,131 @@ impl AdbCollectorApp {
             let result = fs_utils::dir_size(PathBuf::from(log_dir).as_path());
             let _ = tx.send(AppEvent::LogSizeRefreshed(result));
         });
+    }
+
+    fn update_status_cache_path(&self) -> PathBuf {
+        updater::status_cache_path(&self.app_paths.config_dir)
+    }
+
+    fn persist_update_cache(&mut self) {
+        let path = self.update_status_cache_path();
+        if let Err(err) = updater::write_status_cache(&path, &self.update_cache) {
+            log::warn!("Failed to persist application update status: {err}");
+        }
+    }
+
+    /// Starts a signed-manifest update check on a background thread. Automatic
+    /// checks additionally mark today as done so a failing network does not
+    /// retry on every focus event.
+    fn request_update_check(&mut self, automatic: bool) {
+        if !updater::updates_configured() {
+            if automatic {
+                self.update_cache.record_automatic_skipped(&self.version);
+                self.persist_update_cache();
+            }
+            return;
+        }
+        if matches!(self.update_phase, UpdatePhase::Checking) {
+            return;
+        }
+
+        self.update_phase = UpdatePhase::Checking;
+        let Some(config) = updater::update_config(&self.version) else {
+            return;
+        };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = desktop_updater::check(&config)
+                .map(|result| match result {
+                    CheckResult::UpToDate => None,
+                    CheckResult::UpdateAvailable(candidate) => Some(candidate),
+                })
+                .map_err(|error| error.to_string());
+            let _ = tx.send(AppEvent::UpdateCheckFinished { automatic, result });
+        });
+    }
+
+    /// Runs the daily automatic check when the window gains focus. A hidden
+    /// window should not generate update traffic until the user returns.
+    fn maybe_automatic_update_check(&mut self, ctx: &egui::Context) {
+        let focused = ctx.input(|input| input.viewport().focused).unwrap_or(true);
+        let gained_focus = match self.viewport_focused {
+            None => focused,
+            Some(previous) => focused && !previous,
+        };
+        self.viewport_focused = Some(focused);
+
+        if !gained_focus || self.require_initial_setup || self.show_update_dialog {
+            return;
+        }
+        if updater::automatic_check_is_due(
+            self.config.auto_check_updates,
+            updater::local_hour(),
+            &updater::today_local(),
+            self.update_cache.last_automatic_check_date.as_deref(),
+        ) {
+            log::info!("Starting daily automatic application update check");
+            self.request_update_check(true);
+        }
+    }
+
+    fn handle_update_check_finished(
+        &mut self,
+        automatic: bool,
+        result: Result<Option<UpdateCandidate>, String>,
+    ) {
+        match result {
+            Ok(candidate) => {
+                self.update_cache
+                    .record_check(&self.version, candidate.as_ref(), automatic);
+                self.persist_update_cache();
+                match candidate {
+                    Some(candidate) => {
+                        log::info!(
+                            "Application update available: {} -> {}",
+                            self.version,
+                            candidate.version()
+                        );
+                        self.update_info = Some(UpdateInfo {
+                            version: candidate.version().to_owned(),
+                            notes_url: candidate.notes_url().map(str::to_owned),
+                        });
+                        self.update_candidate = Some(candidate);
+                        self.update_dismissed = false;
+                        self.update_phase = UpdatePhase::Idle;
+                        if automatic {
+                            self.show_update_dialog = true;
+                        }
+                    }
+                    None => {
+                        log::info!("Application is up to date at {}", self.version);
+                        self.update_info = None;
+                        self.update_candidate = None;
+                        self.update_phase = UpdatePhase::UpToDate;
+                    }
+                }
+            }
+            Err(err) => {
+                log::warn!("Application update check failed: {err}");
+                self.update_phase = UpdatePhase::Failed(err.clone());
+                self.update_cache
+                    .record_failure(&self.version, err.clone(), automatic);
+                self.persist_update_cache();
+                if !automatic {
+                    self.set_error(self.tr_args("update.check_failed", &[("error", err)]));
+                }
+            }
+        }
+    }
+
+    /// Silences the notice for the currently offered version; the sidebar
+    /// indicator and manual checks keep working.
+    fn dismiss_update_notice(&mut self) {
+        if self.update_info.is_some() && !self.update_dismissed {
+            self.update_cache.dismiss_available();
+            self.persist_update_cache();
+            self.update_dismissed = true;
+        }
     }
 
     fn clear_history_logs(&mut self) {
@@ -3311,6 +3620,7 @@ impl eframe::App for AdbCollectorApp {
         self.handle_events();
         self.poll_devices_if_due();
         self.handle_dropped_files(ctx);
+        self.maybe_automatic_update_check(ctx);
 
         egui::SidePanel::left("sidebar_panel")
             .exact_width(248.0)
@@ -3359,6 +3669,7 @@ impl eframe::App for AdbCollectorApp {
         self.ui_foreground_confirm_dialog(ctx);
         self.ui_connect_dialog(ctx);
         self.ui_drop_target_dialog(ctx);
+        self.ui_update_dialog(ctx);
         self.ui_drag_overlay(ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
     }

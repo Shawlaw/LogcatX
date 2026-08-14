@@ -20,27 +20,11 @@ pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/Shawlaw/LogcatX/master/updates/stable.json";
 pub const SIGNATURE_URL: &str =
     "https://raw.githubusercontent.com/Shawlaw/LogcatX/master/updates/stable.json.sig";
-pub const MAIN_EXE_NAME: &str = "LogcatX.exe";
-pub const HELPER_EXE_NAME: &str = "LogcatX.Updater.exe";
 pub const STATUS_CACHE_FILE: &str = "app_update_status.logcatx.json";
 const STATUS_CACHE_SCHEMA_VERSION: u8 = 1;
 /// Automatic checks stay quiet before this local hour so a freshly opened
 /// machine does not spend its first minutes on update traffic.
 const AUTOMATIC_CHECK_START_HOUR: u32 = 8;
-
-/// Files a release ZIP is allowed to replace in the installation directory.
-/// Must stay in sync with `desktop-update.toml` at the repository root.
-pub const RELEASE_REPLACE_FILES: &[&str] = &[
-    MAIN_EXE_NAME,
-    HELPER_EXE_NAME,
-    "README.md",
-    "README.en.md",
-    "CHANGELOG.md",
-    "CHANGELOG.en.md",
-    "LICENSE",
-    "config.example.json",
-    "icons/icon_128.png",
-];
 
 pub fn public_key() -> Option<&'static str> {
     option_env!("LOGCATX_UPDATE_PUBLIC_KEY")
@@ -66,10 +50,6 @@ pub fn update_config(current_version: &str) -> Option<UpdateConfig> {
 
 pub fn status_cache_path(config_dir: &Path) -> PathBuf {
     config_dir.join(STATUS_CACHE_FILE)
-}
-
-pub fn updates_dir(config_dir: &Path) -> PathBuf {
-    config_dir.join("updates")
 }
 
 pub fn today_local() -> String {
