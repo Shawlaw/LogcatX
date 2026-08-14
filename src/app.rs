@@ -1932,11 +1932,9 @@ impl AdbCollectorApp {
         let hover_target = if ready_devices.len() == 1 {
             ready_devices.first().cloned()
         } else {
-            self.selected_serial.clone().filter(|serial| {
-                ready_devices
-                    .iter()
-                    .any(|candidate| candidate == serial)
-            })
+            self.selected_serial
+                .clone()
+                .filter(|serial| ready_devices.iter().any(|candidate| candidate == serial))
         };
 
         egui::Area::new("drop_overlay".into())
@@ -2202,15 +2200,11 @@ impl AdbCollectorApp {
         if let Some(path) = &device.output_path {
             let display = fs_utils::display_path(path);
             ctx.copy_text(display);
-            self.set_info(self.tr_args(
-                "status.log_path_copied",
-                &[("serial", device_name)],
-            ));
+            self.set_info(self.tr_args("status.log_path_copied", &[("serial", device_name)]));
         } else {
-            self.set_info(self.tr_args(
-                "status.log_path_not_available",
-                &[("serial", device_name)],
-            ));
+            self.set_info(
+                self.tr_args("status.log_path_not_available", &[("serial", device_name)]),
+            );
         }
     }
 

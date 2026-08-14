@@ -343,10 +343,7 @@ mod tests {
             normalized.get("serial-1"),
             Some(&"-v threadtime".to_owned())
         );
-        assert_eq!(
-            normalized.get("serial-3"),
-            Some(&"-s Tag:V".to_owned())
-        );
+        assert_eq!(normalized.get("serial-3"), Some(&"-s Tag:V".to_owned()));
     }
 
     #[test]
