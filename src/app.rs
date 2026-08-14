@@ -9,7 +9,7 @@ use crate::{
     },
     updater,
 };
-use desktop_updater::{CheckResult, UpdateCandidate};
+use desktop_updater::{CheckResult, DownloadedUpdate, UpdateCandidate};
 use eframe::egui::{self, Align, Color32, RichText};
 use rfd::FileDialog;
 use std::{
@@ -135,6 +135,12 @@ pub struct AdbCollectorApp {
     update_cache: updater::UpdateStatusCache,
     show_update_dialog: bool,
     viewport_focused: Option<bool>,
+    update_downloading: bool,
+    update_download_progress: Option<(u64, u64)>,
+    update_progress_rx: Option<Receiver<(u64, u64)>>,
+    update_downloaded: Option<DownloadedUpdate>,
+    update_applying: bool,
+    exit_after_update_apply: bool,
 }
 
 impl AdbCollectorApp {
@@ -218,6 +224,12 @@ impl AdbCollectorApp {
             update_cache,
             show_update_dialog: false,
             viewport_focused: None,
+            update_downloading: false,
+            update_download_progress: None,
+            update_progress_rx: None,
+            update_downloaded: None,
+            update_applying: false,
+            exit_after_update_apply: false,
         };
         app.language_input = app.config.language.clone();
         app.auto_update_input = app.config.auto_check_updates;
@@ -486,8 +498,63 @@ impl AdbCollectorApp {
                 AppEvent::UpdateCheckFinished { automatic, result } => {
                     self.handle_update_check_finished(automatic, result);
                 }
+                AppEvent::UpdateDownloadFinished(result) => {
+                    self.update_downloading = false;
+                    self.update_download_progress = None;
+                    self.update_progress_rx = None;
+                    match result {
+                        Ok(downloaded) => {
+                            log::info!(
+                                "Application update {} downloaded and verified",
+                                downloaded.candidate.version()
+                            );
+                            self.update_downloaded = Some(downloaded);
+                            self.set_info(self.tr_args(
+                                "status.update_downloaded",
+                                &[("version", self.update_info_version())],
+                            ));
+                        }
+                        Err(err) => {
+                            log::warn!("Application update download failed: {err}");
+                            self.set_error(
+                                self.tr_args("update.download_failed", &[("error", err)]),
+                            );
+                        }
+                    }
+                }
+                AppEvent::UpdateApplyStarted(result) => match result {
+                    Ok(()) => {
+                        // The helper now owns replacement and restart; closing
+                        // the viewport lets on_exit stop adb collections.
+                        log::info!("Update helper started; exiting for update");
+                        self.exit_after_update_apply = true;
+                    }
+                    Err(err) => {
+                        log::warn!("Failed to start the update helper: {err}");
+                        self.update_applying = false;
+                        self.set_error(self.tr_args("update.apply_failed", &[("error", err)]));
+                    }
+                },
             }
         }
+    }
+
+    /// Drains download progress messages published by the download thread.
+    fn poll_update_download_progress(&mut self) {
+        let Some(receiver) = self.update_progress_rx.take() else {
+            return;
+        };
+        while let Ok(progress) = receiver.try_recv() {
+            self.update_download_progress = Some(progress);
+        }
+        self.update_progress_rx = Some(receiver);
+    }
+
+    fn update_info_version(&self) -> String {
+        self.update_info
+            .as_ref()
+            .map(|info| info.version.clone())
+            .unwrap_or_default()
     }
 
     fn ui_sidebar(&mut self, ui: &mut egui::Ui) {
@@ -1625,6 +1692,8 @@ impl AdbCollectorApp {
         let mut open = true;
         let mut check_clicked = false;
         let mut later_clicked = false;
+        let mut download_clicked = false;
+        let mut apply_clicked = false;
         let mut open_notes_url: Option<String> = None;
 
         egui::Window::new(self.tr("update.dialog_title"))
@@ -1680,6 +1749,41 @@ impl AdbCollectorApp {
                                 open_notes_url = Some(notes_url);
                             }
                         }
+                        ui.add_space(4.0);
+
+                        let busy = self.update_downloading || self.update_applying;
+                        if self.update_downloaded.is_some() {
+                            ui.label(self.tr("update.downloaded"));
+                        } else if self.update_downloading {
+                            ui.label(self.tr("update.downloading"));
+                            let fraction = self
+                                .update_download_progress
+                                .and_then(|(done, total)| {
+                                    (total > 0).then_some(done as f32 / total as f32)
+                                })
+                                .unwrap_or(0.0);
+                            ui.add(
+                                egui::ProgressBar::new(fraction.clamp(0.0, 1.0)).show_percentage(),
+                            );
+                        } else if !busy {
+                            let has_candidate = self.update_candidate.is_some();
+                            download_clicked = ui
+                                .add_enabled(
+                                    has_candidate,
+                                    egui::Button::new(self.tr("update.download")),
+                                )
+                                .clicked();
+                        }
+                        if self.update_downloaded.is_some() {
+                            apply_clicked = ui
+                                .add_enabled(
+                                    !busy,
+                                    egui::Button::new(
+                                        RichText::new(self.tr("update.restart_apply")).strong(),
+                                    ),
+                                )
+                                .clicked();
+                        }
                     }
 
                     if matches!(self.update_phase, UpdatePhase::Idle)
@@ -1704,6 +1808,12 @@ impl AdbCollectorApp {
 
         if check_clicked {
             self.request_update_check(false);
+        }
+        if download_clicked {
+            self.request_update_download();
+        }
+        if apply_clicked {
+            self.request_update_apply();
         }
         if let Some(notes_url) = open_notes_url {
             if let Err(err) = fs_utils::open_url(&notes_url) {
@@ -2368,6 +2478,16 @@ impl AdbCollectorApp {
                             self.version,
                             candidate.version()
                         );
+                        // A download may only target the candidate the user
+                        // was shown; drop stale packages from older versions.
+                        if self
+                            .update_downloaded
+                            .as_ref()
+                            .map(|downloaded| downloaded.candidate.version() != candidate.version())
+                            != Some(false)
+                        {
+                            self.update_downloaded = None;
+                        }
                         self.update_info = Some(UpdateInfo {
                             version: candidate.version().to_owned(),
                             notes_url: candidate.notes_url().map(str::to_owned),
@@ -2383,6 +2503,7 @@ impl AdbCollectorApp {
                         log::info!("Application is up to date at {}", self.version);
                         self.update_info = None;
                         self.update_candidate = None;
+                        self.update_downloaded = None;
                         self.update_phase = UpdatePhase::UpToDate;
                     }
                 }
@@ -2398,6 +2519,66 @@ impl AdbCollectorApp {
                 }
             }
         }
+    }
+
+    /// Downloads the currently offered candidate into the updates directory.
+    /// The archive hash and size are verified by desktop-updater before the
+    /// result is accepted.
+    fn request_update_download(&mut self) {
+        if self.update_downloading || self.update_applying {
+            return;
+        }
+        let Some(config) = updater::update_config(&self.version) else {
+            return;
+        };
+        let Some(candidate) = self.update_candidate.clone() else {
+            return;
+        };
+
+        self.update_downloading = true;
+        self.update_download_progress = None;
+        let updates_dir = updater::updates_dir(&self.app_paths.config_dir);
+        let (progress_tx, progress_rx) = mpsc::channel();
+        self.update_progress_rx = Some(progress_rx);
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result =
+                desktop_updater::download(&config, candidate, &updates_dir, |done, total| {
+                    let _ = progress_tx.send((done, total));
+                })
+                .map_err(|error| error.to_string());
+            let _ = tx.send(AppEvent::UpdateDownloadFinished(result));
+        });
+    }
+
+    /// Hands the downloaded package to the update helper and exits. The
+    /// helper waits for this process, replaces the allow-listed files, and
+    /// restarts LogcatX with an acknowledgement request.
+    fn request_update_apply(&mut self) {
+        if self.update_applying || self.update_downloading {
+            return;
+        }
+        let Some(downloaded) = self.update_downloaded.clone() else {
+            return;
+        };
+
+        self.update_applying = true;
+        let install_dir = match updater::install_dir_from_current_exe() {
+            Ok(install_dir) => install_dir,
+            Err(err) => {
+                self.update_applying = false;
+                self.set_error(self.tr_args("update.apply_failed", &[("error", err)]));
+                return;
+            }
+        };
+        let request = updater::apply_request(&install_dir);
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = desktop_updater::apply_and_restart(&downloaded, &request)
+                .map(|_| ())
+                .map_err(|error| error.to_string());
+            let _ = tx.send(AppEvent::UpdateApplyStarted(result));
+        });
     }
 
     /// Silences the notice for the currently offered version; the sidebar
@@ -3618,6 +3799,10 @@ impl eframe::App for AdbCollectorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_visual_style(ctx);
         self.handle_events();
+        self.poll_update_download_progress();
+        if self.exit_after_update_apply {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         self.poll_devices_if_due();
         self.handle_dropped_files(ctx);
         self.maybe_automatic_update_check(ctx);

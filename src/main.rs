@@ -23,6 +23,14 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_else(|err| fatal_error(&err));
     desktop_logger::set_panic_hook(&paths.app_log_path);
 
+    // When the update helper restarted us it waits for this acknowledgement
+    // before discarding rollback copies of the previous version.
+    match desktop_updater::acknowledge_if_requested() {
+        Ok(true) => log::info!("Acknowledged applied application update"),
+        Ok(false) => {}
+        Err(err) => log::warn!("Failed to acknowledge applied update: {err}"),
+    }
+
     let config_exists = paths.config_path.exists();
     let (config, startup_error) = match config::load_config(&paths.config_path, &paths) {
         Ok(config) => (config, None),

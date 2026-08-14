@@ -229,6 +229,7 @@
     "update.last_auto_check": "上次自动检查：{time}",
     "update.auto_check_failed_hint": "最近一次自动检查失败，可手动重试。",
     "update.later": "稍后",
-    "update.new_version_tooltip": "有新版本可用"
+    "update.new_version_tooltip": "有新版本可用",
+    "status.update_downloaded": "版本 {version} 的更新包已下载并校验完成。"
   }
 }

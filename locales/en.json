@@ -229,6 +229,7 @@
     "update.last_auto_check": "Last automatic check: {time}",
     "update.auto_check_failed_hint": "The last automatic check failed. You can try again manually.",
     "update.later": "Later",
-    "update.new_version_tooltip": "New version available"
+    "update.new_version_tooltip": "New version available",
+    "status.update_downloaded": "Update package for {version} has been downloaded and verified."
   }
 }
