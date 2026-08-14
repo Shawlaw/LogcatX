@@ -1876,6 +1876,17 @@ impl AdbCollectorApp {
                         }
                     });
 
+                if let Some(serial) = self.pending_drop_target_serial.as_deref() {
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(self.tr_args(
+                            "drop.confirm_target",
+                            &[("device", self.device_identity_label(serial))],
+                        ))
+                        .strong(),
+                    );
+                }
+
                 ui.add_space(12.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if ui.button(self.tr("drop.cancel")).clicked() {
@@ -1917,13 +1928,38 @@ impl AdbCollectorApp {
             return;
         }
 
+        let ready_devices = self.ready_device_ids();
+        let hover_target = if ready_devices.len() == 1 {
+            ready_devices.first().cloned()
+        } else {
+            self.selected_serial.clone().filter(|serial| {
+                ready_devices
+                    .iter()
+                    .any(|candidate| candidate == serial)
+            })
+        };
+
         egui::Area::new("drop_overlay".into())
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .interactable(false)
             .show(ctx, |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.vertical_centered(|ui| {
-                        ui.label(RichText::new(self.tr("drop.hover_title")).strong());
+                        ui.label(
+                            RichText::new(self.tr("drop.hover_title"))
+                                .strong()
+                                .color(Color32::from_rgb(31, 37, 49)),
+                        );
+                        if let Some(serial) = hover_target.as_deref() {
+                            ui.small(
+                                RichText::new(self.tr_args(
+                                    "drop.hover_target",
+                                    &[("device", self.device_identity_label(serial))],
+                                ))
+                                .strong()
+                                .color(Color32::from_rgb(29, 92, 196)),
+                            );
+                        }
                         ui.small(self.tr("drop.hover_hint"));
                         ui.small(
                             self.tr_args(
