@@ -93,6 +93,120 @@ pub fn install_dir_from_current_exe() -> Result<PathBuf, String> {
         .ok_or_else(|| "Unable to resolve the application installation directory".to_owned())
 }
 
+/// Local demo preview of the update flow (mirrors QuotaBarWin's
+/// QBWIN_DEMO_APP_UPDATE). Enabled by `LOGCATX_DEMO_APP_UPDATE=1` in debug
+/// builds or with the `update-preview` feature: fakes an available candidate,
+/// synthesizes a layout-valid package locally, and exercises the real helper
+/// apply path — all without contacting GitHub or persisting update state.
+#[cfg(any(debug_assertions, feature = "update-preview"))]
+pub mod demo {
+    use super::{APP_ID, CHANNEL, RELEASE_REPLACE_FILES};
+    use chrono::Local;
+    use desktop_updater::{UpdateAsset, UpdateCandidate, UpdateManifest};
+    use std::path::{Path, PathBuf};
+    use std::{fs, io::Write as _};
+
+    pub const DEMO_ENV: &str = "LOGCATX_DEMO_APP_UPDATE";
+    pub const DEMO_VERSION: &str = "9.9.9-demo.1";
+    /// Small delay so the simulated check feels like the real network round
+    /// trip instead of an instant UI flip.
+    pub const DEMO_DELAY: std::time::Duration = std::time::Duration::from_millis(700);
+
+    pub fn requested() -> bool {
+        std::env::var(DEMO_ENV)
+            .ok()
+            .as_deref()
+            .is_some_and(is_requested_value)
+    }
+
+    pub fn is_requested_value(value: &str) -> bool {
+        matches!(value.trim(), "1" | "true" | "TRUE")
+    }
+
+    pub fn candidate() -> UpdateCandidate {
+        UpdateCandidate {
+            manifest: UpdateManifest {
+                schema_version: desktop_updater::UPDATE_MANIFEST_SCHEMA_VERSION,
+                app_id: APP_ID.to_owned(),
+                channel: CHANNEL.to_owned(),
+                version: DEMO_VERSION.to_owned(),
+                published_at: Local::now().to_rfc3339(),
+                target: "windows-x64".to_owned(),
+                asset: UpdateAsset {
+                    url: "https://github.com/Shawlaw/LogcatX/releases".to_owned(),
+                    sha256: "0".repeat(64),
+                    size: 1,
+                },
+                notes_url: Some("https://github.com/Shawlaw/LogcatX/releases".to_owned()),
+            },
+        }
+    }
+
+    /// Builds a local update ZIP from the current installation directory so
+    /// "download" and "restart and update" can be exercised without a signed
+    /// release. `README.md` gets a visible demo marker appended inside the
+    /// archive so a successful apply is observable.
+    pub fn build_package(install_dir: &Path, updates_dir: &Path) -> Result<PathBuf, String> {
+        let missing: Vec<&str> = RELEASE_REPLACE_FILES
+            .iter()
+            .filter(|file| !install_dir.join(*file).is_file())
+            .copied()
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "The update demo needs a release-layout directory (missing: {}). \
+                 Unzip the packaged release zip and run the demo build from there.",
+                missing.join(", ")
+            ));
+        }
+
+        fs::create_dir_all(updates_dir).map_err(|error| {
+            format!(
+                "Failed to create demo update directory {}: {error}",
+                updates_dir.display()
+            )
+        })?;
+        let package_path = updates_dir.join("logcatx-demo-update.zip");
+        let file = fs::File::create(&package_path)
+            .map_err(|error| format!("Failed to create demo update package: {error}"))?;
+        let mut writer = zip::ZipWriter::new(file);
+        let options =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for entry in RELEASE_REPLACE_FILES {
+            let bytes = fs::read(install_dir.join(entry))
+                .map_err(|error| format!("Failed to read {entry} for the demo package: {error}"))?;
+            writer
+                .start_file(*entry, options)
+                .map_err(|error| format!("Failed to add demo package entry {entry}: {error}"))?;
+            write_entry(&mut writer, entry, &bytes)?;
+        }
+        writer
+            .finish()
+            .map_err(|error| format!("Failed to finalize demo update package: {error}"))?;
+        Ok(package_path)
+    }
+
+    fn write_entry(
+        writer: &mut zip::ZipWriter<fs::File>,
+        entry: &str,
+        bytes: &[u8],
+    ) -> Result<(), String> {
+        writer
+            .write_all(bytes)
+            .map_err(|error| format!("Failed to write demo package entry {entry}: {error}"))?;
+        if entry == "README.md" {
+            let marker = format!(
+                "\n\n> Demo update applied at {}.\n",
+                Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+            writer
+                .write_all(marker.as_bytes())
+                .map_err(|error| format!("Failed to write demo package entry {entry}: {error}"))?;
+        }
+        Ok(())
+    }
+}
+
 pub fn today_local() -> String {
     Local::now().date_naive().to_string()
 }
@@ -365,6 +479,66 @@ mod tests {
 
         fs::write(&path, b"not json").expect("write corrupt cache");
         assert_eq!(load_status_cache(&path), UpdateStatusCache::default());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(any(debug_assertions, feature = "update-preview"))]
+    #[test]
+    fn demo_env_values_are_recognized() {
+        use super::demo;
+        assert!(demo::is_requested_value("1"));
+        assert!(demo::is_requested_value(" true "));
+        assert!(demo::is_requested_value("TRUE"));
+        assert!(!demo::is_requested_value("0"));
+        assert!(!demo::is_requested_value("yes"));
+        assert!(!demo::is_requested_value(""));
+    }
+
+    #[cfg(any(debug_assertions, feature = "update-preview"))]
+    #[test]
+    fn demo_candidate_describes_stable_channel() {
+        let candidate = super::demo::candidate();
+        assert_eq!(candidate.version(), super::demo::DEMO_VERSION);
+        assert_eq!(candidate.manifest.app_id, super::APP_ID);
+        assert_eq!(candidate.manifest.channel, super::CHANNEL);
+        assert_eq!(candidate.manifest.target, "windows-x64");
+        assert!(candidate.manifest.asset.url.starts_with("https://"));
+    }
+
+    #[cfg(any(debug_assertions, feature = "update-preview"))]
+    #[test]
+    fn demo_package_matches_release_layout() {
+        use std::io::Read as _;
+
+        let temp_dir =
+            std::env::temp_dir().join(format!("logcatx-demo-pkg-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        let install_dir = temp_dir.join("install");
+        fs::create_dir_all(install_dir.join("icons")).expect("create install layout");
+        for file in super::RELEASE_REPLACE_FILES {
+            fs::write(install_dir.join(file), b"demo file").expect("write layout file");
+        }
+
+        let updates_dir = temp_dir.join("updates");
+        let package =
+            super::demo::build_package(&install_dir, &updates_dir).expect("build demo package");
+
+        // The package must satisfy the exact validator the release pipeline
+        // and the updater helper use.
+        let layout = super::apply_request(&install_dir).layout;
+        desktop_updater::validate_release_archive(&package, &layout)
+            .expect("demo package matches release layout");
+
+        let file = fs::File::open(&package).expect("open demo package");
+        let mut archive = zip::ZipArchive::new(file).expect("read demo package");
+        let mut readme = String::new();
+        archive
+            .by_name("README.md")
+            .expect("README entry exists")
+            .read_to_string(&mut readme)
+            .expect("read README entry");
+        assert!(readme.contains("Demo update applied"));
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

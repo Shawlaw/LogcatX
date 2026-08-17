@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 - Automatic update checks: a silent background check the first time the window opens after 08:00 local time each day; new versions light up the version badge and show a notice, with an opt-out in settings
 - Download and restart updates: packages are Ed25519-signature and SHA-256 verified, then replaced by the new `LogcatX.Updater.exe` helper after the app exits, with rollback copies kept until the new build starts successfully
 - "Later" silences the notice for the offered version until a newer one is published
+- Demo preview mode: debug builds can set `LOGCATX_DEMO_APP_UPDATE=1` to simulate a full update locally (including a locally synthesized package and the real replace/restart/rollback flow) without contacting GitHub — see `docs/update-signing.md`
 
 ### Changed
 - The release is now a single portable zip (`LogcatX_<version>_windows_x64_portable_<commit>.zip` containing the app, update helper, and docs); the bare exe is no longer uploaded separately

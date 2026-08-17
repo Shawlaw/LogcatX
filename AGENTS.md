@@ -19,6 +19,7 @@ cargo clippy -- -D warnings              # lint
 cargo run                                # run (no console on Windows)
 cargo run --features console             # run with console window
 cargo run -- --console                   # same, via CLI flag
+LOGCATX_DEMO_APP_UPDATE=1 cargo run      # demo the in-app update flow locally (debug builds; see docs/update-signing.md)
 ```
 
 Release build (cross-compile on Linux/macOS targeting Windows):

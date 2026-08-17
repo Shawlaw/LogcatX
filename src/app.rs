@@ -1709,9 +1709,13 @@ impl AdbCollectorApp {
                 ));
                 ui.add_space(6.0);
 
-                if !updater::updates_configured() {
+                if !updater::updates_configured() && !demo_update_active() {
                     ui.label(self.tr("update.not_configured"));
                 } else {
+                    if let Some(banner) = self.update_demo_banner_text() {
+                        ui.label(RichText::new(banner).color(Color32::from_rgb(210, 120, 10)));
+                        ui.add_space(4.0);
+                    }
                     match self.update_phase.clone() {
                         UpdatePhase::Checking => {
                             ui.horizontal(|ui| {
@@ -1744,10 +1748,10 @@ impl AdbCollectorApp {
                             .strong()
                             .color(Color32::from_rgb(210, 120, 10)),
                         );
-                        if let Some(notes_url) = info.notes_url.clone() {
-                            if ui.button(self.tr("update.notes")).clicked() {
-                                open_notes_url = Some(notes_url);
-                            }
+                        if let Some(notes_url) = info.notes_url.clone()
+                            && ui.button(self.tr("update.notes")).clicked()
+                        {
+                            open_notes_url = Some(notes_url);
                         }
                         ui.add_space(4.0);
 
@@ -1815,15 +1819,33 @@ impl AdbCollectorApp {
         if apply_clicked {
             self.request_update_apply();
         }
-        if let Some(notes_url) = open_notes_url {
-            if let Err(err) = fs_utils::open_url(&notes_url) {
-                self.set_error(err);
-            }
+        if let Some(notes_url) = open_notes_url
+            && let Err(err) = fs_utils::open_url(&notes_url)
+        {
+            self.set_error(err);
         }
         if later_clicked || !open {
             self.show_update_dialog = false;
             self.dismiss_update_notice();
         }
+    }
+
+    /// Banner text explaining that the update flow is locally simulated, or
+    /// `None` when the demo is inactive (always in release builds without the
+    /// `update-preview` feature).
+    #[cfg(any(debug_assertions, feature = "update-preview"))]
+    fn update_demo_banner_text(&self) -> Option<String> {
+        updater::demo::requested().then(|| {
+            self.tr_args(
+                "update.demo_banner",
+                &[("version", updater::demo::DEMO_VERSION.to_owned())],
+            )
+        })
+    }
+
+    #[cfg(not(any(debug_assertions, feature = "update-preview")))]
+    fn update_demo_banner_text(&self) -> Option<String> {
+        None
     }
 
     fn formatted_last_update_check(&self) -> Option<String> {
@@ -2410,6 +2432,24 @@ impl AdbCollectorApp {
     /// checks additionally mark today as done so a failing network does not
     /// retry on every focus event.
     fn request_update_check(&mut self, automatic: bool) {
+        #[cfg(any(debug_assertions, feature = "update-preview"))]
+        if updater::demo::requested() {
+            if matches!(self.update_phase, UpdatePhase::Checking) {
+                return;
+            }
+            log::info!("Starting demo application update check");
+            self.update_phase = UpdatePhase::Checking;
+            let tx = self.tx.clone();
+            thread::spawn(move || {
+                thread::sleep(updater::demo::DEMO_DELAY);
+                let _ = tx.send(AppEvent::UpdateCheckFinished {
+                    automatic,
+                    result: Ok(Some(updater::demo::candidate())),
+                });
+            });
+            return;
+        }
+
         if !updater::updates_configured() {
             if automatic {
                 self.update_cache.record_automatic_skipped(&self.version);
@@ -2450,6 +2490,18 @@ impl AdbCollectorApp {
         if !gained_focus || self.require_initial_setup || self.show_update_dialog {
             return;
         }
+
+        #[cfg(any(debug_assertions, feature = "update-preview"))]
+        if updater::demo::requested() {
+            // Demo previews bypass the hour/config gate and never repeat once
+            // a candidate is showing.
+            if self.update_info.is_none() && !matches!(self.update_phase, UpdatePhase::Checking) {
+                log::info!("Window focused with demo update preview enabled");
+                self.request_update_check(true);
+            }
+            return;
+        }
+
         if updater::automatic_check_is_due(
             self.config.auto_check_updates,
             updater::local_hour(),
@@ -2468,9 +2520,13 @@ impl AdbCollectorApp {
     ) {
         match result {
             Ok(candidate) => {
-                self.update_cache
-                    .record_check(&self.version, candidate.as_ref(), automatic);
-                self.persist_update_cache();
+                // Demo previews stay in-memory so they never pollute the real
+                // status cache or the once-per-day automatic gate.
+                if !demo_update_active() {
+                    self.update_cache
+                        .record_check(&self.version, candidate.as_ref(), automatic);
+                    self.persist_update_cache();
+                }
                 match candidate {
                     Some(candidate) => {
                         log::info!(
@@ -2511,9 +2567,11 @@ impl AdbCollectorApp {
             Err(err) => {
                 log::warn!("Application update check failed: {err}");
                 self.update_phase = UpdatePhase::Failed(err.clone());
-                self.update_cache
-                    .record_failure(&self.version, err.clone(), automatic);
-                self.persist_update_cache();
+                if !demo_update_active() {
+                    self.update_cache
+                        .record_failure(&self.version, err.clone(), automatic);
+                    self.persist_update_cache();
+                }
                 if !automatic {
                     self.set_error(self.tr_args("update.check_failed", &[("error", err)]));
                 }
@@ -2528,13 +2586,34 @@ impl AdbCollectorApp {
         if self.update_downloading || self.update_applying {
             return;
         }
-        let Some(config) = updater::update_config(&self.version) else {
-            return;
-        };
         let Some(candidate) = self.update_candidate.clone() else {
             return;
         };
 
+        #[cfg(any(debug_assertions, feature = "update-preview"))]
+        if updater::demo::requested() {
+            self.update_downloading = true;
+            self.update_download_progress = None;
+            let updates_dir = updater::updates_dir(&self.app_paths.config_dir);
+            let tx = self.tx.clone();
+            thread::spawn(move || {
+                thread::sleep(updater::demo::DEMO_DELAY);
+                let result = updater::install_dir_from_current_exe()
+                    .and_then(|install_dir| {
+                        updater::demo::build_package(&install_dir, &updates_dir)
+                    })
+                    .map(|package_path| DownloadedUpdate {
+                        candidate,
+                        package_path,
+                    });
+                let _ = tx.send(AppEvent::UpdateDownloadFinished(result));
+            });
+            return;
+        }
+
+        let Some(config) = updater::update_config(&self.version) else {
+            return;
+        };
         self.update_downloading = true;
         self.update_download_progress = None;
         let updates_dir = updater::updates_dir(&self.app_paths.config_dir);
@@ -2586,7 +2665,9 @@ impl AdbCollectorApp {
     fn dismiss_update_notice(&mut self) {
         if self.update_info.is_some() && !self.update_dismissed {
             self.update_cache.dismiss_available();
-            self.persist_update_cache();
+            if !demo_update_active() {
+                self.persist_update_cache();
+            }
             self.update_dismissed = true;
         }
     }
@@ -3868,6 +3949,19 @@ impl Drop for AdbCollectorApp {
     fn drop(&mut self) {
         self.stop_all_collections_for_shutdown();
     }
+}
+
+/// Whether the local update-flow demo is active in this process. Release
+/// builds without the `update-preview` feature compile this to a constant
+/// `false`, removing the demo paths entirely.
+#[cfg(any(debug_assertions, feature = "update-preview"))]
+fn demo_update_active() -> bool {
+    updater::demo::requested()
+}
+
+#[cfg(not(any(debug_assertions, feature = "update-preview")))]
+fn demo_update_active() -> bool {
+    false
 }
 
 fn classify_dropped_paths(paths: Vec<PathBuf>) -> DroppedPayload {

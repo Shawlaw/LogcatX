@@ -230,6 +230,7 @@
     "update.auto_check_failed_hint": "The last automatic check failed. You can try again manually.",
     "update.later": "Later",
     "update.new_version_tooltip": "New version available",
+    "update.demo_banner": "Demo preview: this update is simulated locally (version {version}) and never contacts GitHub.",
     "status.update_downloaded": "Update package for {version} has been downloaded and verified."
   }
 }

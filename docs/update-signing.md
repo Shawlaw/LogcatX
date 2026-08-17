@@ -62,3 +62,19 @@ LogcatX 的应用内更新基于 [DeskFoundry](https://github.com/Shawlaw/DeskFo
 3. `scripts/package_windows_release.sh` 实际打进 zip 的文件。
 
 zip 中多出或缺少任一声明文件，发版的清单签名步骤都会直接失败——这是有意的防回退/防夹带设计。
+
+## 本地体验更新流程（demo 预览）
+
+调试构建（或任何带 `--features update-preview` 的构建）支持演示模式，用来看看检查更新、下载并重启更新的完整体验，而不需要发布任何真实版本：
+
+```bash
+LOGCATX_DEMO_APP_UPDATE=1 cargo run
+```
+
+行为说明：
+
+- 窗口首次获得焦点约 0.7 秒后，模拟出一个 `9.9.9-demo.1` 候选版本：版本徽章亮起提示点并弹出更新弹窗（弹窗内有明显的“演示预览”横幅）；也可以在弹窗里手动点“检查更新”。
+- 全程不联网、不写更新状态缓存，与真实检查互不影响；release 构建（未开 feature）下该环境变量被完全忽略。
+- “下载更新”会在本地合成一个符合 `desktop-update.toml` 白名单的更新包（`README.md` 会在包内附加一行演示标记）；“重启并更新”走的是真实的 helper 替换、重启、回滚保护与启动确认流程。
+- **体验完整应用链路需要发布版布局的目录**（包含 `LogcatX.exe`、`LogcatX.Updater.exe` 及全部白名单文件）。推荐做法：把 `dist/` 下打包脚本产出的 zip 解压到临时目录，用 `target/debug/logcatx.exe`、`target/debug/logcatx-updater.exe` 覆盖其中的 `LogcatX.exe`、`LogcatX.Updater.exe`，再从该目录设置环境变量启动。直接在 `target/debug` 里运行时，检查与提示可用，点“下载”会因布局缺失给出明确报错。
+- 应用重启后环境变量会被 helper 继承，因此会再次进入演示循环（可随时关掉）；更新成功后打开该目录的 `README.md` 能看到演示标记，说明替换真实发生。
