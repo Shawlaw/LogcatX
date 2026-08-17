@@ -1700,6 +1700,10 @@ impl AdbCollectorApp {
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            // egui windows default to 420 logical px tall and never
+            // auto-shrink; start at the minimal content height instead and
+            // let the frame expand for the download/apply states.
+            .default_size(egui::vec2(430.0, 250.0))
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.set_min_width(400.0);
@@ -3877,6 +3881,14 @@ fn draw_state_badge_centered(ui: &mut egui::Ui, cell_rect: egui::Rect, text: &st
 }
 
 impl eframe::App for AdbCollectorApp {
+    /// eframe's default is a semi-transparent dark color, so any region egui
+    /// momentarily leaves unpainted (for example a panel seam during a
+    /// DPI/scale transition) composites as a black strip on the desktop.
+    /// Clearing with the app background makes such transient seams invisible.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        Color32::from_rgb(250, 248, 244).to_normalized_gamma_f32()
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         apply_visual_style(ctx);
         self.handle_events();
