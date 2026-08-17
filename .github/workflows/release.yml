@@ -46,7 +46,15 @@ jobs:
 
       - name: Test
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.run_tests)
-        run: cargo test
+        shell: pwsh
+        run: |
+          cargo test 2>&1 | Tee-Object -FilePath test-output.log
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content test-output.log | Select-Object -Last 25) -join " ⏎ "
+            if ($tail.Length -gt 1800) { $tail = $tail.Substring($tail.Length - 1800) }
+            Write-Host "::error title=cargo test failed::$tail"
+            exit 1
+          }
 
       - name: Compute release metadata
         id: release_meta
