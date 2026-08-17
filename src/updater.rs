@@ -93,6 +93,56 @@ pub fn install_dir_from_current_exe() -> Result<PathBuf, String> {
         .ok_or_else(|| "Unable to resolve the application installation directory".to_owned())
 }
 
+const HELPER_COPY_PREFIX: &str = "helper-";
+const HELPER_COPY_SUFFIX: &str = ".exe";
+const HELPER_CLEANUP_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+const HELPER_CLEANUP_MAX_RETRIES: usize = 40;
+
+/// The updater helper cannot delete its own copied executable on Windows
+/// while it is still running, so a `helper-*.exe` survives every apply. The
+/// restarted application is expected to sweep those copies after
+/// acknowledging the applied update; retries cover the short window until
+/// the helper process exits.
+pub fn cleanup_helper_copies(updates_dir: &Path) {
+    for attempt in 0..=HELPER_CLEANUP_MAX_RETRIES {
+        match cleanup_helper_copies_once(updates_dir) {
+            Ok(false) | Err(_) => return,
+            Ok(true) if attempt == HELPER_CLEANUP_MAX_RETRIES => return,
+            Ok(true) => std::thread::sleep(HELPER_CLEANUP_RETRY_DELAY),
+        }
+    }
+}
+
+/// Removes only helper executables copied by `desktop-updater` into the
+/// updates directory. Returns whether a currently locked helper should be
+/// retried after it exits.
+fn cleanup_helper_copies_once(updates_dir: &Path) -> std::io::Result<bool> {
+    let entries = match fs::read_dir(updates_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut retry = false;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if !file_name.starts_with(HELPER_COPY_PREFIX) || !file_name.ends_with(HELPER_COPY_SUFFIX) {
+            continue;
+        }
+        match fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => retry = true,
+            Err(_) => {}
+        }
+    }
+    Ok(retry)
+}
+
 /// Local demo preview of the update flow (mirrors QuotaBarWin's
 /// QBWIN_DEMO_APP_UPDATE). Enabled by `LOGCATX_DEMO_APP_UPDATE=1` in debug
 /// builds or with the `update-preview` feature: fakes an available candidate,
@@ -391,6 +441,36 @@ mod tests {
             Some("2026-08-14")
         ));
         assert!(!automatic_check_is_due(false, 9, "2026-08-15", None));
+    }
+
+    #[test]
+    fn helper_cleanup_removes_only_helper_copies() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "logcatx-helper-cleanup-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&temp_dir);
+        let updates_dir = temp_dir.join("updates");
+        fs::create_dir_all(&updates_dir).expect("create updates dir");
+        fs::write(updates_dir.join("helper-1785769510724498000.exe"), b"x")
+            .expect("write helper copy");
+        fs::write(updates_dir.join("0.7.0-0123456789abcdef0123.zip"), b"pkg")
+            .expect("write cached package");
+        fs::write(updates_dir.join("helper-notes.txt"), b"keep me")
+            .expect("write similarly named non-executable");
+        fs::create_dir_all(updates_dir.join("staging-1")).expect("create staging dir");
+
+        super::cleanup_helper_copies(&updates_dir);
+
+        assert!(!updates_dir.join("helper-1785769510724498000.exe").exists());
+        assert!(updates_dir.join("0.7.0-0123456789abcdef0123.zip").exists());
+        assert!(updates_dir.join("helper-notes.txt").exists());
+        assert!(updates_dir.join("staging-1").exists());
+
+        // A missing updates directory is not an error and stops the loop.
+        assert!(!super::cleanup_helper_copies_once(&temp_dir.join("absent")).unwrap());
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

@@ -26,7 +26,13 @@ fn main() -> eframe::Result<()> {
     // When the update helper restarted us it waits for this acknowledgement
     // before discarding rollback copies of the previous version.
     match desktop_updater::acknowledge_if_requested() {
-        Ok(true) => log::info!("Acknowledged applied application update"),
+        Ok(true) => {
+            log::info!("Acknowledged applied application update");
+            // The helper cannot delete its own copied executable while it is
+            // still running, so sweep those copies from this new process.
+            let updates_dir = updater::updates_dir(&paths.config_dir);
+            std::thread::spawn(move || updater::cleanup_helper_copies(&updates_dir));
+        }
         Ok(false) => {}
         Err(err) => log::warn!("Failed to acknowledge applied update: {err}"),
     }
