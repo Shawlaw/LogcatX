@@ -17,8 +17,13 @@ All notable changes to this project will be documented in this file.
 - The release is now a single portable zip (`LogcatX_<version>_windows_x64_portable_<commit>.zip` containing the app, update helper, and docs); the bare exe is no longer uploaded separately
 - GitHub Release notes are now extracted from the matching `CHANGELOG.md` section instead of the annotated tag message
 - CI releases now build natively on windows-latest and run tests on tag builds
+- Dropping APKs/files onto the window now names the default target device in the hover hint, making misdirected drops less likely with multiple devices
 - 0.5.x and earlier builds ship without the update helper: download this zip manually one last time; later versions can update in-app
 - Signing key generation and repository setup live in `docs/update-signing.md`; the public key is injected at build time via `LOGCATX_UPDATE_PUBLIC_KEY`, and builds without it report "Application updates are not configured in this build" and never contact update servers
+
+### Fixed
+- Fixed garbled log directory and file names when a device alias contains Unicode characters such as Chinese
+- All adb logcat child processes are now guaranteed to terminate when the app exits (including crashes), leaving no stray adb processes behind
 
 ## [0.5.3] - 2026-06-06
 
