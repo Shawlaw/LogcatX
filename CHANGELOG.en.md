@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
-## [0.6.0] - 2026-08-15
+## [0.6.0] - 2026-08-18
 
 ### Added
 - In-app update checks: click the sidebar version badge to check for a new version and open the release notes
