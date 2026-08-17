@@ -60,7 +60,8 @@ END
     let rc = std::env::var("RC")
         .ok()
         .or_else(|| which("llvm-rc"))
-        .or_else(|| which("llvm-rc-20"));
+        .or_else(|| which("llvm-rc-20"))
+        .and_then(|found| normalize_which_path(&found));
 
     let Some(rc) = rc else {
         println!("cargo:warning=resource compiler not found, skipping Windows icon embedding");
@@ -68,19 +69,46 @@ END
     };
 
     let res_path = format!("{out_dir}/resource.res");
-    let status = std::process::Command::new(&rc)
+    let status = match std::process::Command::new(&rc)
         .arg("-no-preprocess")
         .arg(&rc_path)
         .arg("/FO")
         .arg(&res_path)
         .status()
-        .expect("failed to run resource compiler");
+    {
+        Ok(status) => status,
+        Err(error) => {
+            println!(
+                "cargo:warning=failed to run resource compiler {rc}: {error}; exe will not include icon metadata"
+            );
+            return;
+        }
+    };
 
     if status.success() {
         println!("cargo:rustc-link-arg={res_path}");
     } else {
         println!("cargo:warning=resource compilation failed, exe will not include icon metadata");
     }
+}
+
+/// Git Bash's `which.exe` (first on PATH on GitHub Windows runners) reports
+/// MSYS-rooted paths like `/c/Program Files/LLVM/bin/llvm-rc.exe`, which the
+/// Windows loader cannot spawn. Translate those to `C:/...` when the target
+/// file exists, and reject the lookup otherwise.
+fn normalize_which_path(found: &str) -> Option<String> {
+    let found = found.trim();
+    if !found.starts_with('/') {
+        return Some(found.to_owned());
+    }
+    let bytes = found.as_bytes();
+    if bytes.len() >= 3 && bytes[1] == b'/' && bytes[0].is_ascii_alphabetic() {
+        let converted = format!("{}:{}", bytes[0] as char, &found[2..]);
+        return std::path::Path::new(&converted)
+            .is_file()
+            .then_some(converted);
+    }
+    None
 }
 
 fn days_to_ymd(mut days: i64) -> (u32, u32, u32) {
