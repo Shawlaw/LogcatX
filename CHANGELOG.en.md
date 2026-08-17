@@ -7,19 +7,14 @@ All notable changes to this project will be documented in this file.
 ## [0.6.0] - 2026-08-15
 
 ### Added
-- In-app update checks: the sidebar version badge opens the "Application update" dialog for manual checks and release notes
-- Automatic update checks: a silent background check the first time the window opens after 08:00 local time each day; new versions light up the version badge and show a notice. Enabled by default, with an opt-out in settings
-- Download and restart updates: packages are Ed25519-signature and SHA-256 verified, then replaced by the new `LogcatX.Updater.exe` helper after the app exits, with rollback copies kept until the new build starts successfully and update leftovers cleaned after the restart
-- "Later" silences the notice for the offered version until a newer one is published
-- Demo preview mode: debug builds can set `LOGCATX_DEMO_APP_UPDATE=1` to simulate a full update locally (including a locally synthesized package and the real replace/restart/rollback flow) without contacting GitHub — see `docs/update-signing.md`
+- In-app update checks: click the sidebar version badge to check for a new version and open the release notes
+- Automatic update checks (on by default, can be disabled in settings): a silent check the first time the window opens after 08:00 local time each day; new versions light up the version badge and show a notice
+- One-click "download and restart" updates: the package is signature-verified, installed automatically, and the app restarts into the new version; a failed startup rolls back to the previous version
+- The update notice can be dismissed with "Later" until a newer version is published
 
 ### Changed
-- The release is now a single portable zip (`LogcatX_<version>_windows_x64_portable_<commit>.zip` containing the app, update helper, and docs); the bare exe is no longer uploaded separately
-- GitHub Release notes are now extracted from the matching `CHANGELOG.md` section instead of the annotated tag message
-- CI releases now build natively on windows-latest and run tests on tag builds
+- The release is now a single portable zip (app plus docs); the bare exe is no longer published separately. 0.5.x and earlier builds need one final manual download of this zip; later versions update in-app
 - Dropping APKs/files onto the window now names the default target device in the hover hint, making misdirected drops less likely with multiple devices
-- 0.5.x and earlier builds ship without the update helper: download this zip manually one last time; later versions can update in-app
-- Signing key generation and repository setup live in `docs/update-signing.md`; the public key is injected at build time via `LOGCATX_UPDATE_PUBLIC_KEY`, and builds without it report "Application updates are not configured in this build" and never contact update servers
 
 ### Fixed
 - Fixed garbled log directory and file names when a device alias contains Unicode characters such as Chinese
