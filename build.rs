@@ -151,16 +151,27 @@ fn days_to_ymd(mut days: i64) -> (u32, u32, u32) {
 }
 
 fn which(name: &str) -> Option<String> {
-    std::process::Command::new("which")
+    // `where.exe` reports native Windows paths, while `which` (Git Bash on CI
+    // runners) answers with MSYS-rooted paths and possibly several matches.
+    if cfg!(windows) {
+        if let Some(found) = locate_with("where", name) {
+            return Some(found);
+        }
+    }
+    locate_with("which", name)
+}
+
+fn locate_with(tool: &str, name: &str) -> Option<String> {
+    let output = std::process::Command::new(tool)
         .arg(name)
         .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                let path = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !path.is_empty() { Some(path) } else { None }
-            } else {
-                None
-            }
-        })
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
 }

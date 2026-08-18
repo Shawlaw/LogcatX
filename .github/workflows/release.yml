@@ -28,6 +28,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Probe resource compiler resolution
+        shell: bash
+        run: |
+          WHERE_OUT=$(where.exe llvm-rc 2>/dev/null | tr '\n' ';' || true)
+          WHICH_OUT=$(which -a llvm-rc 2>/dev/null | tr '\n' ';' || true)
+          echo "::notice title=rc-probe::where=[$WHERE_OUT] which=[$WHICH_OUT]"
+
       - name: Verify tag matches Cargo version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
