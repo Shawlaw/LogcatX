@@ -93,9 +93,10 @@ END
 }
 
 /// Git Bash's `which.exe` (first on PATH on GitHub Windows runners) reports
-/// MSYS-rooted paths like `/c/Program Files/LLVM/bin/llvm-rc.exe`, which the
-/// Windows loader cannot spawn. Translate those to `C:/...` when the target
-/// file exists, and reject the lookup otherwise.
+/// MSYS-rooted paths like `/c/Program Files/LLVM/bin/llvm-rc` — without the
+/// `.exe` suffix — which the Windows loader cannot spawn and which `is_file`
+/// does not resolve. Translate those to `C:/...`, retrying with the suffix,
+/// and reject the lookup otherwise.
 fn normalize_which_path(found: &str) -> Option<String> {
     let found = found.trim();
     if !found.starts_with('/') {
@@ -103,10 +104,14 @@ fn normalize_which_path(found: &str) -> Option<String> {
     }
     let bytes = found.as_bytes();
     if bytes.len() >= 3 && bytes[1] == b'/' && bytes[0].is_ascii_alphabetic() {
-        let converted = format!("{}:{}", bytes[0] as char, &found[2..]);
-        return std::path::Path::new(&converted)
-            .is_file()
-            .then_some(converted);
+        let plain = format!("{}:{}", bytes[0] as char, &found[2..]);
+        if std::path::Path::new(&plain).is_file() {
+            return Some(plain);
+        }
+        let with_exe = format!("{plain}.exe");
+        if std::path::Path::new(&with_exe).is_file() {
+            return Some(with_exe);
+        }
     }
     None
 }
