@@ -62,7 +62,7 @@ Shared infrastructure comes from the [DeskFoundry](https://github.com/Shawlaw/De
 
 ### Windows resources
 
-`build.rs` generates a `.rc` file at compile time embedding the icon and version info from `icons/icon.ico`. It requires `llvm-rc` on the PATH for cross-compilation builds.
+`build.rs` generates a `.rc` file at compile time embedding the icon and version info from `icons/icon.ico`. It needs `llvm-rc` on the PATH for any Windows build (preinstalled on GitHub windows-latest runners; the lookup prefers `where.exe` and tolerates MSYS-style `which` output). Without it the exe still builds but ships without icon/version metadata; the release workflow fails tag builds whose `LogcatX.exe` lacks embedded resources.
 
 ## Tests
 
