@@ -3,6 +3,7 @@ use crate::{
     config::{self, AppConfig, AppPaths},
     fs_utils,
     i18n::I18n,
+    ime::ImeEnterGuard,
     models::{
         AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, ForegroundApp, ForegroundAppAction,
         SharedChild, StatusMessage,
@@ -100,6 +101,7 @@ pub struct AdbCollectorApp {
     language_input: String,
     auto_update_input: bool,
     i18n: I18n,
+    ime_enter_guard: ImeEnterGuard,
     show_settings: bool,
     require_initial_setup: bool,
     active_page: NavigationPage,
@@ -189,6 +191,7 @@ impl AdbCollectorApp {
             language_input: String::new(),
             auto_update_input: false,
             i18n: I18n::new("en"),
+            ime_enter_guard: ImeEnterGuard::default(),
             show_settings: require_initial_setup,
             require_initial_setup,
             active_page: NavigationPage::Devices,
@@ -3890,6 +3893,7 @@ impl eframe::App for AdbCollectorApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.ime_enter_guard.frame(ctx);
         apply_visual_style(ctx);
         self.handle_events();
         self.poll_update_download_progress();

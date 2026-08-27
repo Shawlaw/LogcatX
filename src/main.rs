@@ -8,6 +8,7 @@ mod app;
 mod config;
 mod fs_utils;
 mod i18n;
+mod ime;
 mod managed_child;
 mod models;
 mod updater;
