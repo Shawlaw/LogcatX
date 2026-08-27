@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.6.1] - 2026-08-27
+
+### Fixed
+- Fixed single-line text fields losing focus (and possibly dropping the committed text) when pressing Enter to confirm an IME composition, such as committing raw pinyin with Sogou; affected the device alias, logcat arguments, connect target and settings fields
+
 ## [0.6.0] - 2026-08-18
 
 ### Added
