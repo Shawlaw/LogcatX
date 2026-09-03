@@ -8,7 +8,7 @@ use crate::{
         AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, ForegroundApp, ForegroundAppAction,
         Screenshot, SharedChild, StatusMessage,
     },
-    updater,
+    scrcpy, updater,
 };
 use desktop_updater::{CheckResult, DownloadedUpdate, UpdateCandidate};
 use eframe::egui::{self, Align, Color32, RichText};
@@ -26,6 +26,7 @@ const PROJECT_URL: &str = "https://github.com/Shawlaw/LogcatX";
 const PLATFORM_TOOLS_URL_EN: &str = "https://developer.android.com/tools/releases/platform-tools";
 const PLATFORM_TOOLS_URL_ZH_CN: &str =
     "https://developer.android.google.cn/tools/releases/platform-tools?hl=zh-cn";
+const SCRCPY_RELEASES_URL: &str = "https://github.com/Genymobile/scrcpy/releases";
 const DEFAULT_DEVICE_DROP_DIR: &str = "/sdcard/Download";
 
 #[derive(Clone, Debug, Default)]
@@ -97,6 +98,7 @@ pub struct AdbCollectorApp {
     tx: Sender<AppEvent>,
     rx: Receiver<AppEvent>,
     adb_path_input: String,
+    scrcpy_path_input: String,
     log_dir_input: String,
     language_input: String,
     auto_update_input: bool,
@@ -108,6 +110,7 @@ pub struct AdbCollectorApp {
     show_clear_confirm: bool,
     show_alias_dialog: bool,
     show_logcat_args_dialog: bool,
+    show_new_display_dialog: bool,
     show_connect_dialog: bool,
     selected_serial: Option<String>,
     version: String,
@@ -120,6 +123,11 @@ pub struct AdbCollectorApp {
     alias_input_value: String,
     logcat_args_input_serial: Option<String>,
     logcat_args_input_value: String,
+    new_display_device_id: Option<String>,
+    new_display_use_device_defaults: bool,
+    new_display_width_input: String,
+    new_display_height_input: String,
+    new_display_dpi_input: String,
     pending_drop_payload: Option<DroppedPayload>,
     pending_drop_target_serial: Option<String>,
     pending_foreground_confirm: Option<PendingForegroundConfirm>,
@@ -179,6 +187,7 @@ impl AdbCollectorApp {
 
         let mut app = Self {
             adb_path_input: config.adb_path.clone(),
+            scrcpy_path_input: config.scrcpy_path.clone(),
             log_dir_input: config.log_dir.clone(),
             app_paths: bootstrap.app_paths,
             config,
@@ -199,6 +208,7 @@ impl AdbCollectorApp {
             show_clear_confirm: false,
             show_alias_dialog: false,
             show_logcat_args_dialog: false,
+            show_new_display_dialog: false,
             show_connect_dialog: false,
             selected_serial: None,
             version: bootstrap.version.to_owned(),
@@ -211,6 +221,11 @@ impl AdbCollectorApp {
             alias_input_value: String::new(),
             logcat_args_input_serial: None,
             logcat_args_input_value: String::new(),
+            new_display_device_id: None,
+            new_display_use_device_defaults: true,
+            new_display_width_input: "1280".to_owned(),
+            new_display_height_input: "960".to_owned(),
+            new_display_dpi_input: "160".to_owned(),
             pending_drop_payload: None,
             pending_drop_target_serial: None,
             pending_foreground_confirm: None,
@@ -1010,6 +1025,9 @@ impl AdbCollectorApp {
             let mut copy_serial: Option<String> = None;
             let mut copy_log_path_serial: Option<String> = None;
             let mut screenshot_serial: Option<String> = None;
+            let mut open_scrcpy_mirror_serial: Option<String> = None;
+            let mut open_new_display_serial: Option<String> = None;
+            let mut open_scrcpy_settings = false;
             let mut open_shell_serial: Option<String> = None;
             let mut disconnect_serial: Option<String> = None;
             let mut toggle_pin_serial: Option<String> = None;
@@ -1031,6 +1049,10 @@ impl AdbCollectorApp {
             let copy_text = self.tr("device.action.copy_serial");
             let copy_log_path_text = self.tr("device.action.copy_latest_log_path");
             let screenshot_text = self.tr("device.action.screenshot");
+            let scrcpy_menu_text = self.tr("device.action.scrcpy_menu");
+            let scrcpy_mirror_text = self.tr("device.action.scrcpy_mirror");
+            let scrcpy_new_display_text = self.tr("device.action.scrcpy_new_display");
+            let scrcpy_settings_text = self.tr("device.action.scrcpy_settings");
             let shell_text = self.tr("device.action.open_shell");
             let disconnect_text = self.tr("device.action.disconnect");
             let more_text = self.tr("device.action.more");
@@ -1275,6 +1297,44 @@ impl AdbCollectorApp {
                                                     screenshot_serial = Some(device_id.clone());
                                                     ui.close_menu();
                                                 }
+                                                ui.menu_button(scrcpy_menu_text.clone(), |ui| {
+                                                    if ui
+                                                        .add_enabled(
+                                                            state == "device",
+                                                            rounded_secondary(
+                                                                scrcpy_mirror_text.clone(),
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        open_scrcpy_mirror_serial =
+                                                            Some(device_id.clone());
+                                                        ui.close_menu();
+                                                    }
+                                                    if ui
+                                                        .add_enabled(
+                                                            state == "device",
+                                                            rounded_secondary(
+                                                                scrcpy_new_display_text.clone(),
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        open_new_display_serial =
+                                                            Some(device_id.clone());
+                                                        ui.close_menu();
+                                                    }
+                                                    ui.separator();
+                                                    if ui
+                                                        .add(rounded_secondary(
+                                                            scrcpy_settings_text.clone(),
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        open_scrcpy_settings = true;
+                                                        ui.close_menu();
+                                                    }
+                                                });
                                                 if ui
                                                     .add_enabled(
                                                         state == "device",
@@ -1468,6 +1528,15 @@ impl AdbCollectorApp {
             }
             if let Some(serial) = screenshot_serial {
                 self.start_screenshot(serial);
+            }
+            if let Some(serial) = open_scrcpy_mirror_serial {
+                self.start_scrcpy_mirror(serial);
+            }
+            if let Some(serial) = open_new_display_serial {
+                self.open_new_display_dialog(serial);
+            }
+            if open_scrcpy_settings {
+                self.active_page = NavigationPage::Settings;
             }
             if let Some(serial) = open_shell_serial {
                 self.open_device_shell(serial);
@@ -1665,6 +1734,28 @@ impl AdbCollectorApp {
         }
 
         ui.add_space(8.0);
+        ui.label(self.tr("settings.scrcpy"));
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.scrcpy_path_input);
+            if ui.button(self.tr("settings.browse")).clicked() {
+                if let Some(path) = FileDialog::new().pick_file() {
+                    self.scrcpy_path_input = fs_utils::display_path(path.as_path());
+                }
+            }
+            if ui.button(self.tr("settings.use_scrcpy")).clicked() {
+                self.scrcpy_path_input = "scrcpy".to_owned();
+            }
+        });
+        if self.scrcpy_path_input.trim().is_empty() {
+            ui.add_space(4.0);
+            ui.small(self.tr("settings.scrcpy.download_hint"));
+            ui.hyperlink_to(
+                self.tr("settings.scrcpy.download_link"),
+                SCRCPY_RELEASES_URL,
+            );
+        }
+
+        ui.add_space(8.0);
         ui.label(self.tr("settings.log_dir"));
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.log_dir_input);
@@ -1719,6 +1810,96 @@ impl AdbCollectorApp {
                 }
             }
         });
+    }
+
+    fn ui_new_display_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_new_display_dialog {
+            return;
+        }
+        let Some(device_id) = self.new_display_device_id.clone() else {
+            self.show_new_display_dialog = false;
+            return;
+        };
+
+        let mut open = true;
+        let mut launch_clicked = false;
+        let mut cancel_clicked = false;
+        let device_label = self.device_identity_label(&device_id);
+        let title = self.tr("scrcpy.new_display.title");
+        let follow_device_label = self.tr("scrcpy.new_display.follow_device");
+        let dimensions_label = self.tr("scrcpy.new_display.dimensions");
+        let width_label = self.tr("scrcpy.new_display.width");
+        let height_label = self.tr("scrcpy.new_display.height");
+        let dpi_label = self.tr("scrcpy.new_display.dpi");
+        let hint = self.tr("scrcpy.new_display.hint");
+        let launch_label = self.tr("scrcpy.new_display.launch");
+        let cancel_label = self.tr("settings.cancel");
+
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(self.tr_args(
+                    "scrcpy.new_display.device",
+                    &[("device", device_label.clone())],
+                ));
+                ui.add_space(6.0);
+                ui.checkbox(
+                    &mut self.new_display_use_device_defaults,
+                    follow_device_label,
+                );
+                if !self.new_display_use_device_defaults {
+                    ui.add_space(6.0);
+                    ui.label(dimensions_label);
+                    ui.horizontal(|ui| {
+                        ui.label(width_label);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_display_width_input)
+                                .desired_width(72.0),
+                        );
+                        ui.label(height_label);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_display_height_input)
+                                .desired_width(72.0),
+                        );
+                        ui.label(dpi_label);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_display_dpi_input)
+                                .desired_width(64.0),
+                        );
+                    });
+                }
+                ui.add_space(6.0);
+                ui.small(hint);
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    cancel_clicked = ui.button(cancel_label).clicked();
+                    launch_clicked = ui.button(launch_label).clicked();
+                });
+            });
+
+        if !open || cancel_clicked {
+            self.show_new_display_dialog = false;
+            self.new_display_device_id = None;
+            return;
+        }
+        if launch_clicked {
+            let options = if self.new_display_use_device_defaults {
+                Ok(scrcpy::NewDisplayOptions::default())
+            } else {
+                scrcpy::NewDisplayOptions::custom(
+                    &self.new_display_width_input,
+                    &self.new_display_height_input,
+                    &self.new_display_dpi_input,
+                )
+            };
+            match options {
+                Ok(options) => self.start_scrcpy_new_display(device_id, options),
+                Err(err) => self.set_error(err),
+            }
+        }
     }
 
     fn ui_update_dialog(&mut self, ctx: &egui::Context) {
@@ -2339,6 +2520,7 @@ impl AdbCollectorApp {
     fn save_settings(&mut self) {
         let candidate = AppConfig {
             adb_path: self.adb_path_input.trim().to_owned(),
+            scrcpy_path: self.scrcpy_path_input.trim().to_owned(),
             log_dir: self.log_dir_input.trim().to_owned(),
             app_log_max_size_mb: self.config.app_log_max_size_mb,
             language: self.language_input.clone(),
@@ -2358,6 +2540,12 @@ impl AdbCollectorApp {
             self.set_error(err);
             return;
         }
+        if !candidate.scrcpy_path.is_empty()
+            && let Err(err) = scrcpy::validate_scrcpy_path(candidate.scrcpy_path.as_str())
+        {
+            self.set_error(err);
+            return;
+        }
 
         let log_dir = PathBuf::from(candidate.log_dir.as_str());
         let resolved_log_dir = match config::ensure_log_dir(&log_dir) {
@@ -2370,6 +2558,7 @@ impl AdbCollectorApp {
 
         let saved = AppConfig {
             adb_path: fs_utils::display_path_string(&candidate.adb_path),
+            scrcpy_path: fs_utils::display_path_string(&candidate.scrcpy_path),
             log_dir: fs_utils::display_path(&resolved_log_dir),
             app_log_max_size_mb: candidate.app_log_max_size_mb,
             language: self.language_input.clone(),
@@ -2387,6 +2576,7 @@ impl AdbCollectorApp {
 
         self.config = saved.clone();
         self.adb_path_input = saved.adb_path.clone();
+        self.scrcpy_path_input = saved.scrcpy_path.clone();
         self.log_dir_input = saved.log_dir.clone();
         self.language_input = saved.language.clone();
         self.i18n.set_language(&saved.language);
@@ -2402,6 +2592,7 @@ impl AdbCollectorApp {
 
     fn reset_settings_inputs(&mut self) {
         self.adb_path_input = self.config.adb_path.clone();
+        self.scrcpy_path_input = self.config.scrcpy_path.clone();
         self.log_dir_input = self.config.log_dir.clone();
         self.language_input = self.config.language.clone();
         self.auto_update_input = self.config.auto_check_updates;
@@ -2887,6 +3078,122 @@ impl AdbCollectorApp {
                 bytes: Cow::Owned(screenshot.rgba_pixels),
             })
             .map_err(|err| format!("Failed to copy the screenshot to the system clipboard: {err}"))
+    }
+
+    fn start_scrcpy_mirror(&mut self, device_id: String) {
+        let Some(transport_serial) = self.ready_scrcpy_transport(&device_id) else {
+            return;
+        };
+        if self.configured_scrcpy_version().is_none() {
+            return;
+        }
+
+        let result = scrcpy::launch(
+            &self.config.scrcpy_path,
+            &self.config.adb_path,
+            &transport_serial,
+            scrcpy::LaunchMode::Mirror,
+        );
+        match result {
+            Ok(()) => self.set_info(self.tr_args(
+                "status.scrcpy_mirror_opened",
+                &[("serial", self.device_identity_label(&device_id))],
+            )),
+            Err(err) => self.set_error(err),
+        }
+    }
+
+    fn open_new_display_dialog(&mut self, device_id: String) {
+        if self.ready_scrcpy_transport(&device_id).is_none() {
+            return;
+        }
+        let Some(version) = self.configured_scrcpy_version() else {
+            return;
+        };
+        if !version.supports_new_display() {
+            self.set_error(self.tr_args(
+                "status.scrcpy_new_display_requires_v3",
+                &[("version", version.to_string())],
+            ));
+            return;
+        }
+
+        self.new_display_device_id = Some(device_id);
+        self.show_new_display_dialog = true;
+    }
+
+    fn start_scrcpy_new_display(&mut self, device_id: String, options: scrcpy::NewDisplayOptions) {
+        let Some(transport_serial) = self.ready_scrcpy_transport(&device_id) else {
+            return;
+        };
+        let Some(version) = self.configured_scrcpy_version() else {
+            return;
+        };
+        if !version.supports_new_display() {
+            self.set_error(self.tr_args(
+                "status.scrcpy_new_display_requires_v3",
+                &[("version", version.to_string())],
+            ));
+            return;
+        }
+
+        let result = scrcpy::launch(
+            &self.config.scrcpy_path,
+            &self.config.adb_path,
+            &transport_serial,
+            scrcpy::LaunchMode::NewDisplay(options),
+        );
+        match result {
+            Ok(()) => {
+                self.show_new_display_dialog = false;
+                self.new_display_device_id = None;
+                self.set_info(self.tr_args(
+                    "status.scrcpy_new_display_opened",
+                    &[("serial", self.device_identity_label(&device_id))],
+                ));
+            }
+            Err(err) => self.set_error(err),
+        }
+    }
+
+    fn ready_scrcpy_transport(&mut self, device_id: &str) -> Option<String> {
+        if self.require_initial_setup {
+            self.set_error(self.tr("status.finish_initial_setup"));
+            self.show_settings = true;
+            return None;
+        }
+
+        let Some(device) = self.find_device(device_id).cloned() else {
+            return None;
+        };
+        if device.info.state != "device" {
+            self.set_error(self.tr_args(
+                "status.device_invalid_state",
+                &[
+                    ("serial", self.device_identity_label(device_id)),
+                    ("state", self.device_state_text(&device.info.state)),
+                ],
+            ));
+            return None;
+        }
+        self.device_primary_transport_serial(device_id)
+    }
+
+    fn configured_scrcpy_version(&mut self) -> Option<scrcpy::ScrcpyVersion> {
+        if self.config.scrcpy_path.trim().is_empty() {
+            self.set_error(self.tr("status.scrcpy_not_configured"));
+            self.active_page = NavigationPage::Settings;
+            return None;
+        }
+
+        match scrcpy::validate_scrcpy_path(&self.config.scrcpy_path) {
+            Ok(version) => Some(version),
+            Err(err) => {
+                self.set_error(err);
+                self.active_page = NavigationPage::Settings;
+                None
+            }
+        }
     }
 
     fn open_device_shell(&mut self, device_id: String) {
@@ -4036,6 +4343,7 @@ impl eframe::App for AdbCollectorApp {
             });
 
         self.ui_settings_dialog(ctx);
+        self.ui_new_display_dialog(ctx);
         self.ui_clear_confirm_dialog(ctx);
         self.ui_alias_dialog(ctx);
         self.ui_logcat_args_dialog(ctx);

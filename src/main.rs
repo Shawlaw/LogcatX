@@ -11,6 +11,7 @@ mod i18n;
 mod ime;
 mod managed_child;
 mod models;
+mod scrcpy;
 mod updater;
 
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 820.0];

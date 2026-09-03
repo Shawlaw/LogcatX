@@ -14,6 +14,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub adb_path: String,
     #[serde(default)]
+    pub scrcpy_path: String,
+    #[serde(default)]
     pub log_dir: String,
     #[serde(default = "default_app_log_max_size_mb")]
     pub app_log_max_size_mb: u32,
@@ -37,6 +39,9 @@ impl AppConfig {
 
         Self {
             adb_path: detect_adb_path()
+                .map(|path| fs_utils::display_path_string(&path))
+                .unwrap_or_default(),
+            scrcpy_path: detect_scrcpy_path()
                 .map(|path| fs_utils::display_path_string(&path))
                 .unwrap_or_default(),
             log_dir: fs_utils::display_path(&default_log_dir),
@@ -69,6 +74,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
     normalized.language = i18n::normalize_language_code(&normalized.language).to_owned();
     normalized.log_dir = fs_utils::display_path_string(&normalized.log_dir);
     normalized.adb_path = fs_utils::display_path_string(&normalized.adb_path);
+    normalized.scrcpy_path = fs_utils::display_path_string(&normalized.scrcpy_path);
     if normalized.app_log_max_size_mb == 0 {
         normalized.app_log_max_size_mb = default_app_log_max_size_mb();
     }
@@ -108,6 +114,12 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
         config.adb_path = defaults.adb_path;
     } else {
         config.adb_path = fs_utils::display_path_string(&config.adb_path);
+    }
+
+    if config.scrcpy_path.trim().is_empty() {
+        config.scrcpy_path = defaults.scrcpy_path;
+    } else {
+        config.scrcpy_path = fs_utils::display_path_string(&config.scrcpy_path);
     }
 
     if config.log_dir.trim().is_empty() {
@@ -225,6 +237,16 @@ pub fn detect_adb_path() -> Option<String> {
     }
 
     None
+}
+
+pub fn detect_scrcpy_path() -> Option<String> {
+    let executable_name = if cfg!(target_os = "windows") {
+        "scrcpy.exe"
+    } else {
+        "scrcpy"
+    };
+
+    search_path_for(executable_name).map(|path| path.to_string_lossy().into_owned())
 }
 
 fn search_path_for(executable_name: &str) -> Option<PathBuf> {
@@ -383,6 +405,7 @@ mod tests {
         let json = r#"{"adb_path":"","log_dir":"","app_log_max_size_mb":2,"language":"","device_aliases":{},"pinned_devices":[],"recent_connections":[]}"#;
         let loaded: super::AppConfig = serde_json::from_str(json).unwrap();
         assert!(loaded.device_logcat_args.is_empty());
+        assert!(loaded.scrcpy_path.is_empty());
     }
 
     #[test]
