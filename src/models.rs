@@ -145,6 +145,12 @@ pub enum AppEvent {
         automatic: bool,
         result: Result<Option<UpdateCandidate>, String>,
     },
+    UpdateConnectionTestFinished(
+        Result<
+            crate::updater::UpdateConnectionTestResult,
+            crate::updater::UpdateConnectionTestError,
+        >,
+    ),
     UpdateDownloadFinished(Result<DownloadedUpdate, String>),
     UpdateApplyStarted(Result<(), String>),
 }

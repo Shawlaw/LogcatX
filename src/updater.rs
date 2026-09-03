@@ -5,6 +5,7 @@
 //! exits. When `LOGCATX_UPDATE_PUBLIC_KEY` is not set at build time the whole
 //! feature reports itself as unconfigured instead of contacting the network.
 
+use crate::config::{UpdateProxyConfig, UpdateProxyMode};
 use chrono::{Local, Timelike};
 use desktop_updater::ApplyRequest;
 use desktop_updater::PortableLayout;
@@ -14,10 +15,12 @@ use serde::{Deserialize, Serialize};
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 pub const APP_ID: &str = "com.logcatx.app";
 pub const CHANNEL: &str = "stable";
+pub const DEFAULT_PROXY_TEST_URL: &str = "https://github.com/";
 pub const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/Shawlaw/LogcatX/master/updates/stable.json";
 pub const SIGNATURE_URL: &str =
@@ -29,6 +32,7 @@ const STATUS_CACHE_SCHEMA_VERSION: u8 = 1;
 /// Automatic checks stay quiet before this local hour so a freshly opened
 /// machine does not spend its first minutes on update traffic.
 const AUTOMATIC_CHECK_START_HOUR: u32 = 8;
+const PROXY_TEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Files a release ZIP is allowed to replace in the installation directory.
 /// Must stay in sync with `desktop-update.toml` at the repository root.
@@ -54,16 +58,118 @@ pub fn updates_configured() -> bool {
     public_key().is_some()
 }
 
-pub fn update_config(current_version: &str) -> Option<UpdateConfig> {
-    let public_key = public_key()?;
-    Some(UpdateConfig::new(
+pub fn update_config(
+    current_version: &str,
+    update_proxy: &UpdateProxyConfig,
+) -> Result<Option<UpdateConfig>, UpdateProxyValidationError> {
+    validate_update_proxy(update_proxy)?;
+    let Some(public_key) = public_key() else {
+        return Ok(None);
+    };
+    let mut config = UpdateConfig::new(
         APP_ID,
         CHANNEL,
         current_version,
         MANIFEST_URL,
         SIGNATURE_URL,
         public_key,
-    ))
+    );
+    config.proxy_url = update_proxy.custom_url().map(str::to_owned);
+    Ok(Some(config))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateProxyValidationError {
+    MissingUrl,
+    UnsupportedScheme,
+    MissingHostOrPort,
+    AuthenticationNotSupported,
+    InvalidUrl,
+}
+
+/// Validates user-entered settings without returning a proxy URL in an error.
+/// Credentials are deliberately unsupported: this portable app persists its
+/// settings in plain JSON and writes update diagnostics.
+pub fn validate_update_proxy(
+    update_proxy: &UpdateProxyConfig,
+) -> Result<(), UpdateProxyValidationError> {
+    if update_proxy.mode == UpdateProxyMode::Automatic {
+        return Ok(());
+    }
+
+    let url = update_proxy
+        .custom_url()
+        .ok_or(UpdateProxyValidationError::MissingUrl)?;
+    let parsed = reqwest::Url::parse(url).map_err(|_| UpdateProxyValidationError::InvalidUrl)?;
+    if !matches!(parsed.scheme(), "http" | "socks5" | "socks5h") {
+        return Err(UpdateProxyValidationError::UnsupportedScheme);
+    }
+    if parsed.host_str().is_none() || parsed.port().is_none() {
+        return Err(UpdateProxyValidationError::MissingHostOrPort);
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(UpdateProxyValidationError::AuthenticationNotSupported);
+    }
+    reqwest::Proxy::all(url).map_err(|_| UpdateProxyValidationError::InvalidUrl)?;
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UpdateConnectionTestResult {
+    pub status_code: u16,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UpdateConnectionTestError {
+    InvalidTarget,
+    InvalidProxy,
+    RequestFailed,
+    HttpStatus(u16),
+}
+
+/// Tests an HTTPS target with the same proxy policy used by update checks.
+/// Response content is discarded and network errors are intentionally reduced
+/// to safe categories before they reach the UI.
+pub fn test_update_connection(
+    update_proxy: &UpdateProxyConfig,
+    target_url: &str,
+) -> Result<UpdateConnectionTestResult, UpdateConnectionTestError> {
+    validate_update_proxy(update_proxy).map_err(|_| UpdateConnectionTestError::InvalidProxy)?;
+    let target = parse_proxy_test_target(target_url)?;
+
+    let mut builder = reqwest::blocking::Client::builder().timeout(PROXY_TEST_TIMEOUT);
+    if let Some(proxy_url) = update_proxy.custom_url() {
+        let proxy =
+            reqwest::Proxy::all(proxy_url).map_err(|_| UpdateConnectionTestError::InvalidProxy)?;
+        builder = builder.proxy(proxy);
+    }
+    let client = builder
+        .build()
+        .map_err(|_| UpdateConnectionTestError::InvalidProxy)?;
+    let started = Instant::now();
+    let response = client
+        .get(target)
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .send()
+        .map_err(|_| UpdateConnectionTestError::RequestFailed)?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(UpdateConnectionTestError::HttpStatus(status.as_u16()));
+    }
+    Ok(UpdateConnectionTestResult {
+        status_code: status.as_u16(),
+        elapsed_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+    })
+}
+
+fn parse_proxy_test_target(target_url: &str) -> Result<reqwest::Url, UpdateConnectionTestError> {
+    let target = reqwest::Url::parse(target_url.trim())
+        .map_err(|_| UpdateConnectionTestError::InvalidTarget)?;
+    if target.scheme() != "https" || target.host_str().is_none() {
+        return Err(UpdateConnectionTestError::InvalidTarget);
+    }
+    Ok(target)
 }
 
 pub fn status_cache_path(config_dir: &Path) -> PathBuf {
@@ -398,9 +504,11 @@ pub fn write_status_cache(path: &Path, cache: &UpdateStatusCache) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateStatusCache, automatic_check_is_due, load_status_cache, today_local,
-        write_status_cache,
+        DEFAULT_PROXY_TEST_URL, UpdateConnectionTestError, UpdateProxyValidationError,
+        UpdateStatusCache, automatic_check_is_due, load_status_cache, parse_proxy_test_target,
+        today_local, validate_update_proxy, write_status_cache,
     };
+    use crate::config::{UpdateProxyConfig, UpdateProxyMode};
     use desktop_updater::{UpdateAsset, UpdateCandidate, UpdateManifest};
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -441,6 +549,80 @@ mod tests {
             Some("2026-08-14")
         ));
         assert!(!automatic_check_is_due(false, 9, "2026-08-15", None));
+    }
+
+    #[test]
+    fn proxy_test_target_defaults_to_github_and_requires_https() {
+        let default_target =
+            parse_proxy_test_target(DEFAULT_PROXY_TEST_URL).expect("default GitHub test target");
+        assert_eq!(default_target.as_str(), DEFAULT_PROXY_TEST_URL);
+        assert_eq!(
+            parse_proxy_test_target("http://github.com/"),
+            Err(UpdateConnectionTestError::InvalidTarget)
+        );
+        assert_eq!(
+            parse_proxy_test_target("not a url"),
+            Err(UpdateConnectionTestError::InvalidTarget)
+        );
+    }
+
+    #[test]
+    fn update_proxy_validation_accepts_automatic_http_and_socks5h() {
+        assert!(validate_update_proxy(&UpdateProxyConfig::default()).is_ok());
+        assert!(
+            validate_update_proxy(&UpdateProxyConfig {
+                mode: UpdateProxyMode::Custom,
+                url: "http://127.0.0.1:7890".to_owned(),
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_update_proxy(&UpdateProxyConfig {
+                mode: UpdateProxyMode::Custom,
+                url: "socks5h://127.0.0.1:7890".to_owned(),
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn socks5h_update_proxy_can_build_a_client() {
+        let proxy = UpdateProxyConfig {
+            mode: UpdateProxyMode::Custom,
+            url: "socks5h://127.0.0.1:7890".to_owned(),
+        };
+        validate_update_proxy(&proxy).expect("validate SOCKS5H proxy");
+        let client_proxy =
+            reqwest::Proxy::all(proxy.custom_url().unwrap()).expect("construct SOCKS5H proxy");
+        reqwest::blocking::Client::builder()
+            .proxy(client_proxy)
+            .build()
+            .expect("build client with SOCKS5H proxy");
+    }
+
+    #[test]
+    fn update_proxy_validation_rejects_unsafe_or_incomplete_urls() {
+        let invalid = |url: &str| UpdateProxyConfig {
+            mode: UpdateProxyMode::Custom,
+            url: url.to_owned(),
+        };
+
+        assert_eq!(
+            validate_update_proxy(&invalid("")),
+            Err(UpdateProxyValidationError::MissingUrl)
+        );
+        assert_eq!(
+            validate_update_proxy(&invalid("https://127.0.0.1:7890")),
+            Err(UpdateProxyValidationError::UnsupportedScheme)
+        );
+        assert_eq!(
+            validate_update_proxy(&invalid("http://127.0.0.1")),
+            Err(UpdateProxyValidationError::MissingHostOrPort)
+        );
+        assert_eq!(
+            validate_update_proxy(&invalid("http://user:secret@127.0.0.1:7890")),
+            Err(UpdateProxyValidationError::AuthenticationNotSupported)
+        );
     }
 
     #[test]

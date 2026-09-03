@@ -1,6 +1,6 @@
 use crate::{
     adb,
-    config::{self, AppConfig, AppPaths},
+    config::{self, AppConfig, AppPaths, UpdateProxyConfig, UpdateProxyMode},
     fs_utils,
     i18n::I18n,
     ime::ImeEnterGuard,
@@ -32,6 +32,13 @@ const DEFAULT_DEVICE_DROP_DIR: &str = "/sdcard/Download";
 const DEFAULT_NEW_DISPLAY_WIDTH: &str = "720";
 const DEFAULT_NEW_DISPLAY_HEIGHT: &str = "1600";
 const DEFAULT_NEW_DISPLAY_DPI: &str = "320";
+// Includes the footer controls plus the card's bottom inner margin on the
+// fixed-height settings page.
+const SETTINGS_FOOTER_HEIGHT: f32 = 70.0;
+const SETTINGS_FOOTER_ERROR_HEIGHT: f32 = 116.0;
+const SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT: f32 =
+    SETTINGS_FOOTER_ERROR_HEIGHT - SETTINGS_FOOTER_HEIGHT;
+const SETTINGS_MIN_SCROLL_HEIGHT: f32 = 140.0;
 
 #[derive(Clone, Debug, Default)]
 struct DroppedPayload {
@@ -76,6 +83,14 @@ enum UpdatePhase {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateConnectionTestPhase {
+    Idle,
+    Testing,
+    Succeeded(updater::UpdateConnectionTestResult),
+    Failed(updater::UpdateConnectionTestError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NavigationPage {
     Devices,
     Logs,
@@ -116,6 +131,12 @@ pub struct AdbCollectorApp {
     log_dir_input: String,
     language_input: String,
     auto_update_input: bool,
+    update_proxy_mode_input: UpdateProxyMode,
+    update_proxy_url_input: String,
+    update_proxy_test_url_input: String,
+    update_connection_test: UpdateConnectionTestPhase,
+    scroll_to_update_proxy_settings: bool,
+    settings_save_error: Option<String>,
     i18n: I18n,
     ime_enter_guard: ImeEnterGuard,
     show_settings: bool,
@@ -185,6 +206,8 @@ pub struct AdbCollectorApp {
 impl AdbCollectorApp {
     pub fn new(cc: &eframe::CreationContext<'_>, bootstrap: AppBootstrap) -> Self {
         let config = bootstrap.config;
+        let update_proxy_mode_input = config.update_proxy.mode;
+        let update_proxy_url_input = config.update_proxy.url.clone();
         let require_initial_setup =
             !bootstrap.config_exists || !config.is_complete() || bootstrap.startup_error.is_some();
         let (tx, rx) = mpsc::channel();
@@ -229,6 +252,12 @@ impl AdbCollectorApp {
             rx,
             language_input: String::new(),
             auto_update_input: false,
+            update_proxy_mode_input,
+            update_proxy_url_input,
+            update_proxy_test_url_input: updater::DEFAULT_PROXY_TEST_URL.to_owned(),
+            update_connection_test: UpdateConnectionTestPhase::Idle,
+            scroll_to_update_proxy_settings: false,
+            settings_save_error: None,
             i18n: I18n::new("en"),
             ime_enter_guard: ImeEnterGuard::default(),
             show_settings: require_initial_setup,
@@ -630,6 +659,13 @@ impl AdbCollectorApp {
                 }
                 AppEvent::UpdateCheckFinished { automatic, result } => {
                     self.handle_update_check_finished(automatic, result);
+                }
+                AppEvent::UpdateConnectionTestFinished(result) => {
+                    self.update_connection_test = match result {
+                        Ok(result) => UpdateConnectionTestPhase::Succeeded(result),
+                        Err(error) => UpdateConnectionTestPhase::Failed(error),
+                    };
+                    self.scroll_to_update_proxy_settings = true;
                 }
                 AppEvent::UpdateDownloadFinished(result) => {
                     self.update_downloading = false;
@@ -1764,13 +1800,82 @@ impl AdbCollectorApp {
     }
 
     fn ui_settings_page(&mut self, ui: &mut egui::Ui) {
-        content_card_frame().show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.heading(self.tr("settings.title"));
-            ui.label(self.tr("settings.page_hint"));
-            ui.add_space(10.0);
-            self.ui_settings_form(ui, true);
-        });
+        // Draw the card into an exact rectangle. A Frame expands to its
+        // contents' minimum rect, which lets wide form rows grow the frame
+        // back to CentralPanel's clip edge and hides its right rounded corner.
+        // The dedicated child UI keeps both the border and overflowing form
+        // content inside the central panel's already symmetric inset.
+        let card_width = ui.available_width();
+        let page_height = ui.available_height();
+        let (card_rect, _) =
+            ui.allocate_exact_size(egui::vec2(card_width, page_height), egui::Sense::hover());
+        ui.painter().rect(
+            card_rect,
+            egui::CornerRadius::same(16),
+            Color32::from_rgb(255, 255, 255),
+            egui::Stroke::new(1.0, Color32::from_rgb(229, 233, 241)),
+            egui::epaint::StrokeKind::Inside,
+        );
+
+        let inner_rect = card_rect - egui::Margin::symmetric(18, 18);
+        let mut content_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(inner_rect)
+                .layout(egui::Layout::top_down(Align::LEFT)),
+        );
+        content_ui.set_clip_rect(inner_rect);
+        content_ui.set_min_width(inner_rect.width());
+        content_ui.set_max_width(inner_rect.width());
+        content_ui.heading(self.tr("settings.title"));
+        content_ui.label(self.tr("settings.page_hint"));
+        content_ui.add_space(10.0);
+
+        // Split the remaining space into two fixed rectangles rather than
+        // estimating the footer after rendering the scroll area. This keeps
+        // the actions visible even when the form content is taller than the
+        // viewport.
+        let remaining_rect = content_ui.available_rect_before_wrap();
+        let footer_height = self.settings_footer_height();
+        let footer_top = (remaining_rect.max.y - footer_height).max(remaining_rect.min.y);
+        let form_rect = egui::Rect::from_min_max(
+            remaining_rect.min,
+            // Keep the form content aligned with the card padding on the
+            // left, but let its scrollbar use the card's right padding.
+            egui::pos2(card_rect.max.x, footer_top),
+        );
+        let footer_rect = egui::Rect::from_min_max(
+            egui::pos2(remaining_rect.min.x, footer_top),
+            remaining_rect.max,
+        );
+        let mut form_ui = content_ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(form_rect)
+                .layout(egui::Layout::top_down(Align::LEFT)),
+        );
+        form_ui.set_clip_rect(form_rect);
+        form_ui.set_min_width(form_rect.width());
+        form_ui.set_max_width(form_rect.width());
+        // Page-wide scrolling uses a safety gutter, but this card's scrollbar
+        // should sit beside its content within the card's own right padding.
+        form_ui.spacing_mut().scroll.bar_inner_margin = 0.0;
+        egui::ScrollArea::vertical()
+            .id_salt("settings-page-form")
+            .auto_shrink([false, false])
+            .max_height(form_rect.height())
+            .show(&mut form_ui, |ui| {
+                ui.set_min_width(form_rect.width());
+                ui.set_max_width(form_rect.width());
+                self.ui_settings_fields(ui, true);
+            });
+        let mut footer_ui = content_ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(footer_rect)
+                .layout(egui::Layout::top_down(Align::LEFT)),
+        );
+        footer_ui.set_clip_rect(footer_rect);
+        footer_ui.set_min_width(footer_rect.width());
+        footer_ui.set_max_width(footer_rect.width());
+        self.ui_settings_actions(&mut footer_ui, true);
     }
 
     fn ui_status_content(&mut self, ui: &mut egui::Ui, max_height: Option<f32>) {
@@ -1821,18 +1926,29 @@ impl AdbCollectorApp {
             self.tr("settings.title")
         };
 
+        let max_height = (ctx.available_rect().height() - 32.0).max(240.0);
         egui::Window::new(title)
             .collapsible(false)
             .resizable(false)
+            .max_height(max_height)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                self.ui_settings_form(ui, false);
+                let form_height = (ui.available_height() - self.settings_footer_height())
+                    .max(SETTINGS_MIN_SCROLL_HEIGHT);
+                egui::ScrollArea::vertical()
+                    .id_salt("settings-dialog-form")
+                    .auto_shrink([false, false])
+                    .max_height(form_height)
+                    .show(ui, |ui| {
+                        self.ui_settings_fields(ui, false);
+                    });
+                self.ui_settings_actions(ui, false);
             });
     }
 
-    fn ui_settings_form(&mut self, ui: &mut egui::Ui, inline_page: bool) {
+    fn ui_settings_fields(&mut self, ui: &mut egui::Ui, inline_page: bool) {
         ui.label(self.tr("settings.intro"));
-        ui.small(self.tr("settings.explainer"));
+        ui.add(egui::Label::new(RichText::new(self.tr("settings.explainer")).small()).wrap());
         ui.horizontal(|ui| {
             if ui.button(self.tr("settings.open_config_dir")).clicked() {
                 if let Err(err) = fs_utils::open_path(self.app_paths.config_dir.as_path()) {
@@ -1848,8 +1964,12 @@ impl AdbCollectorApp {
         ui.add_space(8.0);
 
         ui.label(self.tr("settings.adb"));
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.adb_path_input);
+        let path_input_width = settings_path_input_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized(
+                egui::vec2(path_input_width, 0.0),
+                egui::TextEdit::singleline(&mut self.adb_path_input),
+            );
             if ui.button(self.tr("settings.browse")).clicked() {
                 if let Some(path) = FileDialog::new().pick_file() {
                     self.adb_path_input = fs_utils::display_path(path.as_path());
@@ -1870,8 +1990,12 @@ impl AdbCollectorApp {
 
         ui.add_space(8.0);
         ui.label(self.tr("settings.scrcpy"));
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.scrcpy_path_input);
+        let path_input_width = settings_path_input_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized(
+                egui::vec2(path_input_width, 0.0),
+                egui::TextEdit::singleline(&mut self.scrcpy_path_input),
+            );
             if ui.button(self.tr("settings.browse")).clicked() {
                 if let Some(path) = FileDialog::new().pick_file() {
                     self.scrcpy_path_input = fs_utils::display_path(path.as_path());
@@ -1892,8 +2016,12 @@ impl AdbCollectorApp {
 
         ui.add_space(8.0);
         ui.label(self.tr("settings.log_dir"));
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.log_dir_input);
+        let path_input_width = settings_path_input_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            ui.add_sized(
+                egui::vec2(path_input_width, 0.0),
+                egui::TextEdit::singleline(&mut self.log_dir_input),
+            );
             if ui.button(self.tr("settings.browse")).clicked() {
                 if let Some(path) = FileDialog::new().pick_folder() {
                     self.log_dir_input = fs_utils::display_path(path.as_path());
@@ -1930,7 +2058,21 @@ impl AdbCollectorApp {
         ui.checkbox(&mut self.auto_update_input, auto_check_label);
         ui.small(self.tr("update.auto_check_hint"));
 
+        self.ui_update_proxy_settings(ui, inline_page);
+    }
+
+    fn ui_settings_actions(&mut self, ui: &mut egui::Ui, inline_page: bool) {
+        if let Some(error) = &self.settings_save_error {
+            settings_error_scroll_area().show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(error).color(Color32::from_rgb(192, 57, 43)))
+                        .wrap(),
+                );
+            });
+        }
         ui.add_space(12.0);
+        ui.separator();
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             if ui.button(self.tr("settings.save")).clicked() {
                 self.save_settings();
@@ -1945,6 +2087,158 @@ impl AdbCollectorApp {
                 }
             }
         });
+    }
+
+    fn settings_footer_height(&self) -> f32 {
+        if self.settings_save_error.is_some() {
+            SETTINGS_FOOTER_ERROR_HEIGHT
+        } else {
+            SETTINGS_FOOTER_HEIGHT
+        }
+    }
+
+    fn ui_update_proxy_settings(&mut self, ui: &mut egui::Ui, inline_page: bool) {
+        ui.add_space(8.0);
+        let pending_scroll = std::mem::take(&mut self.scroll_to_update_proxy_settings);
+        let mut newly_revealed_content = false;
+        ui.label(self.tr("update.proxy_title"));
+        let mut proxy_mode_changed = false;
+        let mut proxy_input_changed = false;
+        let automatic_label = self.tr("update.proxy_automatic");
+        let custom_label = self.tr("update.proxy_custom");
+        egui::ComboBox::from_id_salt(if inline_page {
+            "update-proxy-select-page"
+        } else {
+            "update-proxy-select-dialog"
+        })
+        .selected_text(match self.update_proxy_mode_input {
+            UpdateProxyMode::Automatic => automatic_label.clone(),
+            UpdateProxyMode::Custom => custom_label.clone(),
+        })
+        .show_ui(ui, |ui| {
+            proxy_mode_changed |= ui
+                .selectable_value(
+                    &mut self.update_proxy_mode_input,
+                    UpdateProxyMode::Automatic,
+                    automatic_label,
+                )
+                .changed();
+            proxy_mode_changed |= ui
+                .selectable_value(
+                    &mut self.update_proxy_mode_input,
+                    UpdateProxyMode::Custom,
+                    custom_label,
+                )
+                .changed();
+        });
+
+        if self.update_proxy_mode_input == UpdateProxyMode::Automatic {
+            ui.small(self.tr("update.proxy_automatic_hint"));
+        } else {
+            ui.label(self.tr("update.proxy_url"));
+            proxy_input_changed |= ui
+                .text_edit_singleline(&mut self.update_proxy_url_input)
+                .changed();
+            ui.small(self.tr("update.proxy_url_hint"));
+        }
+
+        if proxy_mode_changed || proxy_input_changed {
+            self.update_connection_test = UpdateConnectionTestPhase::Idle;
+        }
+        newly_revealed_content |= proxy_mode_changed;
+
+        let is_testing = matches!(
+            self.update_connection_test,
+            UpdateConnectionTestPhase::Testing
+        );
+        let mut test_requested = false;
+        if ui
+            .add_enabled(
+                !is_testing,
+                egui::Button::new(self.tr(if is_testing {
+                    "update.proxy_testing"
+                } else {
+                    "update.proxy_test"
+                })),
+            )
+            .clicked()
+        {
+            self.request_update_connection_test();
+            test_requested = true;
+        }
+        ui.small(self.tr("update.proxy_test_hint"));
+        let mut test_target_changed = false;
+        let custom_target_response = egui::CollapsingHeader::new(
+            self.tr("update.proxy_test_custom_target"),
+        )
+        .show(ui, |ui| {
+            ui.label(self.tr("update.proxy_test_url"));
+            test_target_changed |= ui
+                .text_edit_singleline(&mut self.update_proxy_test_url_input)
+                .changed();
+            ui.small(self.tr("update.proxy_test_url_hint"));
+        });
+        if custom_target_response.header_response.clicked() {
+            // Keep requesting while the collapsing animation reveals the
+            // target fields, then make its bottom edge visible.
+            self.scroll_to_update_proxy_settings = true;
+            newly_revealed_content = true;
+        }
+        if test_target_changed {
+            self.update_connection_test = UpdateConnectionTestPhase::Idle;
+        }
+
+        match self.update_connection_test {
+            UpdateConnectionTestPhase::Idle => {}
+            UpdateConnectionTestPhase::Testing => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.small(self.tr("update.proxy_testing"));
+                });
+            }
+            UpdateConnectionTestPhase::Succeeded(result) => {
+                ui.small(
+                    RichText::new(self.tr_args(
+                        "update.proxy_test_success",
+                        &[
+                            ("status", result.status_code.to_string()),
+                            ("elapsed", result.elapsed_ms.to_string()),
+                        ],
+                    ))
+                    .color(Color32::from_rgb(39, 145, 85)),
+                );
+            }
+            UpdateConnectionTestPhase::Failed(error) => {
+                let key = match error {
+                    updater::UpdateConnectionTestError::InvalidTarget => {
+                        "update.proxy_test_invalid_target"
+                    }
+                    updater::UpdateConnectionTestError::InvalidProxy => "update.proxy_test_invalid",
+                    updater::UpdateConnectionTestError::RequestFailed => "update.proxy_test_failed",
+                    updater::UpdateConnectionTestError::HttpStatus(_) => {
+                        "update.proxy_test_http_status"
+                    }
+                };
+                let message = match error {
+                    updater::UpdateConnectionTestError::HttpStatus(status) => {
+                        self.tr_args(key, &[("status", status.to_string())])
+                    }
+                    _ => self.tr(key),
+                };
+                ui.small(RichText::new(message).color(Color32::from_rgb(192, 57, 43)));
+            }
+        }
+
+        if should_reveal_proxy_settings_content(
+            pending_scroll,
+            newly_revealed_content,
+            test_requested,
+        ) {
+            // This is intentionally after all conditional fields and test
+            // feedback have been laid out, so the enclosing ScrollArea uses
+            // their final bounds instead of their previous height.
+            ui.scroll_to_cursor(Some(Align::BOTTOM));
+        }
     }
 
     fn ui_new_display_dialog(&mut self, ctx: &egui::Context) {
@@ -2113,6 +2407,7 @@ impl AdbCollectorApp {
         let mut download_clicked = false;
         let mut apply_clicked = false;
         let mut open_notes_url: Option<String> = None;
+        let mut open_update_network_settings = false;
 
         egui::Window::new(self.tr("update.dialog_title"))
             .collapsible(false)
@@ -2138,6 +2433,18 @@ impl AdbCollectorApp {
                         ui.label(RichText::new(banner).color(Color32::from_rgb(210, 120, 10)));
                         ui.add_space(4.0);
                     }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.small(self.tr_args(
+                            "update.proxy_status",
+                            &[("mode", self.update_proxy_status_label())],
+                        ));
+                        if matches!(self.update_phase, UpdatePhase::Failed(_))
+                            && ui.button(self.tr("update.proxy_settings")).clicked()
+                        {
+                            open_update_network_settings = true;
+                        }
+                    });
+                    ui.add_space(4.0);
                     match self.update_phase.clone() {
                         UpdatePhase::Checking => {
                             ui.horizontal(|ui| {
@@ -2245,6 +2552,12 @@ impl AdbCollectorApp {
             && let Err(err) = fs_utils::open_url(&notes_url)
         {
             self.set_error(err);
+        }
+        if open_update_network_settings {
+            self.show_update_dialog = false;
+            self.active_page = NavigationPage::Settings;
+            self.scroll_to_update_proxy_settings = true;
+            return;
         }
         if later_clicked || !open {
             self.show_update_dialog = false;
@@ -2890,6 +3203,7 @@ impl AdbCollectorApp {
     }
 
     fn save_settings(&mut self) {
+        self.settings_save_error = None;
         let candidate = AppConfig {
             adb_path: self.adb_path_input.trim().to_owned(),
             scrcpy_path: self.scrcpy_path_input.trim().to_owned(),
@@ -2901,21 +3215,26 @@ impl AdbCollectorApp {
             recent_connections: self.config.recent_connections.clone(),
             device_logcat_args: self.config.device_logcat_args.clone(),
             auto_check_updates: self.auto_update_input,
+            update_proxy: self.update_proxy_input(),
         };
 
         if candidate.adb_path.is_empty() || candidate.log_dir.is_empty() {
-            self.set_error(self.tr("status.required_fields"));
+            self.set_settings_save_error(self.tr("status.required_fields"));
             return;
         }
 
         if let Err(err) = adb::validate_adb_path(candidate.adb_path.as_str()) {
-            self.set_error(err);
+            self.set_settings_save_error(err);
             return;
         }
         if !candidate.scrcpy_path.is_empty()
             && let Err(err) = scrcpy::validate_scrcpy_path(candidate.scrcpy_path.as_str())
         {
-            self.set_error(err);
+            self.set_settings_save_error(err);
+            return;
+        }
+        if let Err(error) = updater::validate_update_proxy(&candidate.update_proxy) {
+            self.set_settings_save_error(self.update_proxy_validation_message(error));
             return;
         }
 
@@ -2923,7 +3242,7 @@ impl AdbCollectorApp {
         let resolved_log_dir = match config::ensure_log_dir(&log_dir) {
             Ok(path) => path,
             Err(err) => {
-                self.set_error(err);
+                self.set_settings_save_error(err);
                 return;
             }
         };
@@ -2939,10 +3258,11 @@ impl AdbCollectorApp {
             recent_connections: candidate.recent_connections.clone(),
             device_logcat_args: candidate.device_logcat_args.clone(),
             auto_check_updates: candidate.auto_check_updates,
+            update_proxy: candidate.update_proxy.clone(),
         };
 
         if let Err(err) = config::save_config(&self.app_paths.config_path, &saved) {
-            self.set_error(err);
+            self.set_settings_save_error(err);
             return;
         }
 
@@ -2951,6 +3271,9 @@ impl AdbCollectorApp {
         self.scrcpy_path_input = saved.scrcpy_path.clone();
         self.log_dir_input = saved.log_dir.clone();
         self.language_input = saved.language.clone();
+        self.update_proxy_mode_input = saved.update_proxy.mode;
+        self.update_proxy_url_input = saved.update_proxy.url.clone();
+        self.update_connection_test = UpdateConnectionTestPhase::Idle;
         self.i18n.set_language(&saved.language);
         self.show_settings = false;
         self.require_initial_setup = false;
@@ -2968,6 +3291,85 @@ impl AdbCollectorApp {
         self.log_dir_input = self.config.log_dir.clone();
         self.language_input = self.config.language.clone();
         self.auto_update_input = self.config.auto_check_updates;
+        self.update_proxy_mode_input = self.config.update_proxy.mode;
+        self.update_proxy_url_input = self.config.update_proxy.url.clone();
+        self.update_connection_test = UpdateConnectionTestPhase::Idle;
+        self.settings_save_error = None;
+    }
+
+    fn set_settings_save_error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        self.set_error(text.clone());
+        self.settings_save_error = Some(text);
+    }
+
+    fn update_proxy_input(&self) -> UpdateProxyConfig {
+        UpdateProxyConfig {
+            mode: self.update_proxy_mode_input,
+            url: if self.update_proxy_mode_input == UpdateProxyMode::Custom {
+                self.update_proxy_url_input.trim().to_owned()
+            } else {
+                String::new()
+            },
+        }
+    }
+
+    fn update_proxy_validation_message(
+        &self,
+        error: updater::UpdateProxyValidationError,
+    ) -> String {
+        self.tr(match error {
+            updater::UpdateProxyValidationError::MissingUrl => "update.proxy_error_missing_url",
+            updater::UpdateProxyValidationError::UnsupportedScheme => {
+                "update.proxy_error_unsupported_scheme"
+            }
+            updater::UpdateProxyValidationError::MissingHostOrPort => {
+                "update.proxy_error_missing_host_or_port"
+            }
+            updater::UpdateProxyValidationError::AuthenticationNotSupported => {
+                "update.proxy_error_authentication"
+            }
+            updater::UpdateProxyValidationError::InvalidUrl => "update.proxy_error_invalid_url",
+        })
+    }
+
+    fn update_proxy_status_label(&self) -> String {
+        self.tr(match self.config.update_proxy.mode {
+            UpdateProxyMode::Automatic => "update.proxy_status_automatic",
+            UpdateProxyMode::Custom => "update.proxy_status_custom",
+        })
+    }
+
+    fn request_update_connection_test(&mut self) {
+        if matches!(
+            self.update_connection_test,
+            UpdateConnectionTestPhase::Testing
+        ) {
+            return;
+        }
+
+        let proxy = self.update_proxy_input();
+        if updater::validate_update_proxy(&proxy).is_err() {
+            self.update_connection_test =
+                UpdateConnectionTestPhase::Failed(updater::UpdateConnectionTestError::InvalidProxy);
+            self.scroll_to_update_proxy_settings = true;
+            return;
+        }
+        let target_url = self.update_proxy_test_url_input.trim().to_owned();
+        let target_url = if target_url.is_empty() {
+            updater::DEFAULT_PROXY_TEST_URL.to_owned()
+        } else {
+            target_url
+        };
+
+        self.update_connection_test = UpdateConnectionTestPhase::Testing;
+        self.scroll_to_update_proxy_settings = true;
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let _ = tx.send(AppEvent::UpdateConnectionTestFinished(
+                updater::test_update_connection(&proxy, &target_url),
+            ));
+        });
     }
 
     fn refresh_devices(&mut self) {
@@ -3067,8 +3469,16 @@ impl AdbCollectorApp {
         }
 
         self.update_phase = UpdatePhase::Checking;
-        let Some(config) = updater::update_config(&self.version) else {
-            return;
+        let config = match updater::update_config(&self.version, &self.config.update_proxy) {
+            Ok(Some(config)) => config,
+            Ok(None) => return,
+            Err(error) => {
+                self.handle_update_check_finished(
+                    automatic,
+                    Err(self.update_proxy_validation_message(error)),
+                );
+                return;
+            }
         };
         let tx = self.tx.clone();
         thread::spawn(move || {
@@ -3216,8 +3626,14 @@ impl AdbCollectorApp {
             return;
         }
 
-        let Some(config) = updater::update_config(&self.version) else {
-            return;
+        let config = match updater::update_config(&self.version, &self.config.update_proxy) {
+            Ok(Some(config)) => config,
+            Ok(None) => return,
+            Err(error) => {
+                let error = self.update_proxy_validation_message(error);
+                self.set_error(self.tr_args("update.download_failed", &[("error", error)]));
+                return;
+            }
         };
         self.update_downloading = true;
         self.update_download_progress = None;
@@ -4711,8 +5127,27 @@ fn content_view_width(available_width: f32, right_gutter: f32) -> f32 {
     (available_width - right_gutter).max(0.0)
 }
 
+fn settings_error_scroll_area() -> egui::ScrollArea {
+    egui::ScrollArea::vertical()
+        .id_salt("settings-save-error")
+        .max_height(SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT)
+        .min_scrolled_height(0.0)
+}
+
 fn is_current_cleanup_preview_response(current_generation: u64, request_id: u64) -> bool {
     current_generation == request_id
+}
+
+fn settings_path_input_width(available_width: f32) -> f32 {
+    (available_width * 0.5).clamp(160.0, 420.0)
+}
+
+fn should_reveal_proxy_settings_content(
+    pending_scroll: bool,
+    newly_revealed_content: bool,
+    test_requested: bool,
+) -> bool {
+    pending_scroll || newly_revealed_content || test_requested
 }
 fn detail_label(ui: &mut egui::Ui, label: &str) {
     ui.label(RichText::new(label).color(Color32::from_rgb(122, 128, 142)));
@@ -5022,12 +5457,14 @@ fn format_system_time(time: std::time::SystemTime) -> String {
 mod tests {
     use super::{
         DEFAULT_NEW_DISPLAY_DPI, DEFAULT_NEW_DISPLAY_HEIGHT, DEFAULT_NEW_DISPLAY_WIDTH,
-        build_device_push_destination, classify_dropped_paths, content_view_width,
-        device_transport_rank, filter_installed_packages, format_device_model_name,
-        is_current_cleanup_preview_response,
-        pick_primary_device_info,
+        SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT, build_device_push_destination,
+        classify_dropped_paths, content_view_width, device_transport_rank,
+        filter_installed_packages, format_device_model_name, is_current_cleanup_preview_response,
+        pick_primary_device_info, settings_error_scroll_area, settings_path_input_width,
+        should_reveal_proxy_settings_content,
     };
     use crate::models::DeviceInfo;
+    use eframe::egui;
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -5116,11 +5553,43 @@ mod tests {
         assert_eq!(content_view_width(320.0, 28.0), 292.0);
         assert_eq!(content_view_width(20.0, 28.0), 0.0);
     }
+
+    #[test]
+    fn settings_error_scroll_area_stays_inside_the_reserved_footer_viewport() {
+        let ctx = egui::Context::default();
+        let mut viewport_height = 0.0;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let output = settings_error_scroll_area().show(ui, |ui| {
+                    ui.add(egui::Label::new("error ".repeat(256)).wrap());
+                });
+                viewport_height = output.inner_rect.height();
+            });
+        });
+
+        assert!(viewport_height > 0.0);
+        assert!(viewport_height <= SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT);
+    }
     #[test]
     fn cleanup_preview_only_accepts_the_current_request_generation() {
         assert!(is_current_cleanup_preview_response(7, 7));
         assert!(!is_current_cleanup_preview_response(8, 7));
         assert!(!is_current_cleanup_preview_response(7, 8));
+    }
+
+    #[test]
+    fn settings_path_input_width_scales_with_the_available_width() {
+        assert_eq!(settings_path_input_width(120.0), 160.0);
+        assert_eq!(settings_path_input_width(500.0), 250.0);
+        assert_eq!(settings_path_input_width(1_000.0), 420.0);
+    }
+
+    #[test]
+    fn proxy_settings_reveal_triggers_for_new_or_async_content() {
+        assert!(should_reveal_proxy_settings_content(true, false, false));
+        assert!(should_reveal_proxy_settings_content(false, true, false));
+        assert!(should_reveal_proxy_settings_content(false, false, true));
+        assert!(!should_reveal_proxy_settings_content(false, false, false));
     }
 
     #[test]

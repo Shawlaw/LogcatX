@@ -9,6 +9,31 @@ use std::{
 pub type AppPaths = desktop_config::PortableAppPaths;
 pub const MAX_RECENT_CONNECTIONS: usize = 8;
 
+/// How signed update traffic reaches the release endpoints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpdateProxyMode {
+    #[default]
+    Automatic,
+    Custom,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateProxyConfig {
+    #[serde(default)]
+    pub mode: UpdateProxyMode,
+    #[serde(default)]
+    pub url: String,
+}
+
+impl UpdateProxyConfig {
+    pub fn custom_url(&self) -> Option<&str> {
+        (self.mode == UpdateProxyMode::Custom)
+            .then_some(self.url.trim())
+            .filter(|url| !url.is_empty())
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -31,6 +56,8 @@ pub struct AppConfig {
     pub device_logcat_args: BTreeMap<String, String>,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
+    #[serde(default)]
+    pub update_proxy: UpdateProxyConfig,
 }
 
 impl AppConfig {
@@ -52,6 +79,7 @@ impl AppConfig {
             recent_connections: Vec::new(),
             device_logcat_args: BTreeMap::new(),
             auto_check_updates: default_auto_check_updates(),
+            update_proxy: UpdateProxyConfig::default(),
         }
     }
 
@@ -82,6 +110,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
     normalized.pinned_devices = normalize_serial_list(normalized.pinned_devices);
     normalized.recent_connections = normalize_recent_connections(normalized.recent_connections);
     normalized.device_logcat_args = normalize_logcat_args(normalized.device_logcat_args);
+    normalized.update_proxy = normalize_update_proxy(normalized.update_proxy);
 
     desktop_config::save_pretty_json(path, &normalized)
 }
@@ -141,6 +170,7 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
     config.pinned_devices = normalize_serial_list(config.pinned_devices);
     config.recent_connections = normalize_recent_connections(config.recent_connections);
     config.device_logcat_args = normalize_logcat_args(config.device_logcat_args);
+    config.update_proxy = normalize_update_proxy(config.update_proxy);
 
     config
 }
@@ -191,6 +221,14 @@ fn normalize_logcat_args(args: BTreeMap<String, String>) -> BTreeMap<String, Str
         normalized.insert(serial.to_owned(), args_str.to_owned());
     }
     normalized
+}
+
+fn normalize_update_proxy(mut proxy: UpdateProxyConfig) -> UpdateProxyConfig {
+    proxy.url = proxy.url.trim().to_owned();
+    if proxy.mode == UpdateProxyMode::Automatic {
+        proxy.url.clear();
+    }
+    proxy
 }
 
 fn default_app_log_max_size_mb() -> u32 {
@@ -417,5 +455,29 @@ mod tests {
         let json = r#"{"adb_path":"","log_dir":"","app_log_max_size_mb":2,"language":"","device_aliases":{},"pinned_devices":[],"recent_connections":[],"device_logcat_args":{},"auto_check_updates":false}"#;
         let loaded: super::AppConfig = serde_json::from_str(json).unwrap();
         assert!(!loaded.auto_check_updates);
+    }
+
+    #[test]
+    fn config_defaults_update_proxy_for_existing_files() {
+        let json = r#"{"adb_path":"","log_dir":"","app_log_max_size_mb":2,"language":"","device_aliases":{},"pinned_devices":[],"recent_connections":[],"device_logcat_args":{}}"#;
+        let loaded: super::AppConfig = serde_json::from_str(json).unwrap();
+
+        assert_eq!(loaded.update_proxy.mode, super::UpdateProxyMode::Automatic);
+        assert!(loaded.update_proxy.url.is_empty());
+    }
+
+    #[test]
+    fn normalize_update_proxy_trims_custom_url_and_clears_automatic_url() {
+        let custom = super::normalize_update_proxy(super::UpdateProxyConfig {
+            mode: super::UpdateProxyMode::Custom,
+            url: "  socks5h://127.0.0.1:7890  ".to_owned(),
+        });
+        assert_eq!(custom.custom_url(), Some("socks5h://127.0.0.1:7890"));
+
+        let automatic = super::normalize_update_proxy(super::UpdateProxyConfig {
+            mode: super::UpdateProxyMode::Automatic,
+            url: "http://should-not-be-used:7890".to_owned(),
+        });
+        assert!(automatic.url.is_empty());
     }
 }
