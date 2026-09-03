@@ -60,7 +60,6 @@
     "device.started": "Started",
     "device.latest_file": "Latest file",
     "device.no_file": "No log file yet",
-    "device.action.open_file": "Open file",
     "device.action.open_folder": "Open folder",
     "device.action.start": "Start",
     "device.action.stop": "Stop",

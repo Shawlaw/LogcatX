@@ -562,15 +562,12 @@ fn query_android_version(adb_path: &str, serial: &str) -> Option<String> {
         adb_shell_getprop(adb_path, serial, "ro.build.version.release_or_codename");
     let release = adb_shell_getprop(adb_path, serial, "ro.build.version.release");
 
-    match release_or_codename
+    release_or_codename
         .as_deref()
         .or(release.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        Some(value) => Some(format_android_version(value)),
-        None => None,
-    }
+        .map(format_android_version)
 }
 
 fn adb_shell_getprop(adb_path: &str, serial: &str, key: &str) -> Option<String> {

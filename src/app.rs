@@ -877,10 +877,10 @@ impl AdbCollectorApp {
             .stroke(egui::Stroke::new(1.0, Color32::from_rgb(218, 224, 234)))
             .corner_radius(egui::CornerRadius::same(8))
             .min_size(egui::vec2(0.0, 26.0));
-            if ui.add(github_button).clicked() {
-                if let Err(err) = fs_utils::open_url(PROJECT_URL) {
-                    self.set_error(err);
-                }
+            if ui.add(github_button).clicked()
+                && let Err(err) = fs_utils::open_url(PROJECT_URL)
+            {
+                self.set_error(err);
             }
             ui.add_space(6.0);
             ui.label(
@@ -1009,21 +1009,17 @@ impl AdbCollectorApp {
                     if ui
                         .add(secondary_button("⧉", self.tr("toolbar.open_logs")))
                         .clicked()
-                    {
-                        if let Err(err) =
+                        && let Err(err) =
                             fs_utils::open_path(PathBuf::from(&self.config.log_dir).as_path())
-                        {
-                            self.set_error(err);
-                        }
+                    {
+                        self.set_error(err);
                     }
                     if ui
                         .add(secondary_button("⌘", self.tr("toolbar.open_app_log")))
                         .clicked()
+                        && let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path())
                     {
-                        if let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path())
-                        {
-                            self.set_error(err);
-                        }
+                        self.set_error(err);
                     }
                 });
             });
@@ -1478,14 +1474,13 @@ impl AdbCollectorApp {
                                                     open_shell_serial = Some(device_id.clone());
                                                     ui.close_menu();
                                                 }
-                                                if let Some(path) = &output_path {
-                                                    if ui
+                                                if let Some(path) = &output_path
+                                                    && ui
                                                         .add(rounded_secondary(open_text.clone()))
                                                         .clicked()
-                                                    {
-                                                        open_output = Some(path.clone());
-                                                        ui.close_menu();
-                                                    }
+                                                {
+                                                    open_output = Some(path.clone());
+                                                    ui.close_menu();
                                                 }
                                                 {
                                                     let device_dir = fs_utils::device_log_dir(
@@ -1576,8 +1571,7 @@ impl AdbCollectorApp {
                                                 }
                                                 if let Some(network_serial) =
                                                     self.device_network_transport_serial(&device_id)
-                                                {
-                                                    if ui
+                                                    && ui
                                                         .add_enabled(
                                                             self.disconnecting_serial.as_deref()
                                                                 != Some(network_serial.as_str()),
@@ -1586,10 +1580,9 @@ impl AdbCollectorApp {
                                                             ),
                                                         )
                                                         .clicked()
-                                                    {
-                                                        disconnect_serial = Some(network_serial);
-                                                        ui.close_menu();
-                                                    }
+                                                {
+                                                    disconnect_serial = Some(network_serial);
+                                                    ui.close_menu();
                                                 }
                                             });
                                         },
@@ -1648,10 +1641,10 @@ impl AdbCollectorApp {
             if let Some(serial) = stop_serial {
                 self.stop_collection(&serial);
             }
-            if let Some(path) = open_output {
-                if let Err(err) = fs_utils::open_path(&path) {
-                    self.set_error(err);
-                }
+            if let Some(path) = open_output
+                && let Err(err) = fs_utils::open_path(&path)
+            {
+                self.set_error(err);
             }
             if let Some(serial) = copy_serial {
                 self.copy_serial_to_clipboard(&ctx, serial);
@@ -1710,17 +1703,16 @@ impl AdbCollectorApp {
             ui.label(self.tr("log_files.hint"));
             ui.add_space(10.0);
             ui.horizontal_wrapped(|ui| {
-                if ui.button(self.tr("toolbar.open_logs")).clicked() {
-                    if let Err(err) =
+                if ui.button(self.tr("toolbar.open_logs")).clicked()
+                    && let Err(err) =
                         fs_utils::open_path(PathBuf::from(&self.config.log_dir).as_path())
-                    {
-                        self.set_error(err);
-                    }
+                {
+                    self.set_error(err);
                 }
-                if ui.button(self.tr("toolbar.open_app_log")).clicked() {
-                    if let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path()) {
-                        self.set_error(err);
-                    }
+                if ui.button(self.tr("toolbar.open_app_log")).clicked()
+                    && let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path())
+                {
+                    self.set_error(err);
                 }
                 if ui.button(self.tr("toolbar.refresh_size")).clicked() {
                     self.refresh_log_size();
@@ -1950,15 +1942,15 @@ impl AdbCollectorApp {
         ui.label(self.tr("settings.intro"));
         ui.add(egui::Label::new(RichText::new(self.tr("settings.explainer")).small()).wrap());
         ui.horizontal(|ui| {
-            if ui.button(self.tr("settings.open_config_dir")).clicked() {
-                if let Err(err) = fs_utils::open_path(self.app_paths.config_dir.as_path()) {
-                    self.set_error(err);
-                }
+            if ui.button(self.tr("settings.open_config_dir")).clicked()
+                && let Err(err) = fs_utils::open_path(self.app_paths.config_dir.as_path())
+            {
+                self.set_error(err);
             }
-            if ui.button(self.tr("settings.open_app_log")).clicked() {
-                if let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path()) {
-                    self.set_error(err);
-                }
+            if ui.button(self.tr("settings.open_app_log")).clicked()
+                && let Err(err) = fs_utils::open_path(self.app_paths.app_log_path.as_path())
+            {
+                self.set_error(err);
             }
         });
         ui.add_space(8.0);
@@ -1970,10 +1962,10 @@ impl AdbCollectorApp {
                 egui::vec2(path_input_width, 0.0),
                 egui::TextEdit::singleline(&mut self.adb_path_input),
             );
-            if ui.button(self.tr("settings.browse")).clicked() {
-                if let Some(path) = FileDialog::new().pick_file() {
-                    self.adb_path_input = fs_utils::display_path(path.as_path());
-                }
+            if ui.button(self.tr("settings.browse")).clicked()
+                && let Some(path) = FileDialog::new().pick_file()
+            {
+                self.adb_path_input = fs_utils::display_path(path.as_path());
             }
             if ui.button(self.tr("settings.use_adb")).clicked() {
                 self.adb_path_input = "adb".to_owned();
@@ -1996,10 +1988,10 @@ impl AdbCollectorApp {
                 egui::vec2(path_input_width, 0.0),
                 egui::TextEdit::singleline(&mut self.scrcpy_path_input),
             );
-            if ui.button(self.tr("settings.browse")).clicked() {
-                if let Some(path) = FileDialog::new().pick_file() {
-                    self.scrcpy_path_input = fs_utils::display_path(path.as_path());
-                }
+            if ui.button(self.tr("settings.browse")).clicked()
+                && let Some(path) = FileDialog::new().pick_file()
+            {
+                self.scrcpy_path_input = fs_utils::display_path(path.as_path());
             }
             if ui.button(self.tr("settings.use_scrcpy")).clicked() {
                 self.scrcpy_path_input = "scrcpy".to_owned();
@@ -2022,10 +2014,10 @@ impl AdbCollectorApp {
                 egui::vec2(path_input_width, 0.0),
                 egui::TextEdit::singleline(&mut self.log_dir_input),
             );
-            if ui.button(self.tr("settings.browse")).clicked() {
-                if let Some(path) = FileDialog::new().pick_folder() {
-                    self.log_dir_input = fs_utils::display_path(path.as_path());
-                }
+            if ui.button(self.tr("settings.browse")).clicked()
+                && let Some(path) = FileDialog::new().pick_folder()
+            {
+                self.log_dir_input = fs_utils::display_path(path.as_path());
             }
             if ui.button(self.tr("settings.use_default")).clicked() {
                 self.log_dir_input = fs_utils::display_path(&self.app_paths.exe_dir.join("logs"));
@@ -4053,9 +4045,7 @@ impl AdbCollectorApp {
             return None;
         }
 
-        let Some(device) = self.find_device(device_id).cloned() else {
-            return None;
-        };
+        let device = self.find_device(device_id).cloned()?;
         if device.info.state != "device" {
             self.set_error(self.tr_args(
                 "status.device_invalid_state",
@@ -4256,14 +4246,13 @@ impl AdbCollectorApp {
             return;
         }
 
-        if let Some(selected_serial) = self.selected_serial.clone() {
-            if ready_devices
+        if let Some(selected_serial) = self.selected_serial.clone()
+            && ready_devices
                 .iter()
                 .any(|serial| serial == &selected_serial)
-            {
-                self.start_drop_task(selected_serial, payload);
-                return;
-            }
+        {
+            self.start_drop_task(selected_serial, payload);
+            return;
         }
 
         self.pending_drop_target_serial = ready_devices.first().cloned();
@@ -4308,17 +4297,17 @@ impl AdbCollectorApp {
 
         let device_name = self.device_identity_label(&device_id);
 
-        if let Some(device) = self.find_device(&device_id) {
-            if device.info.state != "device" {
-                self.set_error(self.tr_args(
-                    "status.device_invalid_state",
-                    &[
-                        ("serial", device_name.clone()),
-                        ("state", self.device_state_text(&device.info.state)),
-                    ],
-                ));
-                return;
-            }
+        if let Some(device) = self.find_device(&device_id)
+            && device.info.state != "device"
+        {
+            self.set_error(self.tr_args(
+                "status.device_invalid_state",
+                &[
+                    ("serial", device_name.clone()),
+                    ("state", self.device_state_text(&device.info.state)),
+                ],
+            ));
+            return;
         }
 
         let Some(transport_serial) = self.device_primary_transport_serial(&device_id) else {
@@ -4642,10 +4631,10 @@ impl AdbCollectorApp {
         let primary_serial = self
             .device_primary_transport_serial(serial)
             .unwrap_or_else(|| serial.to_owned());
-        if let Some(alias) = self.device_alias(serial) {
-            if alias != primary_serial {
-                return format!("{alias} ({primary_serial})");
-            }
+        if let Some(alias) = self.device_alias(serial)
+            && alias != primary_serial
+        {
+            return format!("{alias} ({primary_serial})");
         }
 
         match self
@@ -4816,20 +4805,21 @@ impl AdbCollectorApp {
 
         if let Err(err) = self.persist_config() {
             self.config.device_aliases = previous_aliases;
-            if let Some(new_dir) = &renamed_dir {
-                if &old_dir != new_dir && new_dir.exists() {
-                    let _ = std::fs::rename(new_dir, &old_dir);
-                }
+            if let Some(new_dir) = &renamed_dir
+                && &old_dir != new_dir
+                && new_dir.exists()
+            {
+                let _ = std::fs::rename(new_dir, &old_dir);
             }
             self.alias_input_value = previous_alias_text;
             self.set_error(err);
             return;
         }
 
-        if let Some(new_dir) = renamed_dir.as_deref() {
-            if old_dir != new_dir {
-                self.update_device_output_dir(&identity_key, &old_dir, new_dir);
-            }
+        if let Some(new_dir) = renamed_dir.as_deref()
+            && old_dir != new_dir
+        {
+            self.update_device_output_dir(&identity_key, &old_dir, new_dir);
         }
 
         self.sort_devices();
@@ -4886,14 +4876,12 @@ impl AdbCollectorApp {
     }
 
     fn update_device_output_dir(&mut self, serial: &str, old_dir: &Path, new_dir: &Path) {
-        if let Some(device) = self.find_device_mut(serial) {
-            if let Some(current_path) = device.output_path.clone() {
-                if current_path.parent() == Some(old_dir) {
-                    if let Some(file_name) = current_path.file_name() {
-                        device.output_path = Some(new_dir.join(file_name));
-                    }
-                }
-            }
+        if let Some(device) = self.find_device_mut(serial)
+            && let Some(current_path) = device.output_path.clone()
+            && current_path.parent() == Some(old_dir)
+            && let Some(file_name) = current_path.file_name()
+        {
+            device.output_path = Some(new_dir.join(file_name));
         }
     }
 

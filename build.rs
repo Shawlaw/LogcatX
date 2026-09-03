@@ -237,10 +237,10 @@ fn days_to_ymd(mut days: i64) -> (u32, u32, u32) {
 fn which(name: &str) -> Option<String> {
     // `where.exe` reports native Windows paths, while `which` (Git Bash on CI
     // runners) answers with MSYS-rooted paths and possibly several matches.
-    if cfg!(windows) {
-        if let Some(found) = locate_with("where", name) {
-            return Some(found);
-        }
+    if cfg!(windows)
+        && let Some(found) = locate_with("where", name)
+    {
+        return Some(found);
     }
     locate_with("which", name)
 }

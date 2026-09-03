@@ -162,7 +162,7 @@ mod tests {
         input: egui::RawInput,
     ) -> FrameOut {
         let mut out = FrameOut::default();
-        ctx.run(input, |ctx| {
+        let _ = ctx.run(input, |ctx| {
             if let Some(guard) = guard.as_mut() {
                 guard.frame(ctx);
             }

@@ -474,7 +474,7 @@ pub fn open_url(url: &str) -> Result<(), String> {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|err| format!("Failed to open URL {url}: {err}"))?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(target_os = "macos")]
@@ -519,7 +519,7 @@ pub fn open_device_shell(adb_path: &str, serial: &str) -> Result<String, String>
             .args(&powershell_args)
             .spawn()
             .map_err(|err| format!("Failed to open PowerShell for {serial}: {err}"))?;
-        return Ok(format!("Opened a device shell for {serial} in PowerShell."));
+        Ok(format!("Opened a device shell for {serial} in PowerShell."))
     }
 
     #[cfg(not(target_os = "windows"))]
