@@ -6,6 +6,14 @@ LogcatX 的应用内更新基于 [DeskFoundry](https://github.com/Shawlaw/DeskFo
 - 更新清单托管在仓库 `master` 分支的 `updates/stable.json`，附带分离式签名 `updates/stable.json.sig`，由发版流水线在打 tag 后自动签名提交。
 - 更新包为发布页的绿色版 zip，下载后先做 SHA-256 / 大小校验，再由 `LogcatX.Updater.exe` 在应用退出后替换白名单文件（`desktop-update.toml`）并重启，新版本启动成功前保留回滚副本。
 
+## 更新网络代理
+
+设置页的“网络代理配置”只影响应用更新的清单检查、签名拉取和更新包下载，不影响 ADB、scrcpy 或其他设备操作：
+
+- **自动（环境变量代理或直连）**：读取 `HTTPS_PROXY`、`HTTP_PROXY` 或 `ALL_PROXY`；没有这些变量时直接连接。它不读取 Windows 设置中的系统代理、PAC 或 WPAD。
+- **自定义 HTTP / SOCKS5 代理**：使用不含账号密码的代理地址，例如 `http://127.0.0.1:7890` 或 `socks5h://127.0.0.1:7890`。地址会随应用配置保存；为避免将凭据写入明文 `config.json` 或诊断日志，地址中不允许包含账号或密码。
+- **检测代理配置**：默认以 GitHub 首页为 HTTPS 目标，显示状态码和耗时，不保留响应内容；可展开填写自定义 HTTPS 检测地址，未保存的当前设置也可直接检测。
+
 ## 一次性配置签名密钥（维护者操作）
 
 1. 生成密钥对（在 DeskFoundry 仓库检出中执行）：

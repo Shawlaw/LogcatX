@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.7.0] - 2026-09-04
+
+### Added
+- The device more menu can capture the current device screen and copy it to the Windows clipboard as an image
+- A scrcpy submenu in the device more menu can mirror a device or create an independent virtual display; the display can follow the primary screen or use a portrait `720×1600` / `320 DPI` configuration, with a package-name field and filter for launch targets
+- Historical log storage management can report usage, preview cleanup by device or time range, and protect actively written logs
+- Application updates support automatic or custom HTTP / SOCKS5 proxies and settings-page proxy-configuration testing
+
+### Changed
+- The device-menu “Open” action is now labelled “Open latest log file” to make its intent explicit
+
+### Fixed
+- Fixed release packages that could be missing the application icon and version information on Windows
+
 ## [0.6.1] - 2026-08-27
 
 ### Fixed

@@ -57,11 +57,22 @@ END
     let rc_path = format!("{out_dir}/resource.rc");
     std::fs::write(&rc_path, &rc_content).expect("failed to write generated rc file");
 
+    println!("cargo:rerun-if-env-changed=RC");
     let rc = std::env::var("RC")
         .ok()
-        .or_else(|| which("llvm-rc"))
-        .or_else(|| which("llvm-rc-20"))
-        .and_then(|found| normalize_which_path(&found));
+        .and_then(|found| normalize_which_path(&found))
+        .map(|path| ResourceCompiler::from_path(path, ResourceCompilerKind::Microsoft))
+        .or_else(|| {
+            which("llvm-rc")
+                .and_then(|found| normalize_which_path(&found))
+                .map(|path| ResourceCompiler::from_path(path, ResourceCompilerKind::Llvm))
+        })
+        .or_else(|| {
+            which("llvm-rc-20")
+                .and_then(|found| normalize_which_path(&found))
+                .map(|path| ResourceCompiler::from_path(path, ResourceCompilerKind::Llvm))
+        })
+        .or_else(find_windows_sdk_rc);
 
     let Some(rc) = rc else {
         println!("cargo:warning=resource compiler not found, skipping Windows icon embedding");
@@ -69,17 +80,28 @@ END
     };
 
     let res_path = format!("{out_dir}/resource.res");
-    let status = match std::process::Command::new(&rc)
-        .arg("-no-preprocess")
-        .arg(&rc_path)
-        .arg("/FO")
-        .arg(&res_path)
-        .status()
-    {
+    let mut command = std::process::Command::new(&rc.path);
+    match rc.kind {
+        ResourceCompilerKind::Llvm => {
+            command
+                .arg("-no-preprocess")
+                .arg(&rc_path)
+                .arg("/FO")
+                .arg(&res_path);
+        }
+        ResourceCompilerKind::Microsoft => {
+            command
+                .arg("/nologo")
+                .arg(format!("/fo{res_path}"))
+                .arg(&rc_path);
+        }
+    }
+    let status = match command.status() {
         Ok(status) => status,
         Err(error) => {
             println!(
-                "cargo:warning=failed to run resource compiler {rc}: {error}; exe will not include icon metadata"
+                "cargo:warning=failed to run resource compiler {}: {error}; exe will not include icon metadata",
+                rc.path
             );
             return;
         }
@@ -90,6 +112,68 @@ END
     } else {
         println!("cargo:warning=resource compilation failed, exe will not include icon metadata");
     }
+}
+
+#[derive(Clone, Copy)]
+enum ResourceCompilerKind {
+    Llvm,
+    Microsoft,
+}
+
+struct ResourceCompiler {
+    path: String,
+    kind: ResourceCompilerKind,
+}
+
+impl ResourceCompiler {
+    fn from_path(path: String, fallback_kind: ResourceCompilerKind) -> Self {
+        let is_llvm = std::path::Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                name.eq_ignore_ascii_case("llvm-rc")
+                    || name.eq_ignore_ascii_case("llvm-rc.exe")
+                    || name.eq_ignore_ascii_case("llvm-rc-20")
+                    || name.eq_ignore_ascii_case("llvm-rc-20.exe")
+            });
+        Self {
+            path,
+            kind: if is_llvm {
+                ResourceCompilerKind::Llvm
+            } else {
+                fallback_kind
+            },
+        }
+    }
+}
+
+fn find_windows_sdk_rc() -> Option<ResourceCompiler> {
+    let kits_root = std::env::var_os("ProgramFiles(x86)")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Program Files (x86)"))
+        .join("Windows Kits")
+        .join("10")
+        .join("bin");
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("aarch64") => "arm64",
+        Ok("x86") => "x86",
+        _ => "x64",
+    };
+
+    let mut versions = std::fs::read_dir(kits_root)
+        .ok()?
+        .flatten()
+        .collect::<Vec<_>>();
+    versions.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
+    versions.into_iter().find_map(|entry| {
+        let path = entry.path().join(arch).join("rc.exe");
+        path.is_file().then(|| {
+            ResourceCompiler::from_path(
+                path.to_string_lossy().into_owned(),
+                ResourceCompilerKind::Microsoft,
+            )
+        })
+    })
 }
 
 /// Git Bash's `which.exe` (first on PATH on GitHub Windows runners) reports
@@ -162,10 +246,7 @@ fn which(name: &str) -> Option<String> {
 }
 
 fn locate_with(tool: &str, name: &str) -> Option<String> {
-    let output = std::process::Command::new(tool)
-        .arg(name)
-        .output()
-        .ok()?;
+    let output = std::process::Command::new(tool).arg(name).output().ok()?;
     if !output.status.success() {
         return None;
     }

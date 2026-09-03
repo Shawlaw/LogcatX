@@ -16,7 +16,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 
 - platform: **Windows**
 - distribution: **portable zip** (ships the app plus an update helper; in-app updates included)
-- current milestone: **v0.6.0**
+- current milestone: **v0.7.0**
 
 ## Screenshots
 
@@ -43,7 +43,10 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - use a redesigned main window layout with a left sidebar, a main content area (overview cards, action buttons, and device list), and a fixed bottom log panel on the Devices page
 - copy a device serial directly from the device-row menu
 - open a device shell directly from the device-row menu
-- edit aliases, pin devices, and open the device log folder from the device-row menu
+- edit aliases, pin devices, and open the device log folder or latest log file from the device-row menu
+- capture the current device screen from the device-row menu and copy it to the Windows clipboard as an image
+- mirror a device with scrcpy or create an independent virtual display from the device-row menu
+- let a virtual display follow the primary display or use a portrait `720×1600` / `320 DPI` configuration, with a package-name field and filter for the launch target
 - inspect the current foreground app and run force-stop, clear-data, or uninstall shortcuts from the device-row menu
 - disconnect network devices directly from the list
 - restart the ADB Server from the UI as a recovery action
@@ -53,9 +56,11 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - configure the `adb` executable path and the device-log output directory
 - refresh device list and historical log size
 - clear historical device logs while protecting active sessions
+- inspect historical log usage and preview cleanup by device or time range
 - write a separate **application runtime log** for diagnostics
 - embedded English and Simplified Chinese UI with system-language default on first launch
 - in-app update checks plus a once-daily automatic check (first window open after 08:00); updates are signature-verified and install with one download-and-restart action
+- network proxy configuration can automatically use `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`, or a custom unauthenticated HTTP / SOCKS5 proxy; settings can test the proxy configuration against the GitHub homepage or a custom HTTPS URL
 - shared infrastructure now comes from the public [DeskFoundry](https://github.com/Shawlaw/DeskFoundry) monorepo
 
 ## Portable behavior
@@ -107,16 +112,16 @@ cargo xwin build --target x86_64-pc-windows-msvc --release
 This produces:
 
 - `dist/LogcatX.exe`
-- `dist/LogcatX-v0.5.2-win64.zip`
+- `dist/LogcatX_<version>_windows_x64_portable_<commit>.zip`
 
 ## GitHub Release CI
 
-This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.5.2`, it will:
+This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.7.0`, it will:
 
 1. verify that the tag matches the version in `Cargo.toml`
 2. build the Windows release artifacts
 3. create a GitHub Release
-4. upload `LogcatX.exe` and the matching zip package
+4. upload the matching portable zip package
 
 ## Troubleshooting
 
