@@ -73,6 +73,13 @@ pub struct ForegroundApp {
     pub activity_name: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Screenshot {
+    pub width: usize,
+    pub height: usize,
+    pub rgba_pixels: Vec<u8>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForegroundAppAction {
     Inspect,
@@ -86,6 +93,10 @@ pub enum AppEvent {
     DevicesRefreshed(Result<Vec<DeviceInfo>, String>),
     DevicesPolled(Result<Vec<DeviceInfo>, String>),
     LogSizeRefreshed(Result<u64, String>),
+    ScreenshotFinished {
+        serial: String,
+        result: Result<Screenshot, String>,
+    },
     DeviceConnectFinished {
         target: String,
         result: Result<String, String>,

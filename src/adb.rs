@@ -1,6 +1,6 @@
 use crate::{
     managed_child::ManagedChild,
-    models::{DeviceInfo, ForegroundApp},
+    models::{DeviceInfo, ForegroundApp, Screenshot},
 };
 use std::{
     fs::File,
@@ -58,6 +58,36 @@ pub fn list_devices(adb_path: &str) -> Result<Vec<DeviceInfo>, String> {
         }
     }
     Ok(devices)
+}
+
+pub fn capture_screenshot(adb_path: &str, serial: &str) -> Result<Screenshot, String> {
+    let output = adb_command(adb_path)
+        .args(["-s", serial, "exec-out", "screencap", "-p"])
+        .output()
+        .map_err(|err| format!("Failed to capture screen from {serial}: {err}"))?;
+
+    if !output.status.success() {
+        let details = combined_output(&output);
+        return Err(format!(
+            "Failed to capture screen from {serial}: {}",
+            details.if_empty("unknown error")
+        ));
+    }
+
+    decode_screenshot_png(&output.stdout)
+        .map_err(|err| format!("Failed to decode screen capture from {serial}: {err}"))
+}
+
+fn decode_screenshot_png(png: &[u8]) -> Result<Screenshot, String> {
+    let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|err| err.to_string())?
+        .into_rgba8();
+
+    Ok(Screenshot {
+        width: image.width() as usize,
+        height: image.height() as usize,
+        rgba_pixels: image.into_raw(),
+    })
 }
 
 pub fn query_foreground_app(adb_path: &str, serial: &str) -> Result<ForegroundApp, String> {
@@ -686,12 +716,31 @@ fn is_valid_package_name(package: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_android_version, is_network_device_serial, package_command_succeeded,
-        parse_component_token, parse_connect_output, parse_devices_output, parse_disconnect_output,
-        parse_foreground_app_from_activity_dump, parse_foreground_app_from_window_dump,
-        parse_logcat_args, should_retry_clear_with_run_as,
+        decode_screenshot_png, format_android_version, is_network_device_serial,
+        package_command_succeeded, parse_component_token, parse_connect_output,
+        parse_devices_output, parse_disconnect_output, parse_foreground_app_from_activity_dump,
+        parse_foreground_app_from_window_dump, parse_logcat_args, should_retry_clear_with_run_as,
     };
-    use std::process::Output;
+    use std::{io::Cursor, process::Output};
+
+    #[test]
+    fn decode_screenshot_png_converts_pixels_to_rgba() {
+        let source =
+            image::RgbaImage::from_raw(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]).expect("source image");
+        let mut png = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(source)
+            .write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode png");
+
+        let screenshot = decode_screenshot_png(&png.into_inner()).expect("decode screenshot");
+        assert_eq!((screenshot.width, screenshot.height), (2, 1));
+        assert_eq!(screenshot.rgba_pixels, vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn decode_screenshot_png_rejects_invalid_data() {
+        assert!(decode_screenshot_png(b"not a png").is_err());
+    }
 
     #[test]
     fn parse_devices_output_parses_multiple_device_states() {

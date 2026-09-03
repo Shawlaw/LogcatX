@@ -6,7 +6,7 @@ use crate::{
     ime::ImeEnterGuard,
     models::{
         AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, ForegroundApp, ForegroundAppAction,
-        SharedChild, StatusMessage,
+        Screenshot, SharedChild, StatusMessage,
     },
     updater,
 };
@@ -114,6 +114,7 @@ pub struct AdbCollectorApp {
     connect_target_input: String,
     connect_in_progress: bool,
     restarting_adb_server: bool,
+    screenshot_in_progress: bool,
     disconnecting_serial: Option<String>,
     alias_input_serial: Option<String>,
     alias_input_value: String,
@@ -204,6 +205,7 @@ impl AdbCollectorApp {
             connect_target_input: String::new(),
             connect_in_progress: false,
             restarting_adb_server: false,
+            screenshot_in_progress: false,
             disconnecting_serial: None,
             alias_input_serial: None,
             alias_input_value: String::new(),
@@ -293,6 +295,22 @@ impl AdbCollectorApp {
                     }
                     Err(err) => self.set_error(err),
                 },
+                AppEvent::ScreenshotFinished { serial, result } => {
+                    self.screenshot_in_progress = false;
+                    match result {
+                        Ok(screenshot) => {
+                            if let Err(err) = self.copy_screenshot_to_clipboard(screenshot) {
+                                self.set_error(err);
+                            } else {
+                                self.set_info(self.tr_args(
+                                    "status.screenshot_copied",
+                                    &[("serial", self.device_identity_label(&serial))],
+                                ));
+                            }
+                        }
+                        Err(err) => self.set_error(err),
+                    }
+                }
                 AppEvent::DeviceConnectFinished { target, result } => {
                     self.connect_in_progress = false;
                     match result {
@@ -991,6 +1009,7 @@ impl AdbCollectorApp {
             let mut open_output: Option<PathBuf> = None;
             let mut copy_serial: Option<String> = None;
             let mut copy_log_path_serial: Option<String> = None;
+            let mut screenshot_serial: Option<String> = None;
             let mut open_shell_serial: Option<String> = None;
             let mut disconnect_serial: Option<String> = None;
             let mut toggle_pin_serial: Option<String> = None;
@@ -1011,6 +1030,7 @@ impl AdbCollectorApp {
             let open_text = self.tr("device.action.open");
             let copy_text = self.tr("device.action.copy_serial");
             let copy_log_path_text = self.tr("device.action.copy_latest_log_path");
+            let screenshot_text = self.tr("device.action.screenshot");
             let shell_text = self.tr("device.action.open_shell");
             let disconnect_text = self.tr("device.action.disconnect");
             let more_text = self.tr("device.action.more");
@@ -1246,6 +1266,17 @@ impl AdbCollectorApp {
                                                 }
                                                 if ui
                                                     .add_enabled(
+                                                        state == "device"
+                                                            && !self.screenshot_in_progress,
+                                                        rounded_secondary(screenshot_text.clone()),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    screenshot_serial = Some(device_id.clone());
+                                                    ui.close_menu();
+                                                }
+                                                if ui
+                                                    .add_enabled(
                                                         state == "device",
                                                         rounded_secondary(shell_text.clone()),
                                                     )
@@ -1434,6 +1465,9 @@ impl AdbCollectorApp {
             }
             if let Some(serial) = copy_log_path_serial {
                 self.copy_log_path_to_clipboard(&ctx, &serial);
+            }
+            if let Some(serial) = screenshot_serial {
+                self.start_screenshot(serial);
             }
             if let Some(serial) = open_shell_serial {
                 self.open_device_shell(serial);
@@ -2796,6 +2830,63 @@ impl AdbCollectorApp {
                 self.tr_args("status.log_path_not_available", &[("serial", device_name)]),
             );
         }
+    }
+
+    fn start_screenshot(&mut self, device_id: String) {
+        if self.require_initial_setup {
+            self.set_error(self.tr("status.finish_initial_setup"));
+            self.show_settings = true;
+            return;
+        }
+        if self.screenshot_in_progress {
+            return;
+        }
+
+        let Some(device) = self.find_device(&device_id).cloned() else {
+            return;
+        };
+        if device.info.state != "device" {
+            self.set_error(self.tr_args(
+                "status.device_invalid_state",
+                &[
+                    ("serial", self.device_identity_label(&device_id)),
+                    ("state", self.device_state_text(&device.info.state)),
+                ],
+            ));
+            return;
+        }
+        let Some(transport_serial) = self.device_primary_transport_serial(&device_id) else {
+            return;
+        };
+
+        self.screenshot_in_progress = true;
+        self.set_info(self.tr_args(
+            "status.screenshot_capturing",
+            &[("serial", self.device_identity_label(&device_id))],
+        ));
+        let tx = self.tx.clone();
+        let adb_path = self.config.adb_path.clone();
+        thread::spawn(move || {
+            let result = adb::capture_screenshot(&adb_path, &transport_serial);
+            let _ = tx.send(AppEvent::ScreenshotFinished {
+                serial: device_id,
+                result,
+            });
+        });
+    }
+
+    fn copy_screenshot_to_clipboard(&self, screenshot: Screenshot) -> Result<(), String> {
+        use std::borrow::Cow;
+
+        let mut clipboard = arboard::Clipboard::new()
+            .map_err(|err| format!("Failed to access the system clipboard: {err}"))?;
+        clipboard
+            .set_image(arboard::ImageData {
+                width: screenshot.width,
+                height: screenshot.height,
+                bytes: Cow::Owned(screenshot.rgba_pixels),
+            })
+            .map_err(|err| format!("Failed to copy the screenshot to the system clipboard: {err}"))
     }
 
     fn open_device_shell(&mut self, device_id: String) {
