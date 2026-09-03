@@ -1,4 +1,4 @@
-use crate::managed_child::ManagedChild;
+use crate::{fs_utils, managed_child::ManagedChild};
 use desktop_updater::{DownloadedUpdate, UpdateCandidate};
 use std::{
     path::PathBuf,
@@ -92,7 +92,12 @@ pub enum ForegroundAppAction {
 pub enum AppEvent {
     DevicesRefreshed(Result<Vec<DeviceInfo>, String>),
     DevicesPolled(Result<Vec<DeviceInfo>, String>),
-    LogSizeRefreshed(Result<u64, String>),
+    LogStorageRefreshed(Result<fs_utils::LogStorageReport, String>),
+    CleanupPreviewed {
+        request_id: u64,
+        filter: fs_utils::CleanupFilter,
+        result: Result<fs_utils::CleanupPreview, String>,
+    },
     ScreenshotFinished {
         serial: String,
         result: Result<Screenshot, String>,
@@ -131,7 +136,7 @@ pub enum AppEvent {
         exit_code: Option<i32>,
         error: Option<String>,
     },
-    CleanupFinished(Result<(), String>),
+    CleanupFinished(Result<fs_utils::CleanupOutcome, String>),
     UpdateCheckFinished {
         automatic: bool,
         result: Result<Option<UpdateCandidate>, String>,

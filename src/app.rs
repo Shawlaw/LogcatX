@@ -10,11 +10,12 @@ use crate::{
     },
     scrcpy, updater,
 };
+use chrono::{Local, TimeZone};
 use desktop_updater::{CheckResult, DownloadedUpdate, UpdateCandidate};
 use eframe::egui::{self, Align, Color32, RichText};
 use rfd::FileDialog;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -79,6 +80,15 @@ enum NavigationPage {
     Settings,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CleanupTimeFilter {
+    AllHistory,
+    OlderThan7Days,
+    OlderThan30Days,
+    OlderThan90Days,
+    BeforeDate,
+}
+
 pub struct AppBootstrap {
     pub app_paths: AppPaths,
     pub config: AppConfig,
@@ -91,7 +101,8 @@ pub struct AdbCollectorApp {
     app_paths: AppPaths,
     config: AppConfig,
     devices: Vec<DeviceEntry>,
-    total_log_bytes: u64,
+    log_storage: fs_utils::LogStorageReport,
+    log_storage_loading: bool,
     status: Option<StatusMessage>,
     last_error: Option<StatusMessage>,
     status_log: Vec<StatusMessage>,
@@ -108,6 +119,15 @@ pub struct AdbCollectorApp {
     require_initial_setup: bool,
     active_page: NavigationPage,
     show_clear_confirm: bool,
+    cleanup_all_devices: bool,
+    cleanup_selected_directories: HashSet<String>,
+    cleanup_time_filter: CleanupTimeFilter,
+    cleanup_before_date_input: String,
+    cleanup_preview: Option<fs_utils::CleanupPreview>,
+    cleanup_preview_filter: Option<fs_utils::CleanupFilter>,
+    cleanup_preview_generation: u64,
+    cleanup_preview_loading: bool,
+    cleanup_in_progress: bool,
     show_alias_dialog: bool,
     show_logcat_args_dialog: bool,
     show_new_display_dialog: bool,
@@ -192,7 +212,8 @@ impl AdbCollectorApp {
             app_paths: bootstrap.app_paths,
             config,
             devices: Vec::new(),
-            total_log_bytes: 0,
+            log_storage: fs_utils::LogStorageReport::default(),
+            log_storage_loading: false,
             status: None,
             last_error: None,
             status_log: Vec::new(),
@@ -206,6 +227,15 @@ impl AdbCollectorApp {
             require_initial_setup,
             active_page: NavigationPage::Devices,
             show_clear_confirm: false,
+            cleanup_all_devices: true,
+            cleanup_selected_directories: HashSet::new(),
+            cleanup_time_filter: CleanupTimeFilter::AllHistory,
+            cleanup_before_date_input: Local::now().format("%Y-%m-%d").to_string(),
+            cleanup_preview: None,
+            cleanup_preview_filter: None,
+            cleanup_preview_generation: 0,
+            cleanup_preview_loading: false,
+            cleanup_in_progress: false,
             show_alias_dialog: false,
             show_logcat_args_dialog: false,
             show_new_display_dialog: false,
@@ -304,12 +334,33 @@ impl AdbCollectorApp {
                         }
                     }
                 }
-                AppEvent::LogSizeRefreshed(result) => match result {
-                    Ok(size) => {
-                        self.total_log_bytes = size;
+                AppEvent::LogStorageRefreshed(result) => {
+                    self.log_storage_loading = false;
+                    match result {
+                        Ok(report) => {
+                            self.log_storage = report;
+                        }
+                        Err(err) => self.set_error(err),
                     }
-                    Err(err) => self.set_error(err),
-                },
+                }
+                AppEvent::CleanupPreviewed {
+                    request_id,
+                    filter,
+                    result,
+                } => {
+                    if !is_current_cleanup_preview_response(
+                        self.cleanup_preview_generation,
+                        request_id,
+                    ) {
+                        continue;
+                    }
+                    self.cleanup_preview_loading = false;
+                    self.cleanup_preview_filter = Some(filter);
+                    match result {
+                        Ok(preview) => self.cleanup_preview = Some(preview),
+                        Err(err) => self.set_error(err),
+                    }
+                }
                 AppEvent::ScreenshotFinished { serial, result } => {
                     self.screenshot_in_progress = false;
                     match result {
@@ -524,13 +575,29 @@ impl AdbCollectorApp {
                     self.refresh_devices();
                     self.refresh_log_size();
                 }
-                AppEvent::CleanupFinished(result) => match result {
-                    Ok(()) => {
-                        self.set_info(self.tr("status.history_cleared"));
-                        self.refresh_log_size();
+                AppEvent::CleanupFinished(result) => {
+                    self.cleanup_in_progress = false;
+                    match result {
+                        Ok(outcome) => {
+                            self.show_clear_confirm = false;
+                            self.set_info(self.tr_args(
+                                "status.cleanup_finished",
+                                &[
+                                    ("files", outcome.deleted_files.to_string()),
+                                    ("size", fs_utils::format_bytes(outcome.freed_bytes)),
+                                ],
+                            ));
+                            if !outcome.failed_paths.is_empty() {
+                                self.set_error(self.tr_args(
+                                    "status.cleanup_partial",
+                                    &[("count", outcome.failed_paths.len().to_string())],
+                                ));
+                            }
+                            self.refresh_log_size();
+                        }
+                        Err(err) => self.set_error(err),
                     }
-                    Err(err) => self.set_error(err),
-                },
+                }
                 AppEvent::UpdateCheckFinished { automatic, result } => {
                     self.handle_update_check_finished(automatic, result);
                 }
@@ -797,7 +864,7 @@ impl AdbCollectorApp {
                     ),
                     (
                         self.tr("overview.storage"),
-                        fs_utils::format_bytes(self.total_log_bytes),
+                        fs_utils::format_bytes(self.log_storage.total_bytes),
                         Color32::from_rgb(255, 244, 232),
                         Color32::from_rgb(255, 161, 62),
                     ),
@@ -1562,7 +1629,7 @@ impl AdbCollectorApp {
     fn ui_logs_page(&mut self, ui: &mut egui::Ui) {
         content_card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.heading(self.tr("status.panel_title"));
+            ui.heading(self.tr("logs.title"));
             ui.label(self.tr("logs.hint"));
             ui.add_space(10.0);
             self.ui_status_content(ui, None);
@@ -1570,7 +1637,7 @@ impl AdbCollectorApp {
     }
 
     fn ui_log_files_page(&mut self, ui: &mut egui::Ui) {
-        let log_entries = self.collect_log_entries();
+        let app_log_size = fs_utils::file_size(self.app_paths.app_log_path.as_path()).unwrap_or(0);
         content_card_frame().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.heading(self.tr("log_files.title"));
@@ -1593,7 +1660,7 @@ impl AdbCollectorApp {
                     self.refresh_log_size();
                 }
                 if ui.button(self.tr("toolbar.clear_history")).clicked() {
-                    self.show_clear_confirm = true;
+                    self.open_cleanup_dialog();
                 }
             });
             ui.add_space(12.0);
@@ -1612,18 +1679,56 @@ impl AdbCollectorApp {
                     ui.end_row();
 
                     detail_label(ui, &self.tr("overview.storage"));
-                    ui.label(fs_utils::format_bytes(self.total_log_bytes));
+                    ui.label(fs_utils::format_bytes(self.log_storage.total_bytes));
+                    ui.end_row();
+
+                    detail_label(ui, &self.tr("log_files.device_logs"));
+                    ui.label(self.tr_args(
+                        "log_files.files_and_size",
+                        &[
+                            ("files", self.log_storage.log_file_count.to_string()),
+                            ("size", fs_utils::format_bytes(self.log_storage.log_bytes)),
+                        ],
+                    ));
+                    ui.end_row();
+
+                    detail_label(ui, &self.tr("log_files.other_files"));
+                    ui.label(fs_utils::format_bytes(self.log_storage.other_file_bytes));
+                    ui.end_row();
+
+                    detail_label(ui, &self.tr("log_files.app_log_size"));
+                    ui.label(fs_utils::format_bytes(app_log_size));
                     ui.end_row();
                 });
             ui.add_space(14.0);
-            ui.label(RichText::new(self.tr("log_files.recent_entries")).strong());
+            ui.label(RichText::new(self.tr("log_files.device_usage")).strong());
             ui.add_space(6.0);
-            if log_entries.is_empty() {
+            if self.log_storage_loading {
+                ui.small(self.tr("log_files.scanning"));
+            } else if self.log_storage.device_directories.is_empty() {
                 ui.small(self.tr("log_files.empty"));
             } else {
-                for entry in log_entries {
-                    ui.label(entry);
-                }
+                egui::Grid::new("log-files-device-usage")
+                    .num_columns(5)
+                    .spacing([16.0, 8.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        detail_label(ui, &self.tr("log_files.column.device"));
+                        detail_label(ui, &self.tr("log_files.column.files"));
+                        detail_label(ui, &self.tr("log_files.column.size"));
+                        detail_label(ui, &self.tr("log_files.column.oldest"));
+                        detail_label(ui, &self.tr("log_files.column.latest"));
+                        ui.end_row();
+
+                        for usage in &self.log_storage.device_directories {
+                            ui.label(self.log_directory_label(&usage.directory_name));
+                            ui.label(usage.log_file_count.to_string());
+                            ui.label(fs_utils::format_bytes(usage.total_bytes));
+                            ui.label(self.format_log_time(usage.oldest_log_modified));
+                            ui.label(self.format_log_time(usage.newest_log_modified));
+                            ui.end_row();
+                        }
+                    });
             }
         });
     }
@@ -2091,25 +2196,197 @@ impl AdbCollectorApp {
             return;
         }
 
+        let directories = self.log_storage.device_directories.clone();
+        let all_devices_label = self.tr("clear.all_devices");
+        let all_history_label = self.tr("clear.time.all");
+        let seven_days_label = self.tr("clear.time.7_days");
+        let thirty_days_label = self.tr("clear.time.30_days");
+        let ninety_days_label = self.tr("clear.time.90_days");
+        let before_date_label = self.tr("clear.time.before_date");
+        let mut refresh_preview = false;
+        let mut cancel = false;
+        let mut delete = false;
         egui::Window::new(self.tr("clear.title"))
             .collapsible(false)
             .resizable(false)
-            .fixed_size([420.0, 150.0])
+            .default_size([560.0, 420.0])
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.set_max_width(420.0);
+                ui.set_max_width(560.0);
                 ui.label(self.tr("clear.body"));
+                ui.add_space(10.0);
+                ui.label(RichText::new(self.tr("clear.device_scope")).strong());
+                if ui
+                    .add_enabled(
+                        !self.cleanup_in_progress,
+                        egui::Checkbox::new(&mut self.cleanup_all_devices, all_devices_label),
+                    )
+                    .changed()
+                {
+                    refresh_preview = true;
+                }
+                if !self.cleanup_all_devices {
+                    if directories.is_empty() {
+                        ui.small(self.tr("clear.no_devices"));
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .max_height(110.0)
+                            .show(ui, |ui| {
+                                for usage in &directories {
+                                    let label = self.log_directory_label(&usage.directory_name);
+                                    let mut selected = self
+                                        .cleanup_selected_directories
+                                        .contains(&usage.directory_name);
+                                    if ui
+                                        .add_enabled(
+                                            !self.cleanup_in_progress,
+                                            egui::Checkbox::new(&mut selected, label),
+                                        )
+                                        .changed()
+                                    {
+                                        if selected {
+                                            self.cleanup_selected_directories
+                                                .insert(usage.directory_name.clone());
+                                        } else {
+                                            self.cleanup_selected_directories
+                                                .remove(&usage.directory_name);
+                                        }
+                                        refresh_preview = true;
+                                    }
+                                }
+                            });
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label(RichText::new(self.tr("clear.time_scope")).strong());
+                let previous_filter = self.cleanup_time_filter;
+                ui.add_enabled_ui(!self.cleanup_in_progress, |ui| {
+                    egui::ComboBox::from_id_salt("cleanup-time-filter")
+                        .selected_text(self.cleanup_time_filter_label())
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.cleanup_time_filter,
+                                CleanupTimeFilter::AllHistory,
+                                all_history_label,
+                            );
+                            ui.selectable_value(
+                                &mut self.cleanup_time_filter,
+                                CleanupTimeFilter::OlderThan7Days,
+                                seven_days_label,
+                            );
+                            ui.selectable_value(
+                                &mut self.cleanup_time_filter,
+                                CleanupTimeFilter::OlderThan30Days,
+                                thirty_days_label,
+                            );
+                            ui.selectable_value(
+                                &mut self.cleanup_time_filter,
+                                CleanupTimeFilter::OlderThan90Days,
+                                ninety_days_label,
+                            );
+                            ui.selectable_value(
+                                &mut self.cleanup_time_filter,
+                                CleanupTimeFilter::BeforeDate,
+                                before_date_label,
+                            );
+                        });
+                    if self.cleanup_time_filter == CleanupTimeFilter::BeforeDate
+                        && ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.cleanup_before_date_input)
+                                    .hint_text("YYYY-MM-DD"),
+                            )
+                            .changed()
+                    {
+                        refresh_preview = true;
+                    }
+                });
+                if previous_filter != self.cleanup_time_filter {
+                    refresh_preview = true;
+                }
+                if self.cleanup_time_filter == CleanupTimeFilter::BeforeDate
+                    && self.cleanup_cutoff().is_none()
+                {
+                    ui.colored_label(
+                        Color32::from_rgb(220, 71, 71),
+                        self.tr("clear.invalid_date"),
+                    );
+                }
+
+                // Start the replacement request before drawing the preview
+                // and action buttons, so stale preview data cannot remain
+                // deletable for the frame in which the filter changes.
+                if refresh_preview {
+                    self.request_cleanup_preview();
+                    refresh_preview = false;
+                }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.add_space(8.0);
+                ui.label(RichText::new(self.tr("clear.preview_title")).strong());
+                if self.cleanup_preview_loading {
+                    ui.small(self.tr("clear.preview_loading"));
+                } else if let Some(preview) = &self.cleanup_preview {
+                    ui.label(self.tr_args(
+                        "clear.preview_delete",
+                        &[
+                            ("files", preview.matching_files.to_string()),
+                            ("size", fs_utils::format_bytes(preview.matching_bytes)),
+                        ],
+                    ));
+                    ui.small(self.tr_args(
+                        "clear.preview_keep",
+                        &[
+                            ("files", preview.protected_files.to_string()),
+                            ("size", fs_utils::format_bytes(preview.protected_bytes)),
+                        ],
+                    ));
+                } else {
+                    ui.small(self.tr("clear.preview_unavailable"));
+                }
+                ui.small(self.tr("clear.app_log_preserved"));
                 ui.add_space(12.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if ui.button(self.tr("clear.delete")).clicked() {
-                        self.show_clear_confirm = false;
-                        self.clear_history_logs();
+                    let can_delete = !self.cleanup_in_progress
+                        && !self.cleanup_preview_loading
+                        && self.cleanup_preview_filter.is_some()
+                        && self
+                            .cleanup_preview
+                            .as_ref()
+                            .is_some_and(|preview| preview.matching_files > 0);
+                    let delete_label = self.cleanup_preview.as_ref().map_or_else(
+                        || self.tr("clear.delete"),
+                        |preview| {
+                            self.tr_args(
+                                "clear.delete_count",
+                                &[("files", preview.matching_files.to_string())],
+                            )
+                        },
+                    );
+                    if ui
+                        .add_enabled(can_delete, egui::Button::new(delete_label))
+                        .clicked()
+                    {
+                        delete = true;
                     }
-                    if ui.button(self.tr("clear.cancel")).clicked() {
-                        self.show_clear_confirm = false;
+                    if ui
+                        .add_enabled(
+                            !self.cleanup_in_progress,
+                            egui::Button::new(self.tr("clear.cancel")),
+                        )
+                        .clicked()
+                    {
+                        cancel = true;
                     }
                 });
             });
+
+        if cancel {
+            self.show_clear_confirm = false;
+        } else if delete && let Some(filter) = self.cleanup_preview_filter.clone() {
+            self.clear_history_logs(filter);
+        }
     }
 
     fn ui_alias_dialog(&mut self, ctx: &egui::Context) {
@@ -2639,13 +2916,14 @@ impl AdbCollectorApp {
         }
     }
 
-    fn refresh_log_size(&self) {
+    fn refresh_log_size(&mut self) {
+        self.log_storage_loading = true;
         let tx = self.tx.clone();
         let log_dir = self.config.log_dir.clone();
 
         thread::spawn(move || {
-            let result = fs_utils::dir_size(PathBuf::from(log_dir).as_path());
-            let _ = tx.send(AppEvent::LogSizeRefreshed(result));
+            let result = fs_utils::scan_log_storage(PathBuf::from(log_dir).as_path());
+            let _ = tx.send(AppEvent::LogStorageRefreshed(result));
         });
     }
 
@@ -2904,21 +3182,111 @@ impl AdbCollectorApp {
         }
     }
 
-    fn clear_history_logs(&mut self) {
-        let tx = self.tx.clone();
-        let log_dir = PathBuf::from(self.config.log_dir.as_str());
-        let protected_paths: Vec<PathBuf> = self
+    fn open_cleanup_dialog(&mut self) {
+        self.cleanup_all_devices = true;
+        self.cleanup_selected_directories.clear();
+        self.cleanup_time_filter = CleanupTimeFilter::AllHistory;
+        self.cleanup_before_date_input = Local::now().format("%Y-%m-%d").to_string();
+        self.cleanup_preview = None;
+        self.cleanup_preview_filter = None;
+        self.cleanup_preview_loading = false;
+        self.show_clear_confirm = true;
+        self.request_cleanup_preview();
+    }
+
+    fn cleanup_filter(&self) -> Option<fs_utils::CleanupFilter> {
+        let device_directories = (!self.cleanup_all_devices).then(|| {
+            let mut selected = self
+                .cleanup_selected_directories
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>();
+            selected.sort();
+            selected
+        });
+        let older_than = match self.cleanup_time_filter {
+            CleanupTimeFilter::AllHistory => None,
+            CleanupTimeFilter::OlderThan7Days => {
+                Some((Local::now() - chrono::Duration::days(7)).into())
+            }
+            CleanupTimeFilter::OlderThan30Days => {
+                Some((Local::now() - chrono::Duration::days(30)).into())
+            }
+            CleanupTimeFilter::OlderThan90Days => {
+                Some((Local::now() - chrono::Duration::days(90)).into())
+            }
+            CleanupTimeFilter::BeforeDate => Some(self.cleanup_cutoff()?),
+        };
+        Some(fs_utils::CleanupFilter {
+            device_directories,
+            older_than,
+        })
+    }
+
+    fn cleanup_cutoff(&self) -> Option<std::time::SystemTime> {
+        let date =
+            chrono::NaiveDate::parse_from_str(self.cleanup_before_date_input.trim(), "%Y-%m-%d")
+                .ok()?;
+        let date_time = date.and_hms_opt(0, 0, 0)?;
+        Local
+            .from_local_datetime(&date_time)
+            .single()
+            .map(Into::into)
+    }
+
+    fn protected_log_paths(&self) -> Vec<PathBuf> {
+        let mut protected_paths: Vec<PathBuf> = self
             .devices
             .iter()
             .filter(|device| device.is_active())
             .filter_map(|device| device.output_path.clone())
             .collect();
-        let mut protected_paths = protected_paths;
         protected_paths.push(self.app_paths.app_log_path.clone());
+        protected_paths
+    }
 
+    fn request_cleanup_preview(&mut self) {
+        if self.cleanup_in_progress {
+            return;
+        }
+        self.cleanup_preview_generation = self.cleanup_preview_generation.wrapping_add(1);
+        let request_id = self.cleanup_preview_generation;
+        let Some(filter) = self.cleanup_filter() else {
+            self.cleanup_preview = None;
+            self.cleanup_preview_filter = None;
+            self.cleanup_preview_loading = false;
+            return;
+        };
+
+        self.cleanup_preview = None;
+        self.cleanup_preview_filter = Some(filter.clone());
+        self.cleanup_preview_loading = true;
+        let tx = self.tx.clone();
+        let log_dir = PathBuf::from(self.config.log_dir.as_str());
+        let protected_paths = self.protected_log_paths();
+        let event_filter = filter.clone();
+        thread::spawn(move || {
+            let result = fs_utils::preview_log_cleanup(&log_dir, &filter, &protected_paths);
+            let _ = tx.send(AppEvent::CleanupPreviewed {
+                request_id,
+                filter: event_filter,
+                result,
+            });
+        });
+    }
+
+    fn clear_history_logs(&mut self, filter: fs_utils::CleanupFilter) {
+        if self.cleanup_in_progress {
+            return;
+        }
+        let tx = self.tx.clone();
+        let log_dir = PathBuf::from(self.config.log_dir.as_str());
+        let protected_paths = self.protected_log_paths();
+
+        self.cleanup_in_progress = true;
         self.set_info(self.tr("status.clearing_history"));
         thread::spawn(move || {
-            let result = fs_utils::clear_history_logs(&log_dir, &protected_paths);
+            let result = fs_utils::cleanup_matching_logs(&log_dir, &filter, &protected_paths);
             let _ = tx.send(AppEvent::CleanupFinished(result));
         });
     }
@@ -3667,23 +4035,46 @@ impl AdbCollectorApp {
         }
     }
 
-    fn collect_log_entries(&self) -> Vec<String> {
-        let mut entries = std::fs::read_dir(&self.config.log_dir)
-            .ok()
-            .into_iter()
-            .flat_map(|iter| iter.flatten())
-            .filter_map(|entry| {
-                let file_type = entry.file_type().ok()?;
-                let mut name = entry.file_name().to_string_lossy().into_owned();
-                if file_type.is_dir() {
-                    name.push('/');
-                }
-                Some(name)
-            })
-            .collect::<Vec<_>>();
-        entries.sort();
-        entries.truncate(8);
-        entries
+    fn cleanup_time_filter_label(&self) -> String {
+        match self.cleanup_time_filter {
+            CleanupTimeFilter::AllHistory => self.tr("clear.time.all"),
+            CleanupTimeFilter::OlderThan7Days => self.tr("clear.time.7_days"),
+            CleanupTimeFilter::OlderThan30Days => self.tr("clear.time.30_days"),
+            CleanupTimeFilter::OlderThan90Days => self.tr("clear.time.90_days"),
+            CleanupTimeFilter::BeforeDate => self.tr("clear.time.before_date"),
+        }
+    }
+
+    fn log_directory_label(&self, directory_name: &str) -> String {
+        if directory_name.is_empty() {
+            return self.tr("log_files.root_files");
+        }
+
+        for (identity_key, alias) in &self.config.device_aliases {
+            if fs_utils::sanitize_serial(alias) == directory_name {
+                return format!("{alias} ({identity_key})");
+            }
+        }
+        for device in &self.devices {
+            if fs_utils::sanitize_serial(&device.info.identity_key) == directory_name {
+                return self.device_identity_label(&device.info.identity_key);
+            }
+        }
+        for identity_key in self.config.device_aliases.keys() {
+            if fs_utils::sanitize_serial(identity_key) == directory_name {
+                return identity_key.clone();
+            }
+        }
+        directory_name.to_owned()
+    }
+
+    fn format_log_time(&self, time: Option<std::time::SystemTime>) -> String {
+        time.map(|time| {
+            chrono::DateTime::<Local>::from(time)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| self.tr("misc.never"))
     }
 
     fn persist_config(&mut self) -> Result<(), String> {
@@ -4214,6 +4605,9 @@ fn content_view_width(available_width: f32, right_gutter: f32) -> f32 {
     (available_width - right_gutter).max(0.0)
 }
 
+fn is_current_cleanup_preview_response(current_generation: u64, request_id: u64) -> bool {
+    current_generation == request_id
+}
 fn detail_label(ui: &mut egui::Ui, label: &str) {
     ui.label(RichText::new(label).color(Color32::from_rgb(122, 128, 142)));
 }
@@ -4508,7 +4902,8 @@ fn format_system_time(time: std::time::SystemTime) -> String {
 mod tests {
     use super::{
         build_device_push_destination, classify_dropped_paths, content_view_width,
-        device_transport_rank, format_device_model_name, pick_primary_device_info,
+        device_transport_rank, format_device_model_name, is_current_cleanup_preview_response,
+        pick_primary_device_info,
     };
     use crate::models::DeviceInfo;
     use std::path::{Path, PathBuf};
@@ -4598,5 +4993,11 @@ mod tests {
     fn content_view_width_reserves_right_gutter_without_going_negative() {
         assert_eq!(content_view_width(320.0, 28.0), 292.0);
         assert_eq!(content_view_width(20.0, 28.0), 0.0);
+    }
+    #[test]
+    fn cleanup_preview_only_accepts_the_current_request_generation() {
+        assert!(is_current_cleanup_preview_response(7, 7));
+        assert!(!is_current_cleanup_preview_response(8, 7));
+        assert!(!is_current_cleanup_preview_response(7, 8));
     }
 }
