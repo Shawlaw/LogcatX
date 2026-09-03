@@ -43,6 +43,7 @@ pub struct NewDisplayOptions {
     width: Option<u32>,
     height: Option<u32>,
     dpi: Option<u32>,
+    start_app: Option<String>,
 }
 
 impl NewDisplayOptions {
@@ -55,7 +56,24 @@ impl NewDisplayOptions {
             return Err("Both virtual display width and height are required.".to_owned());
         }
 
-        Ok(Self { width, height, dpi })
+        Ok(Self {
+            width,
+            height,
+            dpi,
+            start_app: None,
+        })
+    }
+
+    pub fn with_start_app(mut self, start_app: &str) -> Result<Self, String> {
+        let start_app = start_app.trim();
+        if start_app.is_empty() {
+            return Ok(self);
+        }
+        if start_app.chars().any(char::is_whitespace) {
+            return Err("Start app must be a single Android package name.".to_owned());
+        }
+        self.start_app = Some(start_app.to_owned());
+        Ok(self)
     }
 
     fn argument(&self) -> String {
@@ -121,6 +139,9 @@ fn build_command(scrcpy_path: &str, adb_path: &str, serial: &str, mode: LaunchMo
     command.args(["--serial", serial]).env("ADB", adb_path);
     if let LaunchMode::NewDisplay(options) = mode {
         command.arg(options.argument());
+        if let Some(start_app) = options.start_app {
+            command.args(["--start-app", start_app.as_str()]);
+        }
     }
     command
 }
@@ -282,7 +303,10 @@ mod tests {
             "C:/Android/platform-tools/adb.exe",
             "192.168.0.8:5555",
             LaunchMode::NewDisplay(
-                NewDisplayOptions::custom("1280", "960", "160").expect("display options"),
+                NewDisplayOptions::custom("1280", "960", "160")
+                    .expect("display options")
+                    .with_start_app("com.android.settings")
+                    .expect("start app"),
             ),
         );
         let args: Vec<_> = command.get_args().collect();
@@ -292,6 +316,8 @@ mod tests {
                 OsStr::new("--serial"),
                 OsStr::new("192.168.0.8:5555"),
                 OsStr::new("--new-display=1280x960/160"),
+                OsStr::new("--start-app"),
+                OsStr::new("com.android.settings"),
             ]
         );
         assert_eq!(
@@ -300,6 +326,20 @@ mod tests {
                 .find(|(name, _)| *name == OsStr::new("ADB"))
                 .and_then(|(_, value)| value),
             Some(OsStr::new("C:/Android/platform-tools/adb.exe"))
+        );
+    }
+
+    #[test]
+    fn new_display_allows_an_optional_start_app_but_rejects_whitespace() {
+        assert!(
+            NewDisplayOptions::default()
+                .with_start_app("com.example.app")
+                .is_ok()
+        );
+        assert!(
+            NewDisplayOptions::default()
+                .with_start_app("com.example app")
+                .is_err()
         );
     }
 }

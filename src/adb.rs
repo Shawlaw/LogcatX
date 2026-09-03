@@ -78,6 +78,31 @@ pub fn capture_screenshot(adb_path: &str, serial: &str) -> Result<Screenshot, St
         .map_err(|err| format!("Failed to decode screen capture from {serial}: {err}"))
 }
 
+pub fn list_installed_packages(adb_path: &str, serial: &str) -> Result<Vec<String>, String> {
+    let primary = adb_shell_command(adb_path, serial, &["cmd", "package", "list", "packages"])
+        .map_err(|err| format!("Failed to list packages on {serial}: {err}"))?;
+    if primary.status.success() {
+        return Ok(parse_installed_packages(&String::from_utf8_lossy(
+            &primary.stdout,
+        )));
+    }
+
+    let fallback = adb_shell_command(adb_path, serial, &["pm", "list", "packages"])
+        .map_err(|err| format!("Failed to list packages on {serial}: {err}"))?;
+    if fallback.status.success() {
+        return Ok(parse_installed_packages(&String::from_utf8_lossy(
+            &fallback.stdout,
+        )));
+    }
+
+    let fallback_details = combined_output(&fallback);
+    let primary_details = combined_output(&primary);
+    Err(format!(
+        "Failed to list packages on {serial}: {}",
+        fallback_details.if_empty(primary_details.if_empty("unknown error"))
+    ))
+}
+
 fn decode_screenshot_png(png: &[u8]) -> Result<Screenshot, String> {
     let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
         .map_err(|err| err.to_string())?
@@ -88,6 +113,19 @@ fn decode_screenshot_png(png: &[u8]) -> Result<Screenshot, String> {
         height: image.height() as usize,
         rgba_pixels: image.into_raw(),
     })
+}
+
+fn parse_installed_packages(output: &str) -> Vec<String> {
+    let mut packages: Vec<String> = output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("package:"))
+        .map(str::trim)
+        .filter(|package| !package.is_empty())
+        .map(str::to_owned)
+        .collect();
+    packages.sort_unstable();
+    packages.dedup();
+    packages
 }
 
 pub fn query_foreground_app(adb_path: &str, serial: &str) -> Result<ForegroundApp, String> {
@@ -719,7 +757,8 @@ mod tests {
         decode_screenshot_png, format_android_version, is_network_device_serial,
         package_command_succeeded, parse_component_token, parse_connect_output,
         parse_devices_output, parse_disconnect_output, parse_foreground_app_from_activity_dump,
-        parse_foreground_app_from_window_dump, parse_logcat_args, should_retry_clear_with_run_as,
+        parse_foreground_app_from_window_dump, parse_installed_packages, parse_logcat_args,
+        should_retry_clear_with_run_as,
     };
     use std::{io::Cursor, process::Output};
 
@@ -740,6 +779,14 @@ mod tests {
     #[test]
     fn decode_screenshot_png_rejects_invalid_data() {
         assert!(decode_screenshot_png(b"not a png").is_err());
+    }
+
+    #[test]
+    fn parse_installed_packages_sorts_deduplicates_and_skips_invalid_lines() {
+        let packages = parse_installed_packages(
+            "package:com.example.z\nwarning: ignored\npackage:com.example.a\npackage:com.example.z\npackage: \n",
+        );
+        assert_eq!(packages, vec!["com.example.a", "com.example.z"]);
     }
 
     #[test]

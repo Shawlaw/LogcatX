@@ -29,6 +29,9 @@ const PLATFORM_TOOLS_URL_ZH_CN: &str =
     "https://developer.android.google.cn/tools/releases/platform-tools?hl=zh-cn";
 const SCRCPY_RELEASES_URL: &str = "https://github.com/Genymobile/scrcpy/releases";
 const DEFAULT_DEVICE_DROP_DIR: &str = "/sdcard/Download";
+const DEFAULT_NEW_DISPLAY_WIDTH: &str = "720";
+const DEFAULT_NEW_DISPLAY_HEIGHT: &str = "1600";
+const DEFAULT_NEW_DISPLAY_DPI: &str = "320";
 
 #[derive(Clone, Debug, Default)]
 struct DroppedPayload {
@@ -148,6 +151,11 @@ pub struct AdbCollectorApp {
     new_display_width_input: String,
     new_display_height_input: String,
     new_display_dpi_input: String,
+    new_display_start_app_input: String,
+    new_display_app_filter_input: String,
+    new_display_apps: Vec<String>,
+    new_display_apps_loading: bool,
+    new_display_apps_error: Option<String>,
     pending_drop_payload: Option<DroppedPayload>,
     pending_drop_target_serial: Option<String>,
     pending_foreground_confirm: Option<PendingForegroundConfirm>,
@@ -253,9 +261,14 @@ impl AdbCollectorApp {
             logcat_args_input_value: String::new(),
             new_display_device_id: None,
             new_display_use_device_defaults: true,
-            new_display_width_input: "1280".to_owned(),
-            new_display_height_input: "960".to_owned(),
-            new_display_dpi_input: "160".to_owned(),
+            new_display_width_input: DEFAULT_NEW_DISPLAY_WIDTH.to_owned(),
+            new_display_height_input: DEFAULT_NEW_DISPLAY_HEIGHT.to_owned(),
+            new_display_dpi_input: DEFAULT_NEW_DISPLAY_DPI.to_owned(),
+            new_display_start_app_input: String::new(),
+            new_display_app_filter_input: String::new(),
+            new_display_apps: Vec::new(),
+            new_display_apps_loading: false,
+            new_display_apps_error: None,
             pending_drop_payload: None,
             pending_drop_target_serial: None,
             pending_foreground_confirm: None,
@@ -375,6 +388,23 @@ impl AdbCollectorApp {
                             }
                         }
                         Err(err) => self.set_error(err),
+                    }
+                }
+                AppEvent::ScrcpyAppsLoaded { device_id, result } => {
+                    if self.new_display_device_id.as_deref() != Some(device_id.as_str()) {
+                        continue;
+                    }
+                    self.new_display_apps_loading = false;
+                    match result {
+                        Ok(apps) => {
+                            self.new_display_apps = apps;
+                            self.new_display_apps_error = None;
+                        }
+                        Err(err) => {
+                            log::warn!("Failed to load installed packages for scrcpy: {err}");
+                            self.new_display_apps.clear();
+                            self.new_display_apps_error = Some(err);
+                        }
                     }
                 }
                 AppEvent::DeviceConnectFinished { target, result } => {
@@ -1936,9 +1966,19 @@ impl AdbCollectorApp {
         let width_label = self.tr("scrcpy.new_display.width");
         let height_label = self.tr("scrcpy.new_display.height");
         let dpi_label = self.tr("scrcpy.new_display.dpi");
+        let start_app_label = self.tr("scrcpy.new_display.start_app");
+        let start_app_hint = self.tr("scrcpy.new_display.start_app_hint");
+        let select_app_label = self.tr("scrcpy.new_display.select_app");
+        let filter_apps_label = self.tr("scrcpy.new_display.filter_apps");
+        let filter_apps_hint = self.tr("scrcpy.new_display.filter_apps_hint");
+        let loading_apps_label = self.tr("scrcpy.new_display.loading_apps");
+        let no_apps_label = self.tr("scrcpy.new_display.no_apps");
+        let no_matching_apps_label = self.tr("scrcpy.new_display.no_matching_apps");
         let hint = self.tr("scrcpy.new_display.hint");
         let launch_label = self.tr("scrcpy.new_display.launch");
         let cancel_label = self.tr("settings.cancel");
+        let installed_apps = self.new_display_apps.clone();
+        let apps_error = self.new_display_apps_error.clone();
 
         egui::Window::new(title)
             .collapsible(false)
@@ -1977,6 +2017,60 @@ impl AdbCollectorApp {
                     });
                 }
                 ui.add_space(6.0);
+                ui.label(start_app_label);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.new_display_start_app_input)
+                        .hint_text("com.example.app")
+                        .desired_width(300.0),
+                );
+                ui.small(start_app_hint);
+                if self.new_display_apps_loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.small(loading_apps_label);
+                    });
+                } else if let Some(error) = apps_error {
+                    ui.small(RichText::new(error).color(Color32::from_rgb(192, 57, 43)));
+                } else if installed_apps.is_empty() {
+                    ui.small(no_apps_label);
+                } else {
+                    ui.add_space(6.0);
+                    ui.label(filter_apps_label);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_display_app_filter_input)
+                            .hint_text(filter_apps_hint)
+                            .desired_width(300.0),
+                    );
+                    let filtered_apps = filter_installed_packages(
+                        &installed_apps,
+                        &self.new_display_app_filter_input,
+                    );
+                    if filtered_apps.is_empty() {
+                        ui.small(no_matching_apps_label);
+                    } else {
+                        egui::ComboBox::from_id_salt("new-display-start-app")
+                            .selected_text(if self.new_display_start_app_input.is_empty() {
+                                select_app_label.clone()
+                            } else {
+                                self.new_display_start_app_input.clone()
+                            })
+                            .width(300.0)
+                            .show_ui(ui, |ui| {
+                                egui::ScrollArea::vertical()
+                                    .max_height(180.0)
+                                    .show(ui, |ui| {
+                                        for package in filtered_apps {
+                                            ui.selectable_value(
+                                                &mut self.new_display_start_app_input,
+                                                package.to_owned(),
+                                                package,
+                                            );
+                                        }
+                                    });
+                            });
+                    }
+                }
+                ui.add_space(6.0);
                 ui.small(hint);
                 ui.add_space(10.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -1999,7 +2093,8 @@ impl AdbCollectorApp {
                     &self.new_display_height_input,
                     &self.new_display_dpi_input,
                 )
-            };
+            }
+            .and_then(|options| options.with_start_app(&self.new_display_start_app_input));
             match options {
                 Ok(options) => self.start_scrcpy_new_display(device_id, options),
                 Err(err) => self.set_error(err),
@@ -3472,9 +3567,9 @@ impl AdbCollectorApp {
     }
 
     fn open_new_display_dialog(&mut self, device_id: String) {
-        if self.ready_scrcpy_transport(&device_id).is_none() {
+        let Some(transport_serial) = self.ready_scrcpy_transport(&device_id) else {
             return;
-        }
+        };
         let Some(version) = self.configured_scrcpy_version() else {
             return;
         };
@@ -3486,8 +3581,19 @@ impl AdbCollectorApp {
             return;
         }
 
-        self.new_display_device_id = Some(device_id);
+        self.new_display_device_id = Some(device_id.clone());
         self.show_new_display_dialog = true;
+        self.new_display_start_app_input.clear();
+        self.new_display_app_filter_input.clear();
+        self.new_display_apps.clear();
+        self.new_display_apps_error = None;
+        self.new_display_apps_loading = true;
+        let tx = self.tx.clone();
+        let adb_path = self.config.adb_path.clone();
+        thread::spawn(move || {
+            let result = adb::list_installed_packages(&adb_path, &transport_serial);
+            let _ = tx.send(AppEvent::ScrcpyAppsLoaded { device_id, result });
+        });
     }
 
     fn start_scrcpy_new_display(&mut self, device_id: String, options: scrcpy::NewDisplayOptions) {
@@ -4857,6 +4963,20 @@ fn format_drop_processing_summary(installed: usize, pushed: usize, failed: usize
     }
 }
 
+fn filter_installed_packages<'a>(packages: &'a [String], query: &str) -> Vec<&'a str> {
+    let query = query.trim();
+    if query.is_empty() {
+        return packages.iter().map(String::as_str).collect();
+    }
+
+    let query = query.to_ascii_lowercase();
+    packages
+        .iter()
+        .map(String::as_str)
+        .filter(|package| package.to_ascii_lowercase().contains(&query))
+        .collect()
+}
+
 fn wait_for_process_exit(child: &SharedChild) -> (Option<i32>, Option<String>) {
     loop {
         thread::sleep(Duration::from_millis(300));
@@ -4901,8 +5021,10 @@ fn format_system_time(time: std::time::SystemTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
+        DEFAULT_NEW_DISPLAY_DPI, DEFAULT_NEW_DISPLAY_HEIGHT, DEFAULT_NEW_DISPLAY_WIDTH,
         build_device_push_destination, classify_dropped_paths, content_view_width,
-        device_transport_rank, format_device_model_name, is_current_cleanup_preview_response,
+        device_transport_rank, filter_installed_packages, format_device_model_name,
+        is_current_cleanup_preview_response,
         pick_primary_device_info,
     };
     use crate::models::DeviceInfo;
@@ -4999,5 +5121,34 @@ mod tests {
         assert!(is_current_cleanup_preview_response(7, 7));
         assert!(!is_current_cleanup_preview_response(8, 7));
         assert!(!is_current_cleanup_preview_response(7, 8));
+    }
+
+    #[test]
+    fn custom_new_display_defaults_use_portrait_dimensions() {
+        assert_eq!(DEFAULT_NEW_DISPLAY_WIDTH, "720");
+        assert_eq!(DEFAULT_NEW_DISPLAY_HEIGHT, "1600");
+        assert_eq!(DEFAULT_NEW_DISPLAY_DPI, "320");
+    }
+
+    #[test]
+    fn filter_installed_packages_matches_trimmed_case_insensitive_substrings() {
+        let packages = vec![
+            "com.android.settings".to_owned(),
+            "com.tencent.mm".to_owned(),
+            "com.tencent.mobileqq".to_owned(),
+        ];
+
+        assert_eq!(
+            filter_installed_packages(&packages, " TENCENT "),
+            vec!["com.tencent.mm", "com.tencent.mobileqq"]
+        );
+        assert_eq!(
+            filter_installed_packages(&packages, ""),
+            vec![
+                "com.android.settings",
+                "com.tencent.mm",
+                "com.tencent.mobileqq"
+            ]
+        );
     }
 }

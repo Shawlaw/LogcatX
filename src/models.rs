@@ -102,6 +102,10 @@ pub enum AppEvent {
         serial: String,
         result: Result<Screenshot, String>,
     },
+    ScrcpyAppsLoaded {
+        device_id: String,
+        result: Result<Vec<String>, String>,
+    },
     DeviceConnectFinished {
         target: String,
         result: Result<String, String>,
