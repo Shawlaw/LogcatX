@@ -1264,14 +1264,18 @@ impl AdbCollectorApp {
                 let primary_name = self.device_primary_name(&device_id);
                 let is_pinned = self.is_pinned_device(&device_id);
                 let row_fill = if selected {
-                    Color32::from_rgb(243, 247, 255)
+                    Color32::from_rgb(220, 233, 255)
                 } else {
                     Color32::from_rgb(250, 251, 254)
                 };
 
                 egui::Frame::new()
                     .fill(row_fill)
-                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(233, 237, 244)))
+                    .stroke(if selected {
+                        egui::Stroke::new(1.5, Color32::from_rgb(56, 116, 255))
+                    } else {
+                        egui::Stroke::new(1.0, Color32::from_rgb(233, 237, 244))
+                    })
                     .corner_radius(egui::CornerRadius::same(10))
                     .inner_margin(egui::Margin::symmetric(12, 10))
                     .show(ui, |ui| {
@@ -2059,7 +2063,7 @@ impl AdbCollectorApp {
         ui.add_space(8.0);
         ui.label(self.tr("update.dialog_title"));
         let auto_check_label = self.tr("update.auto_check");
-        ui.checkbox(&mut self.auto_update_input, auto_check_label);
+        styled_checkbox(ui, true, &mut self.auto_update_input, auto_check_label);
         ui.small(self.tr("update.auto_check_hint"));
 
         self.ui_update_proxy_settings(ui, inline_page);
@@ -2289,7 +2293,9 @@ impl AdbCollectorApp {
                     &[("device", device_label.clone())],
                 ));
                 ui.add_space(6.0);
-                ui.checkbox(
+                styled_checkbox(
+                    ui,
+                    true,
                     &mut self.new_display_use_device_defaults,
                     follow_device_label,
                 );
@@ -2628,12 +2634,13 @@ impl AdbCollectorApp {
                 ui.label(self.tr("clear.body"));
                 ui.add_space(10.0);
                 ui.label(RichText::new(self.tr("clear.device_scope")).strong());
-                if ui
-                    .add_enabled(
-                        !self.cleanup_in_progress,
-                        egui::Checkbox::new(&mut self.cleanup_all_devices, all_devices_label),
-                    )
-                    .changed()
+                if styled_checkbox(
+                    ui,
+                    !self.cleanup_in_progress,
+                    &mut self.cleanup_all_devices,
+                    all_devices_label,
+                )
+                .changed()
                 {
                     refresh_preview = true;
                 }
@@ -2649,12 +2656,13 @@ impl AdbCollectorApp {
                                     let mut selected = self
                                         .cleanup_selected_directories
                                         .contains(&usage.directory_name);
-                                    if ui
-                                        .add_enabled(
-                                            !self.cleanup_in_progress,
-                                            egui::Checkbox::new(&mut selected, label),
-                                        )
-                                        .changed()
+                                    if styled_checkbox(
+                                        ui,
+                                        !self.cleanup_in_progress,
+                                        &mut selected,
+                                        label,
+                                    )
+                                    .changed()
                                     {
                                         if selected {
                                             self.cleanup_selected_directories
@@ -5022,12 +5030,45 @@ fn apply_visual_style(ctx: &egui::Context) {
     style.spacing.scroll.foreground_color = true;
     style.spacing.scroll.bar_inner_margin = 14.0;
     style.spacing.scroll.bar_outer_margin = 4.0;
-    // 滚动条 handle 颜色（foreground_color=true 时取 widgets.fg_stroke.color）
+    // 滚动条 handle 颜色（foreground_color=true 时取 widgets.fg_stroke.color）。
+    // active 不参与劫持：ui.strong() 的文字颜色取自 widgets.active.fg_stroke
+    // （Visuals::strong_text_color），必须保持正文深色；拖拽把手时短暂变深无碍。
     let scrollbar_handle_color = Color32::from_rgb(212, 216, 227);
     style.visuals.widgets.inactive.fg_stroke.color = scrollbar_handle_color;
     style.visuals.widgets.hovered.fg_stroke.color = scrollbar_handle_color;
-    style.visuals.widgets.active.fg_stroke.color = scrollbar_handle_color;
+    style.visuals.widgets.active.fg_stroke.color = Color32::from_rgb(55, 61, 72);
     ctx.set_style(style);
+}
+
+/// 复选框对勾的强调色（选中行边框同款蓝）。
+const CHECK_MARK_COLOR: Color32 = Color32::from_rgb(56, 116, 255);
+
+/// 复选框的对勾取 `widgets.*.fg_stroke` 绘制，而该颜色已被滚动条配色占用为浅灰
+/// （见 `apply_visual_style`）。仅在绘制该控件期间换成强调色并恢复，不影响滚动条。
+fn styled_checkbox(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    checked: &mut bool,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    let (saved_inactive, saved_hovered, saved_active) = {
+        let visuals = ui.visuals_mut();
+        (
+            visuals.widgets.inactive.fg_stroke.color,
+            visuals.widgets.hovered.fg_stroke.color,
+            visuals.widgets.active.fg_stroke.color,
+        )
+    };
+    let visuals = ui.visuals_mut();
+    visuals.widgets.inactive.fg_stroke.color = CHECK_MARK_COLOR;
+    visuals.widgets.hovered.fg_stroke.color = CHECK_MARK_COLOR;
+    visuals.widgets.active.fg_stroke.color = CHECK_MARK_COLOR;
+    let response = ui.add_enabled(enabled, egui::Checkbox::new(checked, text));
+    let visuals = ui.visuals_mut();
+    visuals.widgets.inactive.fg_stroke.color = saved_inactive;
+    visuals.widgets.hovered.fg_stroke.color = saved_hovered;
+    visuals.widgets.active.fg_stroke.color = saved_active;
+    response
 }
 
 fn content_card_frame() -> egui::Frame {

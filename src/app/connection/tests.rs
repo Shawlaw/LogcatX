@@ -251,6 +251,55 @@ fn multiple_connection_services_require_selection() {
 }
 
 #[test]
+fn styled_checkbox_paints_accent_check_mark_and_restores_style() {
+    let ctx = egui::Context::default();
+    // 用真实应用样式运行：滚动条配色会把 inactive/hovered 前景换成浅灰，
+    // 对勾必须仍以强调色绘制，且 ui.strong() 文字不能被连带变浅。
+    crate::app::apply_visual_style(&ctx);
+    let scrollbar_gray = egui::Color32::from_rgb(212, 216, 227);
+    assert_ne!(
+        ctx.style().visuals.strong_text_color(),
+        scrollbar_gray,
+        "strong text must not inherit the scrollbar handle color"
+    );
+    let accent = crate::app::CHECK_MARK_COLOR;
+    let has_accent_vertices = |ctx: &egui::Context, output: &egui::FullOutput| {
+        ctx.tessellate(output.shapes.clone(), output.pixels_per_point)
+            .iter()
+            .any(|clipped| match &clipped.primitive {
+                egui::epaint::Primitive::Mesh(mesh) => {
+                    mesh.vertices.iter().any(|vertex| vertex.color == accent)
+                }
+                _ => false,
+            })
+    };
+
+    let mut checked = true;
+    let output = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let before = ui.visuals().widgets.inactive.fg_stroke.color;
+            crate::app::styled_checkbox(ui, true, &mut checked, "");
+            assert_eq!(ui.visuals().widgets.inactive.fg_stroke.color, before);
+        });
+    });
+    assert!(
+        has_accent_vertices(&ctx, &output),
+        "checked checkbox must draw an accent-colored check mark"
+    );
+
+    let mut unchecked = false;
+    let output = ctx.run(Default::default(), |ctx| {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            crate::app::styled_checkbox(ui, true, &mut unchecked, "");
+        });
+    });
+    assert!(
+        !has_accent_vertices(&ctx, &output),
+        "unchecked checkbox must not draw a check mark"
+    );
+}
+
+#[test]
 fn accessibility_value_replacement_normalizes_and_respects_disabled_fields() {
     let ctx = egui::Context::default();
     let mut text = String::new();

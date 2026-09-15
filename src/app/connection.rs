@@ -395,7 +395,6 @@ impl ConnectionDialog {
             .default_width(570.0)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.visuals_mut().widgets.active.fg_stroke.color = Color32::from_rgb(55, 61, 72);
                 ui.horizontal(|ui| {
                     for (tab, key) in [
                         (Tab::Wireless, "connect.tab.wireless"),
@@ -682,7 +681,9 @@ impl ConnectionDialog {
                             Tab::Manual => {
                                 ui.label(i18n.tr("connect.intro"));
                                 ui.add_enabled_ui(!busy, |ui| {
-                                    ui.checkbox(
+                                    super::styled_checkbox(
+                                        ui,
+                                        true,
                                         &mut self.manual_wireless,
                                         i18n.tr("connect.manual_wireless"),
                                     );
