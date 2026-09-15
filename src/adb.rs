@@ -4,7 +4,7 @@ use crate::{
 };
 use std::{
     fs::File,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
 
@@ -309,10 +309,47 @@ pub fn restart_server(adb_path: &str) -> Result<String, String> {
     }
 }
 
+/// adb 按文件名后缀校验安装包，`xxx.apk.1` 这类浏览器重复下载的文件需要先
+/// 暂存为 `.apk` 结尾。优先硬链接（零拷贝），跨卷或不支持时回退复制。
+/// 调用方持有返回的 TempDir 直至安装结束，删除即清理。
+fn stage_apk_for_install(apk_path: &Path) -> Result<Option<(tempfile::TempDir, PathBuf)>, String> {
+    let needs_staging = apk_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_none_or(|name| {
+            let lower = name.to_ascii_lowercase();
+            !lower.ends_with(".apk") && !lower.ends_with(".apex")
+        });
+    if !needs_staging {
+        return Ok(None);
+    }
+    let dir = tempfile::tempdir().map_err(|err| {
+        format!(
+            "Failed to create a staging directory for {}: {err}",
+            apk_path.display()
+        )
+    })?;
+    let staged_path = dir.path().join("install.apk");
+    if std::fs::hard_link(apk_path, &staged_path).is_err()
+        && let Err(err) = std::fs::copy(apk_path, &staged_path)
+    {
+        return Err(format!(
+            "Failed to stage {} as an .apk file: {err}",
+            apk_path.display()
+        ));
+    }
+    Ok(Some((dir, staged_path)))
+}
+
 pub fn install_apk(adb_path: &str, serial: &str, apk_path: &Path) -> Result<String, String> {
+    let staged = stage_apk_for_install(apk_path)?;
+    let install_source = staged
+        .as_ref()
+        .map(|(_dir, path)| path.as_path())
+        .unwrap_or(apk_path);
     let output = adb_command(adb_path)
         .args(["-s", serial, "install", "-r"])
-        .arg(apk_path)
+        .arg(install_source)
         .output()
         .map_err(|err| {
             format!(
@@ -777,7 +814,36 @@ mod tests {
         parse_foreground_app_from_window_dump, parse_installed_packages, parse_logcat_args,
         should_retry_clear_with_run_as,
     };
-    use std::{io::Cursor, process::Output};
+    use std::{io::Cursor, path::PathBuf, process::Output};
+
+    #[test]
+    fn install_apk_stages_files_without_apk_suffix() {
+        let fixture = crate::wireless::tests::Fixture::new("");
+        let dir = tempfile::tempdir().unwrap();
+        let redownload = dir.path().join("demo.apk.1");
+        std::fs::write(&redownload, b"apk-bytes").unwrap();
+
+        super::install_apk(&fixture.adb, "FIXTURE_USB_A", &redownload).unwrap();
+        let log = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
+        let install_line = log
+            .lines()
+            .find(|line| line.contains("install -r"))
+            .expect("install call recorded");
+        assert!(install_line.ends_with("install.apk"));
+        assert!(!install_line.ends_with("demo.apk.1"));
+
+        let plain = dir.path().join("plain.apk");
+        std::fs::write(&plain, b"apk-bytes").unwrap();
+        super::install_apk(&fixture.adb, "FIXTURE_USB_A", &plain).unwrap();
+        let log = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
+        assert!(log.contains(&format!("install -r {}", plain.display())));
+    }
+
+    #[test]
+    fn stage_apk_for_install_rejects_missing_files() {
+        let missing = PathBuf::from("definitely-missing.apk.1");
+        assert!(super::stage_apk_for_install(&missing).is_err());
+    }
 
     #[test]
     fn decode_screenshot_png_converts_pixels_to_rgba() {

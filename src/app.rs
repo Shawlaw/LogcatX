@@ -5248,10 +5248,20 @@ fn classify_dropped_paths(paths: Vec<PathBuf>) -> DroppedPayload {
 }
 
 fn is_apk_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| ext.eq_ignore_ascii_case("apk"))
-        .unwrap_or(false)
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    // 浏览器对重复下载会追加 .apk.1、.apk.2 这类纯数字后缀，剥掉后再判断。
+    let mut name = name.to_ascii_lowercase();
+    while let Some((stem, digits)) = name.rsplit_once('.') {
+        if !stem.is_empty() && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+            name = stem.to_owned();
+        } else {
+            break;
+        }
+    }
+    name.rsplit_once('.')
+        .is_some_and(|(stem, ext)| !stem.is_empty() && ext == "apk")
 }
 
 fn build_device_push_destination(source_path: &Path) -> Result<String, String> {
@@ -5394,10 +5404,16 @@ mod tests {
             PathBuf::from("demo.apk"),
             PathBuf::from("notes.txt"),
             PathBuf::from("PATCH.APK"),
+            PathBuf::from("re-download.apk.1"),
+            PathBuf::from("Again.APK.2"),
+            PathBuf::from("browser.apk.1.1"),
+            PathBuf::from("screenshot.png.1"),
+            PathBuf::from("apk.1"),
+            PathBuf::from(".apk"),
         ]);
 
-        assert_eq!(payload.apk_paths.len(), 2);
-        assert_eq!(payload.file_paths.len(), 1);
+        assert_eq!(payload.apk_paths.len(), 5);
+        assert_eq!(payload.file_paths.len(), 4);
     }
 
     #[test]
