@@ -108,7 +108,7 @@ pub enum AppEvent {
     },
     DeviceConnectFinished {
         target: String,
-        result: Result<String, String>,
+        result: Result<String, crate::wireless::Failure>,
     },
     DeviceDisconnectFinished {
         serial: String,

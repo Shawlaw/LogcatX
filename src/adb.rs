@@ -239,18 +239,22 @@ pub fn uninstall_package(adb_path: &str, serial: &str, package: &str) -> Result<
     }
 }
 
-pub fn connect_device(adb_path: &str, target: &str) -> Result<String, String> {
+pub fn connect_device(adb_path: &str, target: &str) -> Result<String, crate::wireless::Failure> {
     let target = target.trim();
     if target.is_empty() {
-        return Err("Device endpoint cannot be empty".to_owned());
+        return Err(crate::wireless::Failure::new("connect.error.empty", ""));
     }
 
-    let output = adb_command(adb_path)
-        .args(["connect", target])
-        .output()
-        .map_err(|err| format!("Failed to run `{adb_path} connect {target}`: {err}"))?;
+    let output = crate::wireless::run_adb(
+        adb_path,
+        &["connect", target],
+        None,
+        std::time::Duration::from_secs(12),
+        &crate::wireless::CancelToken::default(),
+    )?;
 
     parse_connect_output(target, &output)
+        .map_err(|err| crate::wireless::Failure::new("connect.error.connection", err))
 }
 
 pub fn disconnect_device(adb_path: &str, target: &str) -> Result<String, String> {
@@ -458,7 +462,7 @@ pub fn parse_logcat_args(input: &str) -> Vec<String> {
     args
 }
 
-fn adb_command(adb_path: &str) -> Command {
+pub(crate) fn adb_command(adb_path: &str) -> Command {
     let mut command = Command::new(adb_path);
     hide_window(&mut command);
     command
@@ -489,11 +493,27 @@ fn hide_window(command: &mut Command) {
 fn hide_window(_command: &mut Command) {}
 
 pub fn is_network_device_serial(serial: &str) -> bool {
-    let Some((host, port)) = serial.trim().rsplit_once(':') else {
+    let serial = serial.trim().trim_end_matches('.');
+    // ADB auto-connect may expose a service instance instead of IP:port.
+    // Keep these transports behind USB in device merging and allow disconnect.
+    if ["._adb-tls-connect._tcp", "._adb._tcp"]
+        .iter()
+        .any(|suffix| {
+            serial
+                .strip_suffix(suffix)
+                .is_some_and(|instance| !instance.is_empty())
+        })
+    {
+        return true;
+    }
+    let Some((host, port)) = serial.rsplit_once(':') else {
         return false;
     };
 
-    !host.is_empty() && !host.starts_with("emulator-") && port.chars().all(|ch| ch.is_ascii_digit())
+    !host.is_empty()
+        && !host.starts_with("emulator-")
+        && !port.is_empty()
+        && port.chars().all(|ch| ch.is_ascii_digit())
 }
 
 trait EmptyStringExt {
@@ -868,6 +888,14 @@ ZY223JQ9K\toffline
         assert!(is_network_device_serial("localhost:5555"));
         assert!(!is_network_device_serial("emulator-5554"));
         assert!(!is_network_device_serial("ZY223JQ9K"));
+        assert!(is_network_device_serial(
+            "adb-serial-random._adb-tls-connect._tcp"
+        ));
+        assert!(is_network_device_serial("adb-serial._adb._tcp."));
+        assert!(!is_network_device_serial(
+            "adb-serial._adb-tls-pairing._tcp"
+        ));
+        assert!(!is_network_device_serial("localhost:"));
     }
 
     #[test]

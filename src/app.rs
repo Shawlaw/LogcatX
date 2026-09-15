@@ -10,6 +10,7 @@ use crate::{
     },
     scrcpy, updater,
 };
+mod connection;
 use chrono::{Local, TimeZone};
 use desktop_updater::{CheckResult, DownloadedUpdate, UpdateCandidate};
 use eframe::egui::{self, Align, Color32, RichText};
@@ -160,6 +161,7 @@ pub struct AdbCollectorApp {
     version: String,
     connect_target_input: String,
     connect_in_progress: bool,
+    connection: connection::ConnectionDialog,
     restarting_adb_server: bool,
     screenshot_in_progress: bool,
     disconnecting_serial: Option<String>,
@@ -281,6 +283,7 @@ impl AdbCollectorApp {
             version: bootstrap.version.to_owned(),
             connect_target_input: String::new(),
             connect_in_progress: false,
+            connection: connection::ConnectionDialog::default(),
             restarting_adb_server: false,
             screenshot_in_progress: false,
             disconnecting_serial: None,
@@ -446,12 +449,21 @@ impl AdbCollectorApp {
                                 "status.device_connected",
                                 &[("target", target.clone()), ("message", message)],
                             ));
-                            if let Err(err) = self.remember_recent_connection(&target) {
+                            if let Err(err) = config::remember_recent_connection(
+                                &mut self.config,
+                                &self.app_paths,
+                                &target,
+                                self.connection.connecting_wireless,
+                            ) {
                                 self.set_error(err);
                             }
                             self.refresh_devices();
                         }
-                        Err(err) => self.set_error(err),
+                        Err(err) => {
+                            let err = connection::failure_text(&self.i18n, &err);
+                            self.connection.error = Some(err.clone());
+                            self.set_error(err);
+                        }
                     }
                 }
                 AppEvent::DeviceDisconnectFinished { serial, result } => {
@@ -2968,78 +2980,6 @@ impl AdbCollectorApp {
         }
     }
 
-    fn ui_connect_dialog(&mut self, ctx: &egui::Context) {
-        if !self.show_connect_dialog {
-            return;
-        }
-
-        let mut connect_target = None;
-        egui::Window::new(self.tr("connect.title"))
-            .collapsible(false)
-            .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-            .show(ctx, |ui| {
-                ui.label(self.tr("connect.intro"));
-                ui.add_space(8.0);
-
-                let connect_button_text = if self.connect_in_progress {
-                    self.tr("connect.connecting")
-                } else {
-                    self.tr("connect.action")
-                };
-                let can_connect =
-                    !self.connect_in_progress && !self.connect_target_input.trim().is_empty();
-
-                ui.horizontal(|ui| {
-                    let response = ui.text_edit_singleline(&mut self.connect_target_input);
-                    let pressed_enter = response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter));
-                    if ui
-                        .add_enabled(can_connect, egui::Button::new(connect_button_text.clone()))
-                        .clicked()
-                        || (pressed_enter && can_connect)
-                    {
-                        connect_target = Some(self.connect_target_input.trim().to_owned());
-                    }
-                });
-
-                if !self.config.recent_connections.is_empty() {
-                    ui.add_space(8.0);
-                    ui.label(self.tr("connect.recent"));
-                    ui.horizontal_wrapped(|ui| {
-                        for target in self.config.recent_connections.clone() {
-                            if ui
-                                .add_enabled(
-                                    !self.connect_in_progress,
-                                    egui::Button::new(target.as_str()),
-                                )
-                                .clicked()
-                            {
-                                connect_target = Some(target.clone());
-                            }
-                        }
-                    });
-                }
-
-                ui.add_space(12.0);
-                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add_enabled(
-                            !self.connect_in_progress,
-                            egui::Button::new(self.tr("connect.cancel")),
-                        )
-                        .clicked()
-                    {
-                        self.show_connect_dialog = false;
-                    }
-                });
-            });
-
-        if let Some(target) = connect_target {
-            self.start_device_connection(target);
-        }
-    }
-
     fn ui_drop_target_dialog(&mut self, ctx: &egui::Context) {
         let Some(payload) = self.pending_drop_payload.clone() else {
             return;
@@ -3205,6 +3145,7 @@ impl AdbCollectorApp {
             device_aliases: self.config.device_aliases.clone(),
             pinned_devices: self.config.pinned_devices.clone(),
             recent_connections: self.config.recent_connections.clone(),
+            wireless_connections: self.config.wireless_connections.clone(),
             device_logcat_args: self.config.device_logcat_args.clone(),
             auto_check_updates: self.auto_update_input,
             update_proxy: self.update_proxy_input(),
@@ -3248,6 +3189,7 @@ impl AdbCollectorApp {
             device_aliases: candidate.device_aliases.clone(),
             pinned_devices: candidate.pinned_devices.clone(),
             recent_connections: candidate.recent_connections.clone(),
+            wireless_connections: candidate.wireless_connections.clone(),
             device_logcat_args: candidate.device_logcat_args.clone(),
             auto_check_updates: candidate.auto_check_updates,
             update_proxy: candidate.update_proxy.clone(),
@@ -3804,11 +3746,13 @@ impl AdbCollectorApp {
             return;
         }
 
-        let trimmed = target.trim().to_owned();
-        if trimmed.is_empty() {
-            self.set_error(self.tr("status.connect_target_required"));
-            return;
-        }
+        let trimmed = match crate::wireless::parse_endpoint(&target, false) {
+            Ok(endpoint) => endpoint.to_string(),
+            Err(key) => {
+                self.connection.error = Some(self.tr(key));
+                return;
+            }
+        };
 
         self.connect_in_progress = true;
         self.connect_target_input = trimmed.clone();
@@ -4706,19 +4650,6 @@ impl AdbCollectorApp {
             Some(activity) => format!("{} ({activity})", app.package_name),
             None => app.package_name.clone(),
         }
-    }
-
-    fn remember_recent_connection(&mut self, target: &str) -> Result<(), String> {
-        let previous = self.config.recent_connections.clone();
-        self.config
-            .recent_connections
-            .retain(|value| value != target);
-        self.config.recent_connections.insert(0, target.to_owned());
-        if let Err(err) = self.persist_config() {
-            self.config.recent_connections = previous;
-            return Err(err);
-        }
-        Ok(())
     }
 
     fn toggle_pinned_device(&mut self, serial: &str) {

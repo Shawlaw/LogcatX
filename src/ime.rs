@@ -44,6 +44,10 @@ pub struct ImeEnterGuard {
 }
 
 impl ImeEnterGuard {
+    pub fn is_composing(&self) -> bool {
+        self.composing
+    }
+
     /// Call once at the top of `App::update`, before any widget is shown.
     pub fn frame(&mut self, ctx: &Context) {
         let mut composing = self.composing;
@@ -150,8 +154,10 @@ mod tests {
         text: &mut String,
         events: Vec<Event>,
     ) -> FrameOut {
-        let mut input = egui::RawInput::default();
-        input.events = events;
+        let input = egui::RawInput {
+            events,
+            ..Default::default()
+        };
         run_frame_raw(ctx, guard, text, input)
     }
 
@@ -413,8 +419,10 @@ mod tests {
         let mut text = String::new();
         focused_field_with_preedit(&ctx, &mut guard, &mut text);
 
-        let mut input = egui::RawInput::default();
-        input.focused = false;
+        let input = egui::RawInput {
+            focused: false,
+            ..Default::default()
+        };
         run_frame_raw(&ctx, &mut guard, &mut text, input);
 
         let out = run_frame(&ctx, &mut guard, &mut text, vec![key(Key::Enter)]);

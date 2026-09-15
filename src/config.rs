@@ -52,6 +52,10 @@ pub struct AppConfig {
     pub pinned_devices: Vec<String>,
     #[serde(default)]
     pub recent_connections: Vec<String>,
+    /// Recent endpoints known to use wireless debugging. Re-discover their
+    /// hosts on reconnect; legacy endpoints on the same host stay independent.
+    #[serde(default)]
+    pub wireless_connections: Vec<String>,
     #[serde(default)]
     pub device_logcat_args: BTreeMap<String, String>,
     #[serde(default = "default_auto_check_updates")]
@@ -77,6 +81,7 @@ impl AppConfig {
             device_aliases: BTreeMap::new(),
             pinned_devices: Vec::new(),
             recent_connections: Vec::new(),
+            wireless_connections: Vec::new(),
             device_logcat_args: BTreeMap::new(),
             auto_check_updates: default_auto_check_updates(),
             update_proxy: UpdateProxyConfig::default(),
@@ -109,10 +114,43 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
     normalized.device_aliases = normalize_aliases(normalized.device_aliases);
     normalized.pinned_devices = normalize_serial_list(normalized.pinned_devices);
     normalized.recent_connections = normalize_recent_connections(normalized.recent_connections);
+    normalized.wireless_connections = normalize_wireless_connections(
+        normalized.wireless_connections,
+        &normalized.recent_connections,
+    );
     normalized.device_logcat_args = normalize_logcat_args(normalized.device_logcat_args);
     normalized.update_proxy = normalize_update_proxy(normalized.update_proxy);
 
     desktop_config::save_pretty_json(path, &normalized)
+}
+
+/// Commit history and its transport metadata together, leaving memory unchanged
+/// if saving or reloading the candidate fails.
+pub fn remember_recent_connection(
+    config: &mut AppConfig,
+    paths: &AppPaths,
+    target: &str,
+    wireless: bool,
+) -> Result<(), String> {
+    let mut candidate = config.clone();
+    candidate.recent_connections.retain(|value| {
+        crate::wireless::parse_endpoint(value, false)
+            .map(|endpoint| endpoint.to_string() != target)
+            .unwrap_or(value != target)
+    });
+    candidate.recent_connections.insert(0, target.to_owned());
+    candidate
+        .recent_connections
+        .truncate(MAX_RECENT_CONNECTIONS);
+    candidate
+        .wireless_connections
+        .retain(|value| value != target);
+    if wireless {
+        candidate.wireless_connections.push(target.to_owned());
+    }
+    save_config(&paths.config_path, &candidate)?;
+    *config = load_config(&paths.config_path, paths)?;
+    Ok(())
 }
 
 pub fn ensure_log_dir(path: &Path) -> Result<PathBuf, String> {
@@ -169,6 +207,8 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
     config.device_aliases = normalize_aliases(config.device_aliases);
     config.pinned_devices = normalize_serial_list(config.pinned_devices);
     config.recent_connections = normalize_recent_connections(config.recent_connections);
+    config.wireless_connections =
+        normalize_wireless_connections(config.wireless_connections, &config.recent_connections);
     config.device_logcat_args = normalize_logcat_args(config.device_logcat_args);
     config.update_proxy = normalize_update_proxy(config.update_proxy);
 
@@ -205,9 +245,24 @@ fn normalize_serial_list(values: Vec<String>) -> Vec<String> {
 }
 
 fn normalize_recent_connections(values: Vec<String>) -> Vec<String> {
+    let values = values
+        .into_iter()
+        .map(|value| {
+            crate::wireless::parse_endpoint(&value, false)
+                .map(|endpoint| endpoint.to_string())
+                .unwrap_or(value)
+        })
+        .collect();
     let mut normalized = normalize_serial_list(values);
     normalized.truncate(MAX_RECENT_CONNECTIONS);
     normalized
+}
+
+fn normalize_wireless_connections(values: Vec<String>, recent: &[String]) -> Vec<String> {
+    normalize_recent_connections(values)
+        .into_iter()
+        .filter(|target| recent.contains(target))
+        .collect()
 }
 
 fn normalize_logcat_args(args: BTreeMap<String, String>) -> BTreeMap<String, String> {
@@ -395,6 +450,92 @@ mod tests {
         let normalized = normalize_recent_connections(values);
         assert_eq!(normalized.len(), MAX_RECENT_CONNECTIONS);
         assert_eq!(normalized[0], "192.168.0.0:5555");
+    }
+
+    #[test]
+    fn recent_connections_normalize_width_and_keep_transport_types_independent() {
+        let recent = normalize_recent_connections(vec![
+            "１２７。０。０。１：５５５５".into(),
+            "127.0.0.1".into(),
+            "127.0.0.1:39001".into(),
+        ]);
+        assert_eq!(recent, vec!["127.0.0.1:5555", "127.0.0.1:39001"]);
+        let wireless = super::normalize_wireless_connections(
+            vec![
+                "１２７。０。０。１：３９００１".into(),
+                "127.0.0.1:39000".into(),
+            ],
+            &recent,
+        );
+        assert_eq!(wireless, vec!["127.0.0.1:39001"]);
+        let old: super::AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(old.wireless_connections.is_empty());
+    }
+
+    fn history_test_paths(root: &std::path::Path) -> super::AppPaths {
+        super::AppPaths {
+            exe_dir: root.to_owned(),
+            config_dir: root.to_owned(),
+            config_path: root.join("config.json"),
+            app_log_path: root.join("test.log"),
+            portable_mode: true,
+        }
+    }
+
+    #[test]
+    fn failed_history_save_preserves_evicted_entries_and_transport_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        // A directory at the config path reliably rejects writes on all platforms.
+        fs::create_dir(&paths.config_path).unwrap();
+        let original = super::AppConfig {
+            recent_connections: (1..=MAX_RECENT_CONNECTIONS)
+                .map(|index| format!("127.0.0.{index}:39001"))
+                .collect(),
+            wireless_connections: vec!["127.0.0.1:39001".into(), "127.0.0.8:39001".into()],
+            ..Default::default()
+        };
+        for (target, wireless) in [
+            ("127.0.0.9:39001", true),  // insertion would evict a wireless entry
+            ("127.0.0.1:39001", false), // conversion would remove its marker
+            ("127.0.0.2:39001", true),  // conversion would add its marker
+        ] {
+            let mut config = original.clone();
+            assert!(
+                super::remember_recent_connection(&mut config, &paths, target, wireless).is_err()
+            );
+            assert_eq!(
+                serde_json::to_value(config).unwrap(),
+                serde_json::to_value(&original).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn successful_history_save_commits_matching_history_and_transport_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        let mut config = super::AppConfig {
+            recent_connections: (1..=MAX_RECENT_CONNECTIONS)
+                .map(|index| format!("127.0.0.{index}:39001"))
+                .collect(),
+            wireless_connections: vec!["127.0.0.1:39001".into(), "127.0.0.8:39001".into()],
+            ..Default::default()
+        };
+        super::remember_recent_connection(&mut config, &paths, "127.0.0.9:39001", true).unwrap();
+        assert_eq!(config.recent_connections.len(), MAX_RECENT_CONNECTIONS);
+        assert_eq!(config.recent_connections[0], "127.0.0.9:39001");
+        assert_eq!(
+            config.wireless_connections,
+            ["127.0.0.1:39001", "127.0.0.9:39001"]
+        );
+        super::remember_recent_connection(&mut config, &paths, "127.0.0.1:39001", false).unwrap();
+        assert_eq!(config.wireless_connections, ["127.0.0.9:39001"]);
+        let saved = super::load_config(&paths.config_path, &paths).unwrap();
+        assert_eq!(
+            serde_json::to_value(config).unwrap(),
+            serde_json::to_value(saved).unwrap()
+        );
     }
 
     #[test]

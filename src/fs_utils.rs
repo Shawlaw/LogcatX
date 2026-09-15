@@ -723,14 +723,22 @@ mod tests {
             device_directories: Some(vec!["Pixel_8".to_owned()]),
             older_than: Some(SystemTime::now() + Duration::from_secs(60)),
         };
-        let preview = preview_log_cleanup(&base_dir, &selected_pixel, &[tablet_log.clone()])
-            .expect("preview cleanup");
+        let preview = preview_log_cleanup(
+            &base_dir,
+            &selected_pixel,
+            std::slice::from_ref(&tablet_log),
+        )
+        .expect("preview cleanup");
         assert_eq!(preview.matching_files, 1);
         assert_eq!(preview.matching_bytes, 5);
         assert_eq!(preview.protected_files, 0);
 
-        let outcome = cleanup_matching_logs(&base_dir, &selected_pixel, &[tablet_log.clone()])
-            .expect("clean Pixel log");
+        let outcome = cleanup_matching_logs(
+            &base_dir,
+            &selected_pixel,
+            std::slice::from_ref(&tablet_log),
+        )
+        .expect("clean Pixel log");
         assert_eq!(outcome.deleted_files, 1);
         assert_eq!(outcome.freed_bytes, 5);
         assert!(outcome.failed_paths.is_empty());
@@ -741,8 +749,9 @@ mod tests {
             device_directories: None,
             older_than: Some(SystemTime::now() + Duration::from_secs(60)),
         };
-        let protected_preview = preview_log_cleanup(&base_dir, &all_devices, &[tablet_log.clone()])
-            .expect("preview protected log");
+        let protected_preview =
+            preview_log_cleanup(&base_dir, &all_devices, std::slice::from_ref(&tablet_log))
+                .expect("preview protected log");
         assert_eq!(protected_preview.matching_files, 0);
         assert_eq!(protected_preview.protected_files, 1);
         assert_eq!(protected_preview.protected_bytes, 6);

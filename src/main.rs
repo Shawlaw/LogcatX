@@ -13,6 +13,7 @@ mod managed_child;
 mod models;
 mod scrcpy;
 mod updater;
+mod wireless;
 
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 820.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [1100.0, 720.0];
