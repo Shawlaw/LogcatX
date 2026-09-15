@@ -37,6 +37,9 @@ windows-sys = { version = "0.61", features = [
 default = []
 console = []
 update-preview = []
+# Renderer screenshots for native E2E on locked / remote Windows desktops.
+# Not enabled in preview or release artifacts delivered to users.
+e2e = []
 
 [profile.release]
 opt-level = "s"

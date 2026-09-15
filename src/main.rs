@@ -6,6 +6,8 @@
 mod adb;
 mod app;
 mod config;
+#[cfg(feature = "e2e")]
+mod e2e;
 mod fs_utils;
 mod i18n;
 mod ime;

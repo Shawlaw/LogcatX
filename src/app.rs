@@ -5145,6 +5145,8 @@ impl eframe::App for AdbCollectorApp {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        #[cfg(feature = "e2e")]
+        crate::e2e::capture_frame(ctx);
         self.ime_enter_guard.frame(ctx);
         apply_visual_style(ctx);
         self.handle_events();
