@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [Unreleased]
+
+### Added
+- Wireless debugging discovery, six-digit pairing and automatic connection after pairing; wireless history rediscovers the current dynamic port
+- Quick and full TCP port scans for one device IP, with ADB handshake detection, progress, cancellation and manual connection fallback
+
+### Enhanced
+- Drag-and-drop install recognizes re-downloaded files such as `.apk.1` / `.apk.2` (browser numeric suffixes) as APKs
+- Connection addresses and pairing codes accept Chinese punctuation and full-width characters; legacy TCP/IP connections default to port 5555, with normalized-address previews and inline validation
+- Stronger device-row selection background and blue border make the current target easier to identify
+- Checkboxes draw an accent-colored check mark so the checked state is clearly visible; the manual wireless-debugging option now spells out its behavior
+
 ## [0.7.0] - 2026-09-04
 
 ### Added
