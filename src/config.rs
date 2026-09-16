@@ -56,6 +56,10 @@ pub struct AppConfig {
     /// hosts on reconnect; legacy endpoints on the same host stay independent.
     #[serde(default)]
     pub wireless_connections: Vec<String>,
+    /// Devices (identity keys) whose dropped APKs install directly without
+    /// the per-drop confirmation dialog.
+    #[serde(default)]
+    pub apk_auto_install_devices: Vec<String>,
     #[serde(default)]
     pub device_logcat_args: BTreeMap<String, String>,
     #[serde(default = "default_auto_check_updates")]
@@ -82,6 +86,7 @@ impl AppConfig {
             pinned_devices: Vec::new(),
             recent_connections: Vec::new(),
             wireless_connections: Vec::new(),
+            apk_auto_install_devices: Vec::new(),
             device_logcat_args: BTreeMap::new(),
             auto_check_updates: default_auto_check_updates(),
             update_proxy: UpdateProxyConfig::default(),
@@ -118,6 +123,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
         normalized.wireless_connections,
         &normalized.recent_connections,
     );
+    normalized.apk_auto_install_devices = normalize_serial_list(normalized.apk_auto_install_devices);
     normalized.device_logcat_args = normalize_logcat_args(normalized.device_logcat_args);
     normalized.update_proxy = normalize_update_proxy(normalized.update_proxy);
 
@@ -209,6 +215,7 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
     config.recent_connections = normalize_recent_connections(config.recent_connections);
     config.wireless_connections =
         normalize_wireless_connections(config.wireless_connections, &config.recent_connections);
+    config.apk_auto_install_devices = normalize_serial_list(config.apk_auto_install_devices);
     config.device_logcat_args = normalize_logcat_args(config.device_logcat_args);
     config.update_proxy = normalize_update_proxy(config.update_proxy);
 
@@ -536,6 +543,27 @@ mod tests {
             serde_json::to_value(config).unwrap(),
             serde_json::to_value(saved).unwrap()
         );
+    }
+
+    #[test]
+    fn apk_auto_install_devices_round_trip_and_normalize() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        let legacy: super::AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(legacy.apk_auto_install_devices.is_empty());
+        super::save_config(
+            &paths.config_path,
+            &super::AppConfig {
+                apk_auto_install_devices: vec![
+                    "  Google Pixel 8  ".into(),
+                    "Google Pixel 8".into(),
+                ],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let loaded = super::load_config(&paths.config_path, &paths).unwrap();
+        assert_eq!(loaded.apk_auto_install_devices, ["Google Pixel 8"]);
     }
 
     #[test]

@@ -5,8 +5,8 @@ use crate::{
     i18n::I18n,
     ime::ImeEnterGuard,
     models::{
-        AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, ForegroundApp, ForegroundAppAction,
-        Screenshot, SharedChild, StatusMessage,
+        AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, DropOutcome, ForegroundApp,
+        ForegroundAppAction, Screenshot, SharedChild, StatusMessage,
     },
     scrcpy, updater,
 };
@@ -41,10 +41,22 @@ const SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT: f32 =
     SETTINGS_FOOTER_ERROR_HEIGHT - SETTINGS_FOOTER_HEIGHT;
 const SETTINGS_MIN_SCROLL_HEIGHT: f32 = 140.0;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct DroppedPayload {
     apk_paths: Vec<PathBuf>,
     file_paths: Vec<PathBuf>,
+    /// false 时 APK 像普通文件一样发送到下载目录而不是安装。
+    install_apks: bool,
+}
+
+impl Default for DroppedPayload {
+    fn default() -> Self {
+        Self {
+            apk_paths: Vec::new(),
+            file_paths: Vec::new(),
+            install_apks: true,
+        }
+    }
 }
 
 impl DroppedPayload {
@@ -181,6 +193,9 @@ pub struct AdbCollectorApp {
     new_display_apps_error: Option<String>,
     pending_drop_payload: Option<DroppedPayload>,
     pending_drop_target_serial: Option<String>,
+    pending_drop_apk_install: bool,
+    pending_drop_always_install: bool,
+    pending_drop_policy_serial: Option<String>,
     pending_foreground_confirm: Option<PendingForegroundConfirm>,
     drop_task_in_progress: bool,
     foreground_task_in_progress: bool,
@@ -303,6 +318,9 @@ impl AdbCollectorApp {
             new_display_apps_error: None,
             pending_drop_payload: None,
             pending_drop_target_serial: None,
+            pending_drop_apk_install: true,
+            pending_drop_always_install: false,
+            pending_drop_policy_serial: None,
             pending_foreground_confirm: None,
             drop_task_in_progress: false,
             foreground_task_in_progress: false,
@@ -500,14 +518,43 @@ impl AdbCollectorApp {
                 }
                 AppEvent::DeviceDropFinished { serial, result } => {
                     self.drop_task_in_progress = false;
+                    let device_label = self.device_identity_label(&serial);
                     match result {
-                        Ok(message) => self.set_info(self.tr_args(
-                            "status.drop_finished",
-                            &[
-                                ("serial", self.device_identity_label(&serial)),
-                                ("message", message),
-                            ],
-                        )),
+                        Ok(outcome) => {
+                            // 单个文件在运行消息中显示完整路径；批量仅摘要，明细见应用日志。
+                            let message = if outcome.installed.len() == 1
+                                && outcome.pushed.is_empty()
+                            {
+                                self.tr_args(
+                                    "status.drop_installed_one",
+                                    &[
+                                        ("path", outcome.installed[0].clone()),
+                                        ("device", device_label),
+                                    ],
+                                )
+                            } else if outcome.pushed.len() == 1 && outcome.installed.is_empty() {
+                                let (path, destination) = outcome.pushed[0].clone();
+                                self.tr_args(
+                                    "status.drop_pushed_one",
+                                    &[
+                                        ("path", path),
+                                        ("destination", destination),
+                                        ("device", device_label),
+                                    ],
+                                )
+                            } else {
+                                self.tr_args(
+                                    "status.drop_finished_multi",
+                                    &[
+                                        ("count", outcome.success_count().to_string()),
+                                        ("installed", outcome.installed.len().to_string()),
+                                        ("pushed", outcome.pushed.len().to_string()),
+                                        ("device", device_label),
+                                    ],
+                                )
+                            };
+                            self.set_info(message);
+                        }
                         Err(err) => self.set_error(err),
                     }
                 }
@@ -1172,6 +1219,7 @@ impl AdbCollectorApp {
             let mut open_shell_serial: Option<String> = None;
             let mut disconnect_serial: Option<String> = None;
             let mut toggle_pin_serial: Option<String> = None;
+            let mut toggle_apk_auto_install: Option<(String, bool)> = None;
             let mut open_alias_serial: Option<String> = None;
             let mut open_logcat_args_serial: Option<String> = None;
             let mut foreground_action: Option<(String, ForegroundAppAction)> = None;
@@ -1200,6 +1248,8 @@ impl AdbCollectorApp {
             let stopping_text = self.tr("run_state.stopping");
             let pin_text = self.tr("device.action.pin");
             let unpin_text = self.tr("device.action.unpin");
+            let apk_auto_install_text = self.tr("device.action.apk_auto_install");
+            let apk_auto_install_undo_text = self.tr("device.action.apk_auto_install_undo");
             let edit_alias_text = self.tr("device.action.edit_alias");
             let edit_logcat_args_text = self.tr("device.action.edit_logcat_args");
             let open_folder_text = self.tr("device.action.open_folder");
@@ -1389,6 +1439,21 @@ impl AdbCollectorApp {
                                                 };
                                                 if ui.add(rounded_secondary(pin_label)).clicked() {
                                                     toggle_pin_serial = Some(device_id.clone());
+                                                    ui.close_menu();
+                                                }
+                                                let apk_auto_install_on =
+                                                    self.is_apk_auto_install_device(&device_id);
+                                                let apk_auto_install_label = if apk_auto_install_on {
+                                                    apk_auto_install_undo_text.clone()
+                                                } else {
+                                                    apk_auto_install_text.clone()
+                                                };
+                                                if ui
+                                                    .add(rounded_secondary(apk_auto_install_label))
+                                                    .clicked()
+                                                {
+                                                    toggle_apk_auto_install =
+                                                        Some((device_id.clone(), !apk_auto_install_on));
                                                     ui.close_menu();
                                                 }
                                                 if ui
@@ -1688,6 +1753,9 @@ impl AdbCollectorApp {
             }
             if let Some(serial) = toggle_pin_serial {
                 self.toggle_pinned_device(&serial);
+            }
+            if let Some((serial, enabled)) = toggle_apk_auto_install {
+                self.set_apk_auto_install_device(&serial, enabled);
             }
             if let Some(serial) = open_alias_serial {
                 self.open_alias_editor(&serial);
@@ -2997,6 +3065,7 @@ impl AdbCollectorApp {
         if ready_devices.is_empty() {
             self.pending_drop_payload = None;
             self.pending_drop_target_serial = None;
+            self.pending_drop_policy_serial = None;
             return;
         }
 
@@ -3007,6 +3076,18 @@ impl AdbCollectorApp {
             .unwrap_or(true)
         {
             self.pending_drop_target_serial = ready_devices.first().cloned();
+        }
+
+        // 含 APK 的拖入按目标设备加载默认处理方式；切换设备时重新加载。
+        if !payload.apk_paths.is_empty()
+            && self.pending_drop_policy_serial != self.pending_drop_target_serial
+        {
+            let identity = self.pending_drop_target_serial.clone();
+            self.pending_drop_policy_serial = identity.clone();
+            self.pending_drop_apk_install = true;
+            self.pending_drop_always_install = identity
+                .as_deref()
+                .is_some_and(|serial| self.is_apk_auto_install_device(serial));
         }
 
         let mut start_target = None;
@@ -3059,6 +3140,23 @@ impl AdbCollectorApp {
                     );
                 }
 
+                if !payload.apk_paths.is_empty() {
+                    ui.add_space(8.0);
+                    ui.label(self.tr("drop.apk_action"));
+                    let install_label = self.tr("drop.apk.install");
+                    ui.radio_value(&mut self.pending_drop_apk_install, true, install_label);
+                    let download_label = self.tr("drop.apk.download");
+                    ui.radio_value(&mut self.pending_drop_apk_install, false, download_label);
+                    // 仅在直接安装时可记住；选择发送到下载目录视为此设备取消记住。
+                    let always_label = self.tr("drop.apk.always_install");
+                    styled_checkbox(
+                        ui,
+                        self.pending_drop_apk_install,
+                        &mut self.pending_drop_always_install,
+                        always_label,
+                    );
+                }
+
                 ui.add_space(12.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if ui.button(self.tr("drop.cancel")).clicked() {
@@ -3073,11 +3171,21 @@ impl AdbCollectorApp {
         if cancel {
             self.pending_drop_payload = None;
             self.pending_drop_target_serial = None;
+            self.pending_drop_policy_serial = None;
         }
         if let Some(serial) = start_target {
             let payload = self.pending_drop_payload.take();
             self.pending_drop_target_serial = None;
-            if let Some(payload) = payload {
+            self.pending_drop_policy_serial = None;
+            if let Some(mut payload) = payload {
+                if !payload.apk_paths.is_empty() {
+                    payload.install_apks = self.pending_drop_apk_install;
+                    let remember =
+                        self.pending_drop_apk_install && self.pending_drop_always_install;
+                    if remember != self.is_apk_auto_install_device(&serial) {
+                        self.set_apk_auto_install_device(&serial, remember);
+                    }
+                }
                 self.start_drop_task(serial, payload);
             }
         }
@@ -3154,6 +3262,7 @@ impl AdbCollectorApp {
             pinned_devices: self.config.pinned_devices.clone(),
             recent_connections: self.config.recent_connections.clone(),
             wireless_connections: self.config.wireless_connections.clone(),
+            apk_auto_install_devices: self.config.apk_auto_install_devices.clone(),
             device_logcat_args: self.config.device_logcat_args.clone(),
             auto_check_updates: self.auto_update_input,
             update_proxy: self.update_proxy_input(),
@@ -3198,6 +3307,7 @@ impl AdbCollectorApp {
             pinned_devices: candidate.pinned_devices.clone(),
             recent_connections: candidate.recent_connections.clone(),
             wireless_connections: candidate.wireless_connections.clone(),
+            apk_auto_install_devices: candidate.apk_auto_install_devices.clone(),
             device_logcat_args: candidate.device_logcat_args.clone(),
             auto_check_updates: candidate.auto_check_updates,
             update_proxy: candidate.update_proxy.clone(),
@@ -4198,17 +4308,59 @@ impl AdbCollectorApp {
             return;
         }
 
-        if let Some(selected_serial) = self.selected_serial.clone()
-            && ready_devices
-                .iter()
-                .any(|serial| serial == &selected_serial)
-        {
-            self.start_drop_task(selected_serial, payload);
+        let selected_ready = self
+            .selected_serial
+            .clone()
+            .filter(|serial| ready_devices.iter().any(|candidate| candidate == serial));
+
+        // 不含 APK 时保持原行为：已选中设备直接处理，否则弹窗选设备。
+        if payload.apk_paths.is_empty() {
+            if let Some(selected_serial) = selected_ready {
+                self.start_drop_task(selected_serial, payload);
+                return;
+            }
+            self.pending_drop_target_serial = ready_devices.first().cloned();
+            self.pending_drop_payload = Some(payload);
             return;
         }
 
-        self.pending_drop_target_serial = ready_devices.first().cloned();
+        // 含 APK 时需要确认处理方式；已记住“始终直接安装”的设备除外。
+        let target = selected_ready.or_else(|| ready_devices.first().cloned());
+        if let Some(serial) = target.clone()
+            && self.is_apk_auto_install_device(&serial)
+        {
+            self.start_drop_task(serial, payload);
+            return;
+        }
+        self.pending_drop_target_serial = target;
+        self.pending_drop_apk_install = true;
+        self.pending_drop_always_install = false;
+        self.pending_drop_policy_serial = None;
         self.pending_drop_payload = Some(payload);
+    }
+
+    fn is_apk_auto_install_device(&self, identity: &str) -> bool {
+        self.config
+            .apk_auto_install_devices
+            .iter()
+            .any(|value| value == identity)
+    }
+
+    fn set_apk_auto_install_device(&mut self, identity: &str, enabled: bool) {
+        let previous = self.config.apk_auto_install_devices.clone();
+        if enabled {
+            if !previous.iter().any(|value| value == identity) {
+                self.config.apk_auto_install_devices.push(identity.to_owned());
+            }
+        } else {
+            self.config
+                .apk_auto_install_devices
+                .retain(|value| value != identity);
+        }
+        if let Err(err) = self.persist_config() {
+            self.config.apk_auto_install_devices = previous;
+            self.set_error(err);
+        }
     }
 
     fn start_drop_task(&mut self, device_id: String, payload: DroppedPayload) {
@@ -4217,13 +4369,29 @@ impl AdbCollectorApp {
         }
 
         self.drop_task_in_progress = true;
-        self.set_info(self.tr_args(
-            "status.drop_processing",
-            &[
-                ("count", payload.total_count().to_string()),
-                ("serial", self.device_identity_label(&device_id)),
-            ],
-        ));
+        let device_label = self.device_identity_label(&device_id);
+        // 单个文件从一开始就显示完整路径；批量保持计数摘要。
+        let info_text = if payload.total_count() == 1 {
+            let path = payload
+                .apk_paths
+                .first()
+                .or_else(|| payload.file_paths.first())
+                .map(|path| path.display().to_string())
+                .unwrap_or_default();
+            self.tr_args(
+                "status.drop_processing_one",
+                &[("path", path), ("serial", device_label)],
+            )
+        } else {
+            self.tr_args(
+                "status.drop_processing",
+                &[
+                    ("count", payload.total_count().to_string()),
+                    ("serial", device_label),
+                ],
+            )
+        };
+        self.set_info(info_text);
 
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
@@ -5318,37 +5486,84 @@ fn build_device_push_destination(source_path: &Path) -> Result<String, String> {
     Ok(format!("{DEFAULT_DEVICE_DROP_DIR}/{file_name}"))
 }
 
+fn push_dropped_file(adb_path: &str, serial: &str, path: &Path) -> Result<String, String> {
+    let remote_path = build_device_push_destination(path)?;
+    adb::push_file(adb_path, serial, path, &remote_path).map(|_| remote_path)
+}
+
 fn process_dropped_payload(
     adb_path: &str,
     serial: &str,
     payload: DroppedPayload,
-) -> Result<String, String> {
-    let mut installed = 0usize;
-    let mut pushed = 0usize;
+) -> Result<DropOutcome, String> {
+    let mut outcome = DropOutcome::default();
     let mut failures = Vec::new();
+    log::info!(
+        "Processing {} dropped file(s) on {serial} (install APKs: {})",
+        payload.total_count(),
+        payload.install_apks
+    );
 
-    for apk_path in payload.apk_paths {
-        match adb::install_apk(adb_path, serial, &apk_path) {
-            Ok(_) => installed += 1,
-            Err(err) => failures.push(err),
+    if payload.install_apks {
+        for apk_path in payload.apk_paths {
+            match adb::install_apk(adb_path, serial, &apk_path) {
+                Ok(_) => {
+                    log::info!("Installed {} on {serial}", apk_path.display());
+                    outcome.installed.push(apk_path.display().to_string());
+                }
+                Err(err) => {
+                    failures.push(err.clone());
+                    log::warn!("Failed to install {} on {serial}: {err}", apk_path.display());
+                }
+            }
         }
-    }
-
-    for file_path in payload.file_paths {
-        match build_device_push_destination(&file_path) {
-            Ok(remote_path) => match adb::push_file(adb_path, serial, &file_path, &remote_path) {
-                Ok(_) => pushed += 1,
-                Err(err) => failures.push(err),
-            },
-            Err(err) => failures.push(err),
-        }
-    }
-
-    let summary = format_drop_processing_summary(installed, pushed, failures.len());
-    if failures.is_empty() {
-        Ok(summary)
     } else {
-        Err(format!("{summary}\n{}", failures.join("\n")))
+        for apk_path in &payload.apk_paths {
+            match push_dropped_file(adb_path, serial, apk_path) {
+                Ok(remote_path) => {
+                    log::info!("Pushed {} to {remote_path} on {serial}", apk_path.display());
+                    outcome
+                        .pushed
+                        .push((apk_path.display().to_string(), remote_path));
+                }
+                Err(err) => {
+                    failures.push(err.clone());
+                    log::warn!(
+                        "Failed to push {} on {serial}: {err}",
+                        apk_path.display()
+                    );
+                }
+            }
+        }
+    }
+
+    for file_path in &payload.file_paths {
+        match push_dropped_file(adb_path, serial, file_path) {
+            Ok(remote_path) => {
+                log::info!("Pushed {} to {remote_path} on {serial}", file_path.display());
+                outcome
+                    .pushed
+                    .push((file_path.display().to_string(), remote_path));
+            }
+            Err(err) => {
+                failures.push(err.clone());
+                log::warn!("Failed to push {} on {serial}: {err}", file_path.display());
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        Ok(outcome)
+    } else {
+        Err(format!(
+            "{}\n{}",
+            format_drop_processing_summary(
+                outcome.installed.len(),
+                outcome.pushed.len(),
+                failures.len()
+            ),
+            failures.join("\n")
+        ))
     }
 }
 
@@ -5432,8 +5647,8 @@ mod tests {
         SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT, build_device_push_destination,
         classify_dropped_paths, content_view_width, device_transport_rank,
         filter_installed_packages, format_device_model_name, is_current_cleanup_preview_response,
-        pick_primary_device_info, settings_error_scroll_area, settings_path_input_width,
-        should_reveal_proxy_settings_content,
+        pick_primary_device_info, process_dropped_payload, settings_error_scroll_area,
+        settings_path_input_width, should_reveal_proxy_settings_content,
     };
     use crate::models::DeviceInfo;
     use eframe::egui;
@@ -5455,6 +5670,34 @@ mod tests {
 
         assert_eq!(payload.apk_paths.len(), 5);
         assert_eq!(payload.file_paths.len(), 4);
+    }
+
+    #[test]
+    fn process_dropped_payload_installs_or_pushes_apks_by_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let apk = dir.path().join("re-download.apk.1");
+        std::fs::write(&apk, b"placeholder").unwrap();
+
+        let fixture = crate::wireless::tests::Fixture::new("");
+        let payload = classify_dropped_paths(vec![apk.clone()]);
+        assert_eq!(payload.apk_paths.len(), 1);
+        assert!(payload.install_apks);
+        let outcome = process_dropped_payload(&fixture.adb, "FIXTURE_USB_A", payload).unwrap();
+        assert_eq!(outcome.installed.len(), 1);
+        assert_eq!(outcome.pushed.len(), 0);
+        assert!(outcome.installed[0].ends_with("re-download.apk.1"));
+
+        let mut download = classify_dropped_paths(vec![apk]);
+        download.install_apks = false;
+        let outcome = process_dropped_payload(&fixture.adb, "FIXTURE_USB_A", download).unwrap();
+        assert_eq!(outcome.installed.len(), 0);
+        assert_eq!(outcome.pushed.len(), 1);
+        assert!(outcome.pushed[0].0.ends_with("re-download.apk.1"));
+        assert_eq!(outcome.pushed[0].1, "/sdcard/Download/re-download.apk.1");
+
+        let log = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
+        assert!(log.contains("install -r"));
+        assert!(log.contains("/sdcard/Download/re-download.apk.1"));
     }
 
     #[test]

@@ -9,9 +9,11 @@ All notable changes to this project will be documented in this file.
 ### Added
 - Wireless debugging discovery, six-digit pairing and automatic connection after pairing; wireless history rediscovers the current dynamic port
 - Quick and full TCP port scans for one device IP, with ADB handshake detection, progress, cancellation and manual connection fallback
+- Dropping APKs now asks whether to install directly or send to the download directory, with a per-device "always install directly" option that skips further confirmations; the device more menu can restore the confirmation at any time
 
 ### Enhanced
-- Drag-and-drop install recognizes re-downloaded files such as `.apk.1` / `.apk.2` (browser numeric suffixes) as APKs
+- Single-file drops show the full install/push path and destination in the running messages; batch drops show a summary in the UI with per-file details in the application log
+- Drag-and-drop install recognizes re-downloaded files such as `.apk.1` / `.apk.2` (browser numeric suffixes) as APKs; they are staged under an `.apk` suffix before installing to satisfy adb's filename check
 - Connection addresses and pairing codes accept Chinese punctuation and full-width characters; legacy TCP/IP connections default to port 5555, with normalized-address previews and inline validation
 - Stronger device-row selection background and blue border make the current target easier to identify
 - Checkboxes draw an accent-colored check mark so the checked state is clearly visible; the manual wireless-debugging option now spells out its behavior

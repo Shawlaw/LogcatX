@@ -88,6 +88,21 @@ pub enum ForegroundAppAction {
     Uninstall,
 }
 
+/// 拖放处理成功后的逐文件结果，供运行消息展示明细。
+#[derive(Clone, Debug, Default)]
+pub struct DropOutcome {
+    /// 安装成功的本地 APK 路径。
+    pub installed: Vec<String>,
+    /// 推送成功的 (本地路径, 远端路径)。
+    pub pushed: Vec<(String, String)>,
+}
+
+impl DropOutcome {
+    pub fn success_count(&self) -> usize {
+        self.installed.len() + self.pushed.len()
+    }
+}
+
 #[derive(Debug)]
 pub enum AppEvent {
     DevicesRefreshed(Result<Vec<DeviceInfo>, String>),
@@ -117,7 +132,7 @@ pub enum AppEvent {
     AdbServerRestartFinished(Result<String, String>),
     DeviceDropFinished {
         serial: String,
-        result: Result<String, String>,
+        result: Result<DropOutcome, String>,
     },
     ForegroundAppResolved {
         serial: String,
