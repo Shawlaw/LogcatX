@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
-## [Unreleased]
+## [0.8.0] - 2026-09-17
 
 ### Added
 - Wireless debugging discovery, six-digit pairing and automatic connection after pairing; wireless history rediscovers the current dynamic port

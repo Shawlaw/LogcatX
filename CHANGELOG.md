@@ -4,7 +4,7 @@
 
 - English changelog: [`CHANGELOG.en.md`](./CHANGELOG.en.md)
 
-## [Unreleased]
+## [0.8.0] - 2026-09-17
 
 ### 新增
 - 无线调试设备发现、六位配对码配对与配对后自动连接；最近无线连接重新查找当前动态端口
