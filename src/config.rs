@@ -66,6 +66,19 @@ pub struct AppConfig {
     pub auto_check_updates: bool,
     #[serde(default)]
     pub update_proxy: UpdateProxyConfig,
+    /// Favorite remote directories on the Files page (PRD §6.2). Persisted;
+    /// favorites may be global or bound to one device identity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_favorites: Vec<FileFavorite>,
+}
+
+/// A pinned remote path on the Files page.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FileFavorite {
+    pub path: String,
+    pub name: String,
+    /// Device identity this favorite belongs to; `None` = works everywhere.
+    pub device: Option<String>,
 }
 
 impl AppConfig {
@@ -90,6 +103,7 @@ impl AppConfig {
             device_logcat_args: BTreeMap::new(),
             auto_check_updates: default_auto_check_updates(),
             update_proxy: UpdateProxyConfig::default(),
+            file_favorites: Vec::new(),
         }
     }
 

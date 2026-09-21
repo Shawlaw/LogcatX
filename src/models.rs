@@ -102,6 +102,13 @@ impl DropOutcome {
     }
 }
 
+/// Pending batch deletion confirmation for the Files page (PRD §6.6).
+#[derive(Clone, Debug)]
+pub struct FilesDeletePending {
+    pub names: Vec<String>,
+    pub contains_directory: bool,
+}
+
 #[derive(Debug)]
 pub enum AppEvent {
     /// Discovery responses carry the generation they were spawned with;
@@ -114,6 +121,16 @@ pub enum AppEvent {
     DevicesPolled {
         generation: u64,
         result: Result<crate::adb::DiscoveryOutcome, String>,
+    },
+    /// Files page listing response; stale generations are discarded.
+    FilesListed {
+        generation: u64,
+        result: Result<Vec<crate::remote_fs::RemoteEntry>, String>,
+    },
+    /// Files page mutation (mkdir/rename/move/delete) finished.
+    FilesOpFinished {
+        generation: u64,
+        result: Result<(), String>,
     },
     LogStorageRefreshed(Result<fs_utils::LogStorageReport, String>),
     CleanupPreviewed {

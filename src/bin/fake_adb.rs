@@ -254,6 +254,7 @@ fn unescape(text: &str) -> String {
         if ch == '\\' {
             match chars.next() {
                 Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
                 Some('\\') => result.push('\\'),
                 Some(other) => {
                     result.push('\\');

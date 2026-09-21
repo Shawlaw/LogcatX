@@ -8,9 +8,10 @@ use crate::{
         AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, DropOutcome, ForegroundApp,
         ForegroundAppAction, Screenshot, SharedChild, StatusMessage,
     },
-    scrcpy, transfer, updater,
+    remote_fs, scrcpy, transfer, updater,
 };
 mod connection;
+mod files;
 use chrono::{Local, TimeZone};
 use desktop_updater::{CheckResult, DownloadedUpdate, UpdateCandidate};
 use eframe::egui::{self, Align, Color32, RichText};
@@ -102,6 +103,7 @@ enum UpdateConnectionTestPhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum NavigationPage {
     Devices,
+    Files,
     Logs,
     LogFiles,
     Settings,
@@ -205,6 +207,27 @@ pub struct AdbCollectorApp {
     transfers: transfer::TransferManager,
     /// adb path the transfer scheduler was built with; recreated on change.
     transfers_adb_path: String,
+    // Files page state (PRD §5-§6).
+    files_serial: Option<String>,
+    files_run_as_package: Option<String>,
+    files_cwd: remote_fs::RemotePath,
+    files_history: Vec<remote_fs::RemotePath>,
+    files_entries: Vec<remote_fs::RemoteEntry>,
+    files_list_generation: u64,
+    files_op_generation: u64,
+    files_list_loading: bool,
+    files_error: Option<String>,
+    files_selected: HashSet<String>,
+    files_sort: files::FilesSort,
+    files_path_input: String,
+    files_run_as_input: String,
+    files_mkdir_input: String,
+    files_show_mkdir: bool,
+    files_rename_target: Option<String>,
+    files_rename_input: String,
+    files_move_mode: bool,
+    files_delete_pending: Option<crate::models::FilesDeletePending>,
+    files_pending_apk_drop: Option<Vec<PathBuf>>,
     last_device_poll_at: Option<Instant>,
     last_device_snapshot: Vec<DeviceInfo>,
     last_auto_poll_error: Option<String>,
@@ -336,6 +359,26 @@ impl AdbCollectorApp {
             device_metadata_cache: adb::DeviceMetadataCache::default(),
             transfers,
             transfers_adb_path,
+            files_serial: None,
+            files_run_as_package: None,
+            files_cwd: remote_fs::RemotePath::root(),
+            files_history: Vec::new(),
+            files_entries: Vec::new(),
+            files_list_generation: 0,
+            files_op_generation: 0,
+            files_list_loading: false,
+            files_error: None,
+            files_selected: HashSet::new(),
+            files_sort: files::FilesSort::default(),
+            files_path_input: String::new(),
+            files_run_as_input: String::new(),
+            files_mkdir_input: String::new(),
+            files_show_mkdir: false,
+            files_rename_target: None,
+            files_rename_input: String::new(),
+            files_move_mode: false,
+            files_delete_pending: None,
+            files_pending_apk_drop: None,
             last_device_poll_at: None,
             last_device_snapshot: Vec::new(),
             last_auto_poll_error: None,
@@ -423,6 +466,12 @@ impl AdbCollectorApp {
                             }
                         }
                     }
+                }
+                AppEvent::FilesListed { generation, result } => {
+                    self.files_handle_listed(generation, result);
+                }
+                AppEvent::FilesOpFinished { generation, result } => {
+                    self.files_handle_op_finished(generation, result);
                 }
                 AppEvent::LogStorageRefreshed(result) => {
                     self.log_storage_loading = false;
@@ -924,6 +973,7 @@ impl AdbCollectorApp {
 
         for (page, key, icon) in [
             (NavigationPage::Devices, "nav.devices", "◫"),
+            (NavigationPage::Files, "nav.files", "▦"),
             (NavigationPage::Logs, "nav.logs", "≣"),
             (NavigationPage::LogFiles, "nav.log_files", "▤"),
             (NavigationPage::Settings, "nav.settings", "⚙"),
@@ -1149,6 +1199,7 @@ impl AdbCollectorApp {
                     output.content_size.y > output.inner_rect.height() + 0.5;
             }
             NavigationPage::Logs => self.ui_logs_page(ui),
+            NavigationPage::Files => self.ui_files_page(ui),
             NavigationPage::LogFiles => self.ui_log_files_page(ui),
             NavigationPage::Settings => self.ui_settings_page(ui),
         }
@@ -3283,6 +3334,7 @@ impl AdbCollectorApp {
             device_logcat_args: self.config.device_logcat_args.clone(),
             auto_check_updates: self.auto_update_input,
             update_proxy: self.update_proxy_input(),
+            file_favorites: self.config.file_favorites.clone(),
         };
 
         if candidate.adb_path.is_empty() || candidate.log_dir.is_empty() {
@@ -3328,6 +3380,7 @@ impl AdbCollectorApp {
             device_logcat_args: candidate.device_logcat_args.clone(),
             auto_check_updates: candidate.auto_check_updates,
             update_proxy: candidate.update_proxy.clone(),
+            file_favorites: candidate.file_favorites.clone(),
         };
 
         if let Err(err) = config::save_config(&self.app_paths.config_path, &saved) {
@@ -4339,6 +4392,52 @@ impl AdbCollectorApp {
         let payload = payload_probe;
         if payload.is_empty() {
             self.set_error(self.tr("status.drop_no_supported_files"));
+            return;
+        }
+
+        // Dropping onto the Files page uploads into the browsed remote
+        // directory (PRD §6.4); APKs get their install/upload choice dialog
+        // (PRD §6.5).
+        if self.active_page == NavigationPage::Files && self.files_serial.is_some() {
+            if payload.apk_paths.is_empty() {
+                let cwd = self.files_cwd.clone();
+                let serial = self.files_serial.clone().unwrap_or_default();
+                for path in payload.file_paths {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "file".to_owned());
+                    if let Ok(destination) = cwd.join(&name) {
+                        self.transfers.enqueue_push(
+                            serial.clone(),
+                            path,
+                            destination.as_str().to_owned(),
+                        );
+                    }
+                }
+                self.set_info(
+                    self.tr_args("files.dropped_queued", &[("path", cwd.as_str().to_owned())]),
+                );
+            } else {
+                self.files_pending_apk_drop = Some(payload.apk_paths.clone());
+                if !payload.file_paths.is_empty() {
+                    let cwd = self.files_cwd.clone();
+                    let serial = self.files_serial.clone().unwrap_or_default();
+                    for path in payload.file_paths {
+                        let name = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| "file".to_owned());
+                        if let Ok(destination) = cwd.join(&name) {
+                            self.transfers.enqueue_push(
+                                serial.clone(),
+                                path,
+                                destination.as_str().to_owned(),
+                            );
+                        }
+                    }
+                }
+            }
             return;
         }
 

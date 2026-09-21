@@ -15,6 +15,7 @@ pub mod i18n;
 pub mod ime;
 pub mod managed_child;
 pub mod models;
+pub mod remote_fs;
 pub mod scrcpy;
 pub mod task;
 pub mod transfer;
