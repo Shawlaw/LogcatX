@@ -8,7 +8,7 @@ use crate::{
         AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, DropOutcome, ForegroundApp,
         ForegroundAppAction, Screenshot, SharedChild, StatusMessage,
     },
-    scrcpy, updater,
+    scrcpy, transfer, updater,
 };
 mod connection;
 use chrono::{Local, TimeZone};
@@ -62,10 +62,6 @@ impl Default for DroppedPayload {
 impl DroppedPayload {
     fn is_empty(&self) -> bool {
         self.apk_paths.is_empty() && self.file_paths.is_empty()
-    }
-
-    fn total_count(&self) -> usize {
-        self.apk_paths.len() + self.file_paths.len()
     }
 }
 
@@ -205,6 +201,10 @@ pub struct AdbCollectorApp {
     /// older generations are discarded (PRD §18).
     device_discovery_generation: u64,
     device_metadata_cache: adb::DeviceMetadataCache,
+    /// Shared transfer queue owning every push/pull (PRD §10-§13).
+    transfers: transfer::TransferManager,
+    /// adb path the transfer scheduler was built with; recreated on change.
+    transfers_adb_path: String,
     last_device_poll_at: Option<Instant>,
     last_device_snapshot: Vec<DeviceInfo>,
     last_auto_poll_error: Option<String>,
@@ -256,6 +256,8 @@ impl AdbCollectorApp {
             })
             .filter(|info| !info.version.is_empty());
         let update_dismissed = update_cache.is_dismissed();
+        let transfers = transfer::TransferManager::new(&config.adb_path);
+        let transfers_adb_path = config.adb_path.clone();
 
         let mut app = Self {
             adb_path_input: config.adb_path.clone(),
@@ -332,6 +334,8 @@ impl AdbCollectorApp {
             device_poll_in_flight: false,
             device_discovery_generation: 0,
             device_metadata_cache: adb::DeviceMetadataCache::default(),
+            transfers,
+            transfers_adb_path,
             last_device_poll_at: None,
             last_device_snapshot: Vec::new(),
             last_auto_poll_error: None,
@@ -544,10 +548,8 @@ impl AdbCollectorApp {
                     let device_label = self.device_identity_label(&serial);
                     match result {
                         Ok(outcome) => {
-                            // 单个文件在运行消息中显示完整路径；批量仅摘要，明细见应用日志。
-                            let message = if outcome.installed.len() == 1
-                                && outcome.pushed.is_empty()
-                            {
+                            // 单个 APK 在运行消息中显示完整路径；批量仅摘要，明细见应用日志。
+                            let message = if outcome.installed.len() == 1 {
                                 self.tr_args(
                                     "status.drop_installed_one",
                                     &[
@@ -555,23 +557,12 @@ impl AdbCollectorApp {
                                         ("device", device_label),
                                     ],
                                 )
-                            } else if outcome.pushed.len() == 1 && outcome.installed.is_empty() {
-                                let (path, destination) = outcome.pushed[0].clone();
-                                self.tr_args(
-                                    "status.drop_pushed_one",
-                                    &[
-                                        ("path", path),
-                                        ("destination", destination),
-                                        ("device", device_label),
-                                    ],
-                                )
                             } else {
                                 self.tr_args(
                                     "status.drop_finished_multi",
                                     &[
-                                        ("count", outcome.success_count().to_string()),
+                                        ("count", outcome.installed.len().to_string()),
                                         ("installed", outcome.installed.len().to_string()),
-                                        ("pushed", outcome.pushed.len().to_string()),
                                         ("device", device_label),
                                     ],
                                 )
@@ -4331,12 +4322,21 @@ impl AdbCollectorApp {
         if dropped_paths.is_empty() {
             return;
         }
-        if self.drop_task_in_progress || self.pending_drop_payload.is_some() {
+        // Only the sequential APK-install path needs the busy guard; file
+        // drops enqueue onto the transfer queue immediately.
+        let payload_probe = classify_dropped_paths(dropped_paths.clone());
+        if payload_probe.is_empty() {
+            self.set_error(self.tr("status.drop_no_supported_files"));
+            return;
+        }
+        if (self.drop_task_in_progress && !payload_probe.apk_paths.is_empty())
+            || self.pending_drop_payload.is_some()
+        {
             self.set_error(self.tr("status.drop_busy"));
             return;
         }
 
-        let payload = classify_dropped_paths(dropped_paths);
+        let payload = payload_probe;
         if payload.is_empty() {
             self.set_error(self.tr("status.drop_no_supported_files"));
             return;
@@ -4405,49 +4405,88 @@ impl AdbCollectorApp {
         }
     }
 
+    /// The transfer scheduler captures the adb path at creation; rebuild it
+    /// when settings change the path.
+    fn sync_transfer_manager(&mut self) {
+        if self.config.adb_path != self.transfers_adb_path {
+            log::info!(
+                "Rebuilding transfer manager for new adb path {}",
+                fs_utils::display_path(std::path::Path::new(&self.config.adb_path))
+            );
+            self.transfers.shutdown();
+            self.transfers = transfer::TransferManager::new(&self.config.adb_path);
+            self.transfers_adb_path = self.config.adb_path.clone();
+        }
+    }
+
     fn start_drop_task(&mut self, device_id: String, payload: DroppedPayload) {
-        if payload.is_empty() || self.drop_task_in_progress {
+        if payload.is_empty() {
             return;
         }
-
-        self.drop_task_in_progress = true;
-        let device_label = self.device_identity_label(&device_id);
-        // 单个文件从一开始就显示完整路径；批量保持计数摘要。
-        let info_text = if payload.total_count() == 1 {
-            let path = payload
-                .apk_paths
-                .first()
-                .or_else(|| payload.file_paths.first())
-                .map(|path| path.display().to_string())
-                .unwrap_or_default();
-            self.tr_args(
-                "status.drop_processing_one",
-                &[("path", path), ("serial", device_label)],
-            )
-        } else {
-            self.tr_args(
-                "status.drop_processing",
-                &[
-                    ("count", payload.total_count().to_string()),
-                    ("serial", device_label),
-                ],
-            )
-        };
-        self.set_info(info_text);
-
-        let tx = self.tx.clone();
-        let adb_path = self.config.adb_path.clone();
         let Some(transport_serial) = self.device_primary_transport_serial(&device_id) else {
-            self.drop_task_in_progress = false;
             return;
         };
-        thread::spawn(move || {
-            let result = process_dropped_payload(&adb_path, &transport_serial, payload);
-            let _ = tx.send(AppEvent::DeviceDropFinished {
-                serial: device_id,
-                result,
+        let device_label = self.device_identity_label(&device_id);
+
+        // File transfers (and APKs being uploaded as plain files) ride the
+        // shared queue (PRD §6.4): per-file tasks with progress, cancel and
+        // retry — no second push implementation.
+        let upload_paths: Vec<&PathBuf> = if payload.install_apks {
+            payload.file_paths.iter().collect()
+        } else {
+            payload
+                .apk_paths
+                .iter()
+                .chain(payload.file_paths.iter())
+                .collect()
+        };
+        let mut queued = 0usize;
+        for path in upload_paths {
+            match build_device_push_destination(path) {
+                Ok(destination) => {
+                    self.transfers.enqueue_push(
+                        transport_serial.clone(),
+                        path.clone(),
+                        destination,
+                    );
+                    queued += 1;
+                }
+                Err(err) => {
+                    log::warn!("Skipping dropped file with unusable name: {err}");
+                }
+            }
+        }
+
+        // APK installation stays sequential until InstallTask lands on the
+        // TaskManager (PRD §20 allows staged migration).
+        if payload.install_apks && !payload.apk_paths.is_empty() {
+            if self.drop_task_in_progress {
+                return;
+            }
+            self.drop_task_in_progress = true;
+            self.set_info(self.tr_args(
+                "status.drop_processing",
+                &[
+                    ("count", payload.apk_paths.len().to_string()),
+                    ("serial", device_label),
+                ],
+            ));
+            let tx = self.tx.clone();
+            let adb_path = self.config.adb_path.clone();
+            let apk_paths = payload.apk_paths.clone();
+            thread::spawn(move || {
+                let result = install_dropped_apks(&adb_path, &transport_serial, &apk_paths);
+                let _ = tx.send(AppEvent::DeviceDropFinished {
+                    serial: device_id,
+                    result,
+                });
             });
-        });
+        } else if queued > 0 {
+            self.set_info(self.tr_args(
+                "status.drop_queued",
+                &[("count", queued.to_string()), ("serial", device_label)],
+            ));
+        }
     }
 
     fn start_collection(&mut self, device_id: String) {
@@ -5400,6 +5439,7 @@ impl eframe::App for AdbCollectorApp {
         crate::e2e::capture_frame(ctx);
         self.ime_enter_guard.frame(ctx);
         apply_visual_style(ctx);
+        self.sync_transfer_manager();
         self.handle_events();
         self.poll_update_download_progress();
         if self.exit_after_update_apply {
@@ -5408,6 +5448,11 @@ impl eframe::App for AdbCollectorApp {
         self.poll_devices_if_due();
         self.handle_dropped_files(ctx);
         self.maybe_automatic_update_check(ctx);
+        // Keep frames coming while the transfer queue drains so progress
+        // stays live without user input (PRD §12).
+        if self.transfers.has_active() {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
 
         egui::SidePanel::left("sidebar_panel")
             .exact_width(248.0)
@@ -5528,71 +5573,28 @@ fn build_device_push_destination(source_path: &Path) -> Result<String, String> {
     Ok(format!("{DEFAULT_DEVICE_DROP_DIR}/{file_name}"))
 }
 
-fn push_dropped_file(adb_path: &str, serial: &str, path: &Path) -> Result<String, String> {
-    let remote_path = build_device_push_destination(path)?;
-    adb::push_file(adb_path, serial, path, &remote_path).map(|_| remote_path)
-}
-
-fn process_dropped_payload(
+/// Install dropped APKs sequentially; file pushes live in TransferManager.
+fn install_dropped_apks(
     adb_path: &str,
     serial: &str,
-    payload: DroppedPayload,
+    apk_paths: &[PathBuf],
 ) -> Result<DropOutcome, String> {
     let mut outcome = DropOutcome::default();
     let mut failures = Vec::new();
-    log::info!(
-        "Processing {} dropped file(s) on {serial} (install APKs: {})",
-        payload.total_count(),
-        payload.install_apks
-    );
+    log::info!("Installing {} dropped APK(s) on {serial}", apk_paths.len());
 
-    if payload.install_apks {
-        for apk_path in payload.apk_paths {
-            match adb::install_apk(adb_path, serial, &apk_path) {
-                Ok(_) => {
-                    log::info!("Installed {} on {serial}", apk_path.display());
-                    outcome.installed.push(apk_path.display().to_string());
-                }
-                Err(err) => {
-                    failures.push(err.clone());
-                    log::warn!(
-                        "Failed to install {} on {serial}: {err}",
-                        apk_path.display()
-                    );
-                }
-            }
-        }
-    } else {
-        for apk_path in &payload.apk_paths {
-            match push_dropped_file(adb_path, serial, apk_path) {
-                Ok(remote_path) => {
-                    log::info!("Pushed {} to {remote_path} on {serial}", apk_path.display());
-                    outcome
-                        .pushed
-                        .push((apk_path.display().to_string(), remote_path));
-                }
-                Err(err) => {
-                    failures.push(err.clone());
-                    log::warn!("Failed to push {} on {serial}: {err}", apk_path.display());
-                }
-            }
-        }
-    }
-
-    for file_path in &payload.file_paths {
-        match push_dropped_file(adb_path, serial, file_path) {
-            Ok(remote_path) => {
-                log::info!(
-                    "Pushed {} to {remote_path} on {serial}",
-                    file_path.display()
-                );
-                outcome
-                    .pushed
-                    .push((file_path.display().to_string(), remote_path));
+    for apk_path in apk_paths {
+        match adb::install_apk(adb_path, serial, apk_path) {
+            Ok(_) => {
+                log::info!("Installed {} on {serial}", apk_path.display());
+                outcome.installed.push(apk_path.display().to_string());
             }
             Err(err) => {
                 failures.push(err.clone());
-                log::warn!("Failed to push {} on {serial}: {err}", file_path.display());
+                log::warn!(
+                    "Failed to install {} on {serial}: {err}",
+                    apk_path.display()
+                );
             }
         }
     }
@@ -5602,23 +5604,16 @@ fn process_dropped_payload(
     } else {
         Err(format!(
             "{}\n{}",
-            format_drop_processing_summary(
-                outcome.installed.len(),
-                outcome.pushed.len(),
-                failures.len()
-            ),
+            format_drop_processing_summary(outcome.installed.len(), failures.len()),
             failures.join("\n")
         ))
     }
 }
 
-fn format_drop_processing_summary(installed: usize, pushed: usize, failed: usize) -> String {
+fn format_drop_processing_summary(installed: usize, failed: usize) -> String {
     let mut parts = Vec::new();
     if installed > 0 {
         parts.push(format!("Installed {installed} APK(s)"));
-    }
-    if pushed > 0 {
-        parts.push(format!("Transferred {pushed} file(s)"));
     }
     if failed > 0 {
         parts.push(format!("Failed {failed} item(s)"));
@@ -5691,8 +5686,8 @@ mod tests {
         DEFAULT_NEW_DISPLAY_DPI, DEFAULT_NEW_DISPLAY_HEIGHT, DEFAULT_NEW_DISPLAY_WIDTH,
         SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT, build_device_push_destination,
         classify_dropped_paths, content_view_width, device_transport_rank,
-        filter_installed_packages, format_device_model_name, is_current_cleanup_preview_response,
-        pick_primary_device_info, process_dropped_payload, settings_error_scroll_area,
+        filter_installed_packages, format_device_model_name, install_dropped_apks,
+        is_current_cleanup_preview_response, pick_primary_device_info, settings_error_scroll_area,
         settings_path_input_width, should_reveal_proxy_settings_content,
     };
     use crate::models::DeviceInfo;
@@ -5718,7 +5713,7 @@ mod tests {
     }
 
     #[test]
-    fn process_dropped_payload_installs_or_pushes_apks_by_mode() {
+    fn install_dropped_apks_installs_and_reports() {
         let dir = tempfile::tempdir().unwrap();
         let apk = dir.path().join("re-download.apk.1");
         std::fs::write(&apk, b"placeholder").unwrap();
@@ -5727,22 +5722,18 @@ mod tests {
         let payload = classify_dropped_paths(vec![apk.clone()]);
         assert_eq!(payload.apk_paths.len(), 1);
         assert!(payload.install_apks);
-        let outcome = process_dropped_payload(&fixture.adb, "FIXTURE_USB_A", payload).unwrap();
-        assert_eq!(outcome.installed.len(), 1);
-        assert_eq!(outcome.pushed.len(), 0);
-        assert!(outcome.installed[0].ends_with("re-download.apk.1"));
 
-        let mut download = classify_dropped_paths(vec![apk]);
-        download.install_apks = false;
-        let outcome = process_dropped_payload(&fixture.adb, "FIXTURE_USB_A", download).unwrap();
-        assert_eq!(outcome.installed.len(), 0);
-        assert_eq!(outcome.pushed.len(), 1);
-        assert!(outcome.pushed[0].0.ends_with("re-download.apk.1"));
-        assert_eq!(outcome.pushed[0].1, "/sdcard/Download/re-download.apk.1");
+        // File pushes live in TransferManager now; only installs run here.
+        let outcome =
+            install_dropped_apks(&fixture.adb, "FIXTURE_USB_A", &payload.apk_paths).unwrap();
+        assert_eq!(outcome.installed.len(), 1);
+        assert!(outcome.installed[0].ends_with("re-download.apk.1"));
 
         let log = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
         assert!(log.contains("install -r"));
-        assert!(log.contains("/sdcard/Download/re-download.apk.1"));
+        // File pushes now ride the transfer queue; the legacy direct push
+        // to /sdcard/Download must not appear here anymore.
+        assert!(!log.contains("/sdcard/Download/re-download.apk.1"));
     }
 
     #[test]

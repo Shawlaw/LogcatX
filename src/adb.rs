@@ -21,8 +21,6 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_RESTART_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
-/// Interim budget until transfers move to TransferManager (PRD §15).
-const PUSH_TIMEOUT: Duration = Duration::from_secs(1800);
 /// dumpsys activity/window dumps can be large; give them a raised cap.
 const DUMPSYS_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
 /// Screen captures are PNG payloads; keep generous headroom for tall screens.
@@ -487,51 +485,6 @@ pub fn install_apk(adb_path: &str, serial: &str, apk_path: &Path) -> Result<Stri
         ))
     }
 }
-
-pub fn push_file(
-    adb_path: &str,
-    serial: &str,
-    source_path: &Path,
-    remote_path: &str,
-) -> Result<String, String> {
-    let output = AdbExecutor::new(adb_path)
-        .execute_with_timeout(
-            &[
-                "-s",
-                serial,
-                "push",
-                &source_path.to_string_lossy(),
-                remote_path,
-            ],
-            PUSH_TIMEOUT,
-        )
-        .map_err(|err| {
-            format!(
-                "Failed to run `{adb_path} -s {serial} push {} {remote_path}`: {err}",
-                source_path.display()
-            )
-        })?;
-    let output = ShellOutcome::from(output);
-
-    let combined = combined_output(&output);
-    if output.success {
-        if combined.is_empty() {
-            Ok(format!(
-                "Pushed {} to {remote_path}.",
-                source_path.display()
-            ))
-        } else {
-            Ok(combined)
-        }
-    } else {
-        Err(format!(
-            "Failed to push {} to {remote_path}: {}",
-            source_path.display(),
-            combined.if_empty("unknown error")
-        ))
-    }
-}
-
 pub fn spawn_logcat(
     adb_path: &str,
     serial: &str,

@@ -161,20 +161,12 @@ fn execute_action(action: &str) -> Result<ActionOutcome, String> {
             Ok(ActionOutcome::Continue)
         }
         "stream" => {
-            let mut parts = payload.splitn(3, ':');
-            let interval: u64 = parts
-                .next()
-                .and_then(|v| v.parse().ok())
-                .ok_or_else(|| format!("stream needs interval_ms:count:text, got '{payload}'"))?;
-            let count: u64 = parts
-                .next()
-                .and_then(|v| v.parse().ok())
-                .ok_or_else(|| format!("stream needs interval_ms:count:text, got '{payload}'"))?;
-            let text = parts.next().unwrap_or("");
-            for _ in 0..count {
-                sleep(Duration::from_millis(interval));
-                write_stdout(&format!("{}\n", unescape(text)));
-            }
+            stream_output(payload, StreamTarget::Stdout)?;
+            Ok(ActionOutcome::Continue)
+        }
+        // stderr variant used by transfer-progress simulations
+        "estream" => {
+            stream_output(payload, StreamTarget::Stderr)?;
             Ok(ActionOutcome::Continue)
         }
         "exit" => {
@@ -188,14 +180,53 @@ fn execute_action(action: &str) -> Result<ActionOutcome, String> {
 }
 
 fn write_stdout(text: &str) {
-    let stdout = std::io::stdout();
-    let mut lock = stdout.lock();
+    write_stream(text, StreamTarget::Stdout);
+}
+
+#[derive(Clone, Copy)]
+enum StreamTarget {
+    Stdout,
+    Stderr,
+}
+
+/// Emit `text` every interval, count times (slow output / cancel tests).
+fn stream_output(payload: &str, target: StreamTarget) -> Result<(), String> {
+    let mut parts = payload.splitn(3, ':');
+    let interval: u64 = parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("stream needs interval_ms:count:text, got '{payload}'"))?;
+    let count: u64 = parts
+        .next()
+        .and_then(|v| v.parse().ok())
+        .ok_or_else(|| format!("stream needs interval_ms:count:text, got '{payload}'"))?;
+    let text = parts.next().unwrap_or("");
+    for _ in 0..count {
+        sleep(Duration::from_millis(interval));
+        write_stream(&format!("{}\n", unescape(text)), target);
+    }
+    Ok(())
+}
+
+fn write_stream(text: &str, target: StreamTarget) {
+    let bytes = text.as_bytes();
+    let written = match target {
+        StreamTarget::Stdout => {
+            let stdout = std::io::stdout();
+            let mut lock = stdout.lock();
+            lock.write_all(bytes).and_then(|_| lock.flush())
+        }
+        StreamTarget::Stderr => {
+            let stderr = std::io::stderr();
+            let mut lock = stderr.lock();
+            lock.write_all(bytes).and_then(|_| lock.flush())
+        }
+    };
     // The double must keep going even if the parent stops reading, so a
     // broken pipe aborts the process instead of panicking on the lock.
-    if lock.write_all(text.as_bytes()).is_err() {
+    if written.is_err() {
         exit(0);
     }
-    let _ = lock.flush();
 }
 
 /// Emit `total` bytes of `x` without allocating the whole buffer at once.

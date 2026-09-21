@@ -17,6 +17,7 @@ pub mod managed_child;
 pub mod models;
 pub mod scrcpy;
 pub mod task;
+pub mod transfer;
 pub mod updater;
 pub mod wireless;
 
