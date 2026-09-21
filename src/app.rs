@@ -1443,7 +1443,8 @@ impl AdbCollectorApp {
                                                 }
                                                 let apk_auto_install_on =
                                                     self.is_apk_auto_install_device(&device_id);
-                                                let apk_auto_install_label = if apk_auto_install_on {
+                                                let apk_auto_install_label = if apk_auto_install_on
+                                                {
                                                     apk_auto_install_undo_text.clone()
                                                 } else {
                                                     apk_auto_install_text.clone()
@@ -1452,8 +1453,10 @@ impl AdbCollectorApp {
                                                     .add(rounded_secondary(apk_auto_install_label))
                                                     .clicked()
                                                 {
-                                                    toggle_apk_auto_install =
-                                                        Some((device_id.clone(), !apk_auto_install_on));
+                                                    toggle_apk_auto_install = Some((
+                                                        device_id.clone(),
+                                                        !apk_auto_install_on,
+                                                    ));
                                                     ui.close_menu();
                                                 }
                                                 if ui
@@ -4350,7 +4353,9 @@ impl AdbCollectorApp {
         let previous = self.config.apk_auto_install_devices.clone();
         if enabled {
             if !previous.iter().any(|value| value == identity) {
-                self.config.apk_auto_install_devices.push(identity.to_owned());
+                self.config
+                    .apk_auto_install_devices
+                    .push(identity.to_owned());
             }
         } else {
             self.config
@@ -5513,7 +5518,10 @@ fn process_dropped_payload(
                 }
                 Err(err) => {
                     failures.push(err.clone());
-                    log::warn!("Failed to install {} on {serial}: {err}", apk_path.display());
+                    log::warn!(
+                        "Failed to install {} on {serial}: {err}",
+                        apk_path.display()
+                    );
                 }
             }
         }
@@ -5528,10 +5536,7 @@ fn process_dropped_payload(
                 }
                 Err(err) => {
                     failures.push(err.clone());
-                    log::warn!(
-                        "Failed to push {} on {serial}: {err}",
-                        apk_path.display()
-                    );
+                    log::warn!("Failed to push {} on {serial}: {err}", apk_path.display());
                 }
             }
         }
@@ -5540,7 +5545,10 @@ fn process_dropped_payload(
     for file_path in &payload.file_paths {
         match push_dropped_file(adb_path, serial, file_path) {
             Ok(remote_path) => {
-                log::info!("Pushed {} to {remote_path} on {serial}", file_path.display());
+                log::info!(
+                    "Pushed {} to {remote_path} on {serial}",
+                    file_path.display()
+                );
                 outcome
                     .pushed
                     .push((file_path.display().to_string(), remote_path));

@@ -5,6 +5,7 @@
 
 mod adb;
 mod app;
+mod build_info;
 mod config;
 #[cfg(feature = "e2e")]
 mod e2e;
@@ -21,6 +22,9 @@ const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 820.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [1100.0, 720.0];
 
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|arg| arg == "--version") {
+        print_version_and_exit();
+    }
     let console_mode = cfg!(feature = "console") || std::env::args().any(|arg| arg == "--console");
     let paths = config::resolve_app_paths().unwrap_or_else(|err| fatal_error(&err));
 
@@ -53,6 +57,14 @@ fn main() -> eframe::Result<()> {
     log::info!(
         "========== LogcatX v{} startup ==========",
         env!("CARGO_PKG_VERSION")
+    );
+    log::info!(
+        "version={} commit={} full_commit={} dirty={} built={}",
+        build_info::version(),
+        build_info::display_commit(),
+        build_info::full_commit(),
+        build_info::commit_dirty(),
+        build_info::build_timestamp()
     );
     log::info!("Portable mode: {}", paths.portable_mode);
     log::info!(
@@ -233,4 +245,22 @@ fn fatal_error(message: &str) -> ! {
         .set_level(rfd::MessageLevel::Error)
         .show();
     std::process::exit(1);
+}
+
+fn print_version_and_exit() -> ! {
+    // GUI-subsystem processes have no console by default; attach to the
+    // parent's console so `LogcatX.exe --version` is visible when run from a
+    // terminal. Piped output (`--version > file`) works without this.
+    #[cfg(target_os = "windows")]
+    attach_parent_console();
+    println!("{}", build_info::summary());
+    std::process::exit(0);
+}
+
+#[cfg(target_os = "windows")]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
+    }
 }

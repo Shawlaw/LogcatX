@@ -123,7 +123,8 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
         normalized.wireless_connections,
         &normalized.recent_connections,
     );
-    normalized.apk_auto_install_devices = normalize_serial_list(normalized.apk_auto_install_devices);
+    normalized.apk_auto_install_devices =
+        normalize_serial_list(normalized.apk_auto_install_devices);
     normalized.device_logcat_args = normalize_logcat_args(normalized.device_logcat_args);
     normalized.update_proxy = normalize_update_proxy(normalized.update_proxy);
 
