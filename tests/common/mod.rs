@@ -7,6 +7,10 @@
 //! let output = common::run("devices => out:List of devices attached\\n...", &["devices"]);
 //! ```
 
+// Each test binary compiles this module independently and uses a different
+// subset of the helpers.
+#![allow(dead_code)]
+
 use std::{
     path::PathBuf,
     process::{Child, Command, Output},

@@ -201,6 +201,10 @@ pub struct AdbCollectorApp {
     foreground_task_in_progress: bool,
     devices_page_has_vertical_scroll: bool,
     device_poll_in_flight: bool,
+    /// Generation of the newest device discovery request; responses from
+    /// older generations are discarded (PRD §18).
+    device_discovery_generation: u64,
+    device_metadata_cache: adb::DeviceMetadataCache,
     last_device_poll_at: Option<Instant>,
     last_device_snapshot: Vec<DeviceInfo>,
     last_auto_poll_error: Option<String>,
@@ -326,6 +330,8 @@ impl AdbCollectorApp {
             foreground_task_in_progress: false,
             devices_page_has_vertical_scroll: false,
             device_poll_in_flight: false,
+            device_discovery_generation: 0,
+            device_metadata_cache: adb::DeviceMetadataCache::default(),
             last_device_poll_at: None,
             last_device_snapshot: Vec::new(),
             last_auto_poll_error: None,
@@ -368,19 +374,36 @@ impl AdbCollectorApp {
     fn handle_events(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
-                AppEvent::DevicesRefreshed(result) => match result {
-                    Ok(devices) => {
-                        self.last_device_snapshot = devices.clone();
-                        self.last_auto_poll_error = None;
-                        self.merge_devices(devices);
-                        self.set_info(self.tr("status.device_list_refreshed"));
+                AppEvent::DevicesRefreshed { generation, result } => {
+                    // A stale refresh must not overwrite newer state (PRD §18).
+                    if generation != self.device_discovery_generation {
+                        log::debug!("Discarding stale device refresh #{generation}");
+                        continue;
                     }
-                    Err(err) => self.set_error(err),
-                },
-                AppEvent::DevicesPolled(result) => {
+                    match result {
+                        Ok(outcome) => {
+                            let devices = outcome.devices;
+                            self.device_metadata_cache = outcome.metadata_cache;
+                            self.prune_metadata_cache(&devices);
+                            self.last_device_snapshot = devices.clone();
+                            self.last_auto_poll_error = None;
+                            self.merge_devices(devices);
+                            self.set_info(self.tr("status.device_list_refreshed"));
+                        }
+                        Err(err) => self.set_error(err),
+                    }
+                }
+                AppEvent::DevicesPolled { generation, result } => {
+                    if generation != self.device_discovery_generation {
+                        log::debug!("Discarding stale device poll #{generation}");
+                        continue;
+                    }
                     self.device_poll_in_flight = false;
                     match result {
-                        Ok(devices) => {
+                        Ok(outcome) => {
+                            let devices = outcome.devices;
+                            self.device_metadata_cache = outcome.metadata_cache;
+                            self.prune_metadata_cache(&devices);
                             let changed = devices != self.last_device_snapshot;
                             self.last_device_snapshot = devices.clone();
                             self.last_auto_poll_error = None;
@@ -3428,13 +3451,17 @@ impl AdbCollectorApp {
     }
 
     fn refresh_devices(&mut self) {
+        self.device_discovery_generation += 1;
+        let generation = self.device_discovery_generation;
+        self.last_device_poll_at = Some(Instant::now());
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
-        self.last_device_poll_at = Some(Instant::now());
+        // Manual refresh re-reads static metadata (PRD §17).
+        let cache = self.device_metadata_cache.clone();
 
         thread::spawn(move || {
-            let result = adb::list_devices(&adb_path);
-            let _ = tx.send(AppEvent::DevicesRefreshed(result));
+            let result = adb::list_devices(&adb_path, cache, true);
+            let _ = tx.send(AppEvent::DevicesRefreshed { generation, result });
         });
     }
 
@@ -3443,15 +3470,25 @@ impl AdbCollectorApp {
             return;
         }
 
+        self.device_discovery_generation += 1;
+        let generation = self.device_discovery_generation;
         self.device_poll_in_flight = true;
         self.last_device_poll_at = Some(Instant::now());
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
+        // Periodic polls reuse cached static metadata (PRD §17): no getprop
+        // storm per device every couple of seconds.
+        let cache = self.device_metadata_cache.clone();
 
         thread::spawn(move || {
-            let result = adb::list_devices(&adb_path);
-            let _ = tx.send(AppEvent::DevicesPolled(result));
+            let result = adb::list_devices(&adb_path, cache, false);
+            let _ = tx.send(AppEvent::DevicesPolled { generation, result });
         });
+    }
+
+    fn prune_metadata_cache(&mut self, devices: &[DeviceInfo]) {
+        let connected: Vec<String> = devices.iter().map(|d| d.serial.clone()).collect();
+        self.device_metadata_cache.retain_serials(&connected);
     }
 
     fn poll_devices_if_due(&mut self) {

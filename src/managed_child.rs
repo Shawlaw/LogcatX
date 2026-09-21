@@ -37,6 +37,10 @@ impl ManagedChild {
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
+
+    pub fn wait(&mut self) -> io::Result<ExitStatus> {
+        self.child.wait()
+    }
 }
 
 impl fmt::Debug for ManagedChild {

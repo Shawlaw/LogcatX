@@ -3,29 +3,16 @@
 use std::{
     collections::HashSet,
     fmt,
-    io::{Read, Seek, SeekFrom, Write},
     net::{IpAddr, SocketAddr},
-    process::{Output, Stdio},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-    thread,
     time::{Duration, Instant},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-#[derive(Clone, Default, Debug)]
-pub struct CancelToken(Arc<AtomicBool>);
+use crate::adb_executor::{AdbError, AdbExecutor, ExecOptions};
 
-impl CancelToken {
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Relaxed);
-    }
-    pub fn cancelled(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
-    }
-}
+// Process management lives in AdbExecutor (PRD §21); wireless reuses the
+// shared cooperative cancellation type and re-exports it for existing users.
+pub use crate::adb_executor::CancelToken;
 
 #[derive(Debug)]
 pub struct Failure {
@@ -38,6 +25,14 @@ impl Failure {
         Self {
             key,
             detail: detail.to_string(),
+        }
+    }
+
+    pub(crate) fn from_adb_error(error: AdbError) -> Self {
+        match error {
+            AdbError::Cancelled { .. } => Self::new("connect.error.cancelled", ""),
+            AdbError::Timeout { .. } => Self::new("connect.error.timeout", ""),
+            other => Self::new("connect.error.command", other.to_string()),
         }
     }
 }
@@ -228,93 +223,22 @@ pub fn parse_mdns(output: &str) -> Vec<Service> {
     result
 }
 
-/// Use files for output so even a badly behaved child cannot block on a full
-/// pipe or leave reader threads hanging after the process deadline expires.
-pub fn run_adb(
-    adb_path: &str,
-    args: &[&str],
-    input: Option<&str>,
-    timeout: Duration,
-    cancel: &CancelToken,
-) -> Result<Output, Failure> {
-    if cancel.cancelled() {
-        return Err(Failure::new("connect.error.cancelled", ""));
-    }
-    let io_error = |e| Failure::new("connect.error.command", e);
-    let mut stdout = tempfile::tempfile().map_err(io_error)?;
-    let mut stderr = tempfile::tempfile().map_err(io_error)?;
-    let mut command = crate::adb::adb_command(adb_path);
-    command
-        .args(args)
-        .stdout(Stdio::from(stdout.try_clone().map_err(io_error)?))
-        .stderr(Stdio::from(stderr.try_clone().map_err(io_error)?))
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        });
-    let mut child = command.spawn().map_err(io_error)?;
-    if let Some(input) = input {
-        let result = child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(format!("{input}\n").as_bytes());
-        if let Err(err) = result {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(io_error(err));
-        }
-    }
-    let started = Instant::now();
-    let status = loop {
-        if cancel.cancelled() || started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(if cancel.cancelled() {
-                Failure::new("connect.error.cancelled", "")
-            } else {
-                Failure::new("connect.error.timeout", "")
-            });
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => thread::sleep(Duration::from_millis(25)),
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(io_error(err));
-            }
-        }
-    };
-    let read = |file: &mut std::fs::File| -> Result<Vec<u8>, Failure> {
-        file.seek(SeekFrom::Start(0)).map_err(io_error)?;
-        let mut bytes = Vec::new();
-        file.take(64 * 1024)
-            .read_to_end(&mut bytes)
-            .map_err(io_error)?;
-        Ok(bytes)
-    };
-    Ok(Output {
-        status,
-        stdout: read(&mut stdout)?,
-        stderr: read(&mut stderr)?,
-    })
-}
-
 #[cfg(test)]
 pub(crate) mod tests;
 
 pub fn discover(adb_path: &str, cancel: &CancelToken) -> Result<Vec<Service>, Failure> {
-    let output = run_adb(
-        adb_path,
-        &["mdns", "services"],
-        None,
-        Duration::from_secs(5),
-        cancel,
-    )?;
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_options(
+            &["mdns", "services"],
+            ExecOptions {
+                timeout: Some(Duration::from_secs(5)),
+                cancel: Some(cancel.clone()),
+                ..Default::default()
+            },
+        )
+        .map_err(Failure::from_adb_error)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if !output.status.success() || !stdout.contains("List of discovered mdns services") {
+    if !output.success() || !stdout.contains("List of discovered mdns services") {
         return Err(Failure::new(
             "connect.error.discovery",
             String::from_utf8_lossy(&output.stderr),
@@ -326,15 +250,19 @@ pub fn discover(adb_path: &str, cancel: &CancelToken) -> Result<Vec<Service>, Fa
 pub fn pair(adb_path: &str, target: &str, code: &str, cancel: &CancelToken) -> Result<(), Failure> {
     let endpoint = parse_endpoint(target, true).map_err(|key| Failure::new(key, ""))?;
     let code = parse_pairing_code(code).map_err(|key| Failure::new(key, ""))?;
-    let output = run_adb(
-        adb_path,
-        &["pair", &endpoint.to_string()],
-        Some(&code),
-        Duration::from_secs(20),
-        cancel,
-    )?;
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_options(
+            &["pair", &endpoint.to_string()],
+            ExecOptions {
+                timeout: Some(Duration::from_secs(20)),
+                cancel: Some(cancel.clone()),
+                stdin_line: Some(code),
+                ..Default::default()
+            },
+        )
+        .map_err(Failure::from_adb_error)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    if output.status.success()
+    if output.success()
         && stdout
             .to_ascii_lowercase()
             .contains("successfully paired to")

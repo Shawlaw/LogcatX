@@ -412,25 +412,31 @@ fn cancelled_automatic_scan_callback_updates_message_without_auto_connecting() {
 #[test]
 fn adb_failures_keep_localization_keys_and_raw_diagnostics() {
     let fixture = Fixture::new("mode=hang");
-    let timeout = wireless::run_adb(
-        &fixture.adb,
-        &["connect", "127.0.0.1:5555"],
-        None,
-        Duration::from_millis(150),
-        &CancelToken::default(),
-    )
-    .unwrap_err();
+    let timeout = crate::adb_executor::AdbExecutor::new(&fixture.adb)
+        .execute_with_options(
+            &["connect", "127.0.0.1:5555"],
+            crate::adb_executor::ExecOptions {
+                timeout: Some(Duration::from_millis(150)),
+                cancel: Some(CancelToken::new()),
+                ..Default::default()
+            },
+        )
+        .map_err(wireless::Failure::from_adb_error)
+        .unwrap_err();
     assert_eq!(timeout.key, "connect.error.timeout");
-    let cancel = CancelToken::default();
+    let cancel = CancelToken::new();
     cancel.cancel();
-    let cancelled = wireless::run_adb(
-        &fixture.adb,
-        &["connect", "127.0.0.1:5555"],
-        None,
-        Duration::from_secs(1),
-        &cancel,
-    )
-    .unwrap_err();
+    let cancelled = crate::adb_executor::AdbExecutor::new(&fixture.adb)
+        .execute_with_options(
+            &["connect", "127.0.0.1:5555"],
+            crate::adb_executor::ExecOptions {
+                timeout: Some(Duration::from_secs(1)),
+                cancel: Some(cancel),
+                ..Default::default()
+            },
+        )
+        .map_err(wireless::Failure::from_adb_error)
+        .unwrap_err();
     assert_eq!(cancelled.key, "connect.error.cancelled");
     for language in ["zh-CN", "en"] {
         let i18n = I18n::new(language);

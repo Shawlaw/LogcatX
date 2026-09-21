@@ -1,12 +1,49 @@
 use crate::{
+    adb_executor::{
+        AdbError, AdbExecutor, AdbOutput, DEFAULT_STDOUT_LIMIT as SHELL_STDOUT_LIMIT, ExecOptions,
+    },
     managed_child::ManagedChild,
     models::{DeviceInfo, ForegroundApp, Screenshot},
 };
 use std::{
     fs::File,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::Stdio,
+    time::Duration,
 };
+
+/// Timeout budget per adb operation class (PRD §15).
+const DEVICES_TIMEOUT: Duration = Duration::from_secs(10);
+const SHELL_TIMEOUT: Duration = Duration::from_secs(10);
+const DUMPSYS_TIMEOUT: Duration = Duration::from_secs(15);
+const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVER_RESTART_TIMEOUT: Duration = Duration::from_secs(30);
+const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+/// Interim budget until transfers move to TransferManager (PRD §15).
+const PUSH_TIMEOUT: Duration = Duration::from_secs(1800);
+/// dumpsys activity/window dumps can be large; give them a raised cap.
+const DUMPSYS_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
+/// Screen captures are PNG payloads; keep generous headroom for tall screens.
+const SCREENSHOT_STDOUT_LIMIT: usize = 32 * 1024 * 1024;
+
+/// A completed adb command as seen by the parsing helpers.
+struct ShellOutcome {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+impl From<AdbOutput> for ShellOutcome {
+    fn from(output: AdbOutput) -> Self {
+        Self {
+            success: output.success(),
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }
+    }
+}
 
 pub fn validate_adb_path(adb_path: &str) -> Result<(), String> {
     let trimmed = adb_path.trim();
@@ -14,12 +51,11 @@ pub fn validate_adb_path(adb_path: &str) -> Result<(), String> {
         return Err("ADB executable path cannot be empty".to_owned());
     }
 
-    let output = adb_command(trimmed)
-        .arg("version")
-        .output()
+    let output = AdbExecutor::new(trimmed)
+        .execute_with_timeout(&["version"], SHELL_TIMEOUT)
         .map_err(|err| format!("Failed to execute `{trimmed} version`: {err}"))?;
 
-    if output.status.success() {
+    if output.success() {
         Ok(())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -30,13 +66,57 @@ pub fn validate_adb_path(adb_path: &str) -> Result<(), String> {
     }
 }
 
-pub fn list_devices(adb_path: &str) -> Result<Vec<DeviceInfo>, String> {
-    let output = adb_command(adb_path)
-        .arg("devices")
-        .output()
+/// Outcome of a device discovery round: the snapshot plus the (possibly
+/// updated) metadata cache, returned so the caller can keep owning it.
+#[derive(Debug)]
+pub struct DiscoveryOutcome {
+    pub devices: Vec<DeviceInfo>,
+    pub metadata_cache: DeviceMetadataCache,
+}
+
+/// Static device metadata cached across polls (PRD §17). Re-queried only on
+/// first discovery, reconnect (serial pruned then seen again), manual
+/// refresh, or identity change — not on every two-second poll.
+#[derive(Clone, Default, Debug)]
+pub struct DeviceMetadataCache {
+    entries: std::collections::HashMap<String, DeviceMetadata>,
+}
+
+impl DeviceMetadataCache {
+    pub fn get(&self, serial: &str) -> Option<&DeviceMetadata> {
+        self.entries.get(serial)
+    }
+
+    pub fn insert(&mut self, serial: &str, metadata: DeviceMetadata) {
+        self.entries.insert(serial.to_owned(), metadata);
+    }
+
+    /// Prune entries for serials that are no longer connected; a serial that
+    /// reconnects later is treated as a fresh discovery and re-queried.
+    pub fn retain_serials(&mut self, connected: &[String]) {
+        self.entries
+            .retain(|serial, _| connected.iter().any(|current| current == serial));
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+pub fn list_devices(
+    adb_path: &str,
+    mut metadata_cache: DeviceMetadataCache,
+    force_metadata_refresh: bool,
+) -> Result<DiscoveryOutcome, String> {
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_timeout(&["devices"], DEVICES_TIMEOUT)
         .map_err(|err| format!("Failed to run `{adb_path} devices`: {err}"))?;
 
-    if !output.status.success() {
+    if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
             "`{adb_path} devices` failed: {}",
@@ -48,26 +128,46 @@ pub fn list_devices(adb_path: &str) -> Result<Vec<DeviceInfo>, String> {
     let mut devices = parse_devices_output(&stdout);
     for device in &mut devices {
         if device.state == "device" {
-            let metadata = query_device_metadata(adb_path, &device.serial);
-            if let Some(identity_key) = metadata.identity_key {
-                device.identity_key = identity_key;
+            if !force_metadata_refresh
+                && let Some(cached) = metadata_cache.get(&device.serial).cloned()
+            {
+                apply_metadata(device, &cached);
+                continue;
             }
-            device.android_version = metadata.android_version;
-            device.manufacturer = metadata.manufacturer;
-            device.model = metadata.model;
+            let metadata = query_device_metadata(adb_path, &device.serial);
+            metadata_cache.insert(&device.serial, metadata.clone());
+            apply_metadata(device, &metadata);
         }
     }
-    Ok(devices)
+    Ok(DiscoveryOutcome {
+        devices,
+        metadata_cache,
+    })
+}
+
+fn apply_metadata(device: &mut DeviceInfo, metadata: &DeviceMetadata) {
+    if let Some(identity_key) = &metadata.identity_key {
+        device.identity_key = identity_key.clone();
+    }
+    device.android_version = metadata.android_version.clone();
+    device.manufacturer = metadata.manufacturer.clone();
+    device.model = metadata.model.clone();
 }
 
 pub fn capture_screenshot(adb_path: &str, serial: &str) -> Result<Screenshot, String> {
-    let output = adb_command(adb_path)
-        .args(["-s", serial, "exec-out", "screencap", "-p"])
-        .output()
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_options(
+            &["-s", serial, "exec-out", "screencap", "-p"],
+            ExecOptions {
+                timeout: Some(SCREENSHOT_TIMEOUT),
+                stdout_limit: Some(SCREENSHOT_STDOUT_LIMIT),
+                ..Default::default()
+            },
+        )
         .map_err(|err| format!("Failed to capture screen from {serial}: {err}"))?;
 
-    if !output.status.success() {
-        let details = combined_output(&output);
+    if !output.success() {
+        let details = combined_output(&ShellOutcome::from(output));
         return Err(format!(
             "Failed to capture screen from {serial}: {}",
             details.if_empty("unknown error")
@@ -79,17 +179,17 @@ pub fn capture_screenshot(adb_path: &str, serial: &str) -> Result<Screenshot, St
 }
 
 pub fn list_installed_packages(adb_path: &str, serial: &str) -> Result<Vec<String>, String> {
-    let primary = adb_shell_command(adb_path, serial, &["cmd", "package", "list", "packages"])
+    let primary = adb_shell(adb_path, serial, &["cmd", "package", "list", "packages"])
         .map_err(|err| format!("Failed to list packages on {serial}: {err}"))?;
-    if primary.status.success() {
+    if primary.success {
         return Ok(parse_installed_packages(&String::from_utf8_lossy(
             &primary.stdout,
         )));
     }
 
-    let fallback = adb_shell_command(adb_path, serial, &["pm", "list", "packages"])
+    let fallback = adb_shell(adb_path, serial, &["pm", "list", "packages"])
         .map_err(|err| format!("Failed to list packages on {serial}: {err}"))?;
-    if fallback.status.success() {
+    if fallback.success {
         return Ok(parse_installed_packages(&String::from_utf8_lossy(
             &fallback.stdout,
         )));
@@ -129,19 +229,30 @@ fn parse_installed_packages(output: &str) -> Vec<String> {
 }
 
 pub fn query_foreground_app(adb_path: &str, serial: &str) -> Result<ForegroundApp, String> {
-    let activity_output =
-        adb_shell_command(adb_path, serial, &["dumpsys", "activity", "activities"])
-            .map_err(|err| format!("Failed to query foreground app for {serial}: {err}"))?;
-    if activity_output.status.success() {
+    let activity_output = adb_shell_with_limit(
+        adb_path,
+        serial,
+        &["dumpsys", "activity", "activities"],
+        DUMPSYS_TIMEOUT,
+        DUMPSYS_STDOUT_LIMIT,
+    )
+    .map_err(|err| format!("Failed to query foreground app for {serial}: {err}"))?;
+    if activity_output.success {
         let stdout = String::from_utf8_lossy(&activity_output.stdout);
         if let Some(app) = parse_foreground_app_from_activity_dump(&stdout) {
             return Ok(app);
         }
     }
 
-    let window_output = adb_shell_command(adb_path, serial, &["dumpsys", "window", "windows"])
-        .map_err(|err| format!("Failed to query foreground app for {serial}: {err}"))?;
-    if window_output.status.success() {
+    let window_output = adb_shell_with_limit(
+        adb_path,
+        serial,
+        &["dumpsys", "window", "windows"],
+        DUMPSYS_TIMEOUT,
+        DUMPSYS_STDOUT_LIMIT,
+    )
+    .map_err(|err| format!("Failed to query foreground app for {serial}: {err}"))?;
+    if window_output.success {
         let stdout = String::from_utf8_lossy(&window_output.stdout);
         if let Some(app) = parse_foreground_app_from_window_dump(&stdout) {
             return Ok(app);
@@ -158,13 +269,12 @@ pub fn query_foreground_app(adb_path: &str, serial: &str) -> Result<ForegroundAp
 }
 
 pub fn force_stop_package(adb_path: &str, serial: &str, package: &str) -> Result<String, String> {
-    let output =
-        adb_shell_command(adb_path, serial, &["am", "force-stop", package]).map_err(|err| {
-            format!("Failed to run `{adb_path} -s {serial} shell am force-stop {package}`: {err}")
-        })?;
+    let output = adb_shell(adb_path, serial, &["am", "force-stop", package]).map_err(|err| {
+        format!("Failed to run `{adb_path} -s {serial} shell am force-stop {package}`: {err}")
+    })?;
 
     let combined = combined_output(&output);
-    if output.status.success() {
+    if output.success {
         if combined.is_empty() {
             Ok(format!("Force-stopped {package}."))
         } else {
@@ -179,7 +289,7 @@ pub fn force_stop_package(adb_path: &str, serial: &str, package: &str) -> Result
 }
 
 pub fn clear_package_data(adb_path: &str, serial: &str, package: &str) -> Result<String, String> {
-    let output = adb_shell_command(adb_path, serial, &["pm", "clear", package]).map_err(|err| {
+    let output = adb_shell(adb_path, serial, &["pm", "clear", package]).map_err(|err| {
         format!("Failed to run `{adb_path} -s {serial} shell pm clear {package}`: {err}")
     })?;
 
@@ -198,12 +308,14 @@ pub fn clear_package_data(adb_path: &str, serial: &str, package: &str) -> Result
         return Err(primary_error);
     }
 
-    let run_as_output = adb_shell_command(adb_path, serial, &["run-as", package, "pm", "clear", package])
-        .map_err(|err| {
-            format!(
+    let run_as_output =
+        adb_shell(adb_path, serial, &["run-as", package, "pm", "clear", package]).map_err(
+            |err| {
+                format!(
                 "{primary_error}\nFailed to run `{adb_path} -s {serial} shell run-as {package} pm clear {package}`: {err}"
             )
-        })?;
+            },
+        )?;
 
     if package_command_succeeded(&run_as_output) {
         let combined = combined_output(&run_as_output);
@@ -221,10 +333,9 @@ pub fn clear_package_data(adb_path: &str, serial: &str, package: &str) -> Result
 }
 
 pub fn uninstall_package(adb_path: &str, serial: &str, package: &str) -> Result<String, String> {
-    let output =
-        adb_shell_command(adb_path, serial, &["pm", "uninstall", package]).map_err(|err| {
-            format!("Failed to run `{adb_path} -s {serial} shell pm uninstall {package}`: {err}")
-        })?;
+    let output = adb_shell(adb_path, serial, &["pm", "uninstall", package]).map_err(|err| {
+        format!("Failed to run `{adb_path} -s {serial} shell pm uninstall {package}`: {err}")
+    })?;
 
     if package_command_succeeded(&output) {
         Ok(package_command_success_message(
@@ -245,15 +356,11 @@ pub fn connect_device(adb_path: &str, target: &str) -> Result<String, crate::wir
         return Err(crate::wireless::Failure::new("connect.error.empty", ""));
     }
 
-    let output = crate::wireless::run_adb(
-        adb_path,
-        &["connect", target],
-        None,
-        std::time::Duration::from_secs(12),
-        &crate::wireless::CancelToken::default(),
-    )?;
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_timeout(&["connect", target], CONNECT_TIMEOUT)
+        .map_err(crate::wireless::Failure::from_adb_error)?;
 
-    parse_connect_output(target, &output)
+    parse_connect_output(target, &ShellOutcome::from(output))
         .map_err(|err| crate::wireless::Failure::new("connect.error.connection", err))
 }
 
@@ -263,31 +370,30 @@ pub fn disconnect_device(adb_path: &str, target: &str) -> Result<String, String>
         return Err("Device endpoint cannot be empty".to_owned());
     }
 
-    let output = adb_command(adb_path)
-        .args(["disconnect", target])
-        .output()
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_timeout(&["disconnect", target], DISCONNECT_TIMEOUT)
         .map_err(|err| format!("Failed to run `{adb_path} disconnect {target}`: {err}"))?;
 
-    parse_disconnect_output(target, &output)
+    parse_disconnect_output(target, &ShellOutcome::from(output))
 }
 
 pub fn restart_server(adb_path: &str) -> Result<String, String> {
-    let kill_output = adb_command(adb_path)
-        .arg("kill-server")
-        .output()
+    let kill_output = AdbExecutor::new(adb_path)
+        .execute_with_timeout(&["kill-server"], SERVER_RESTART_TIMEOUT)
         .map_err(|err| format!("Failed to run `{adb_path} kill-server`: {err}"))?;
-    if !kill_output.status.success() {
+    let kill_output = ShellOutcome::from(kill_output);
+    if !kill_output.success {
         return Err(format!(
             "Failed to stop the ADB server: {}",
             combined_output(&kill_output).if_empty("unknown error")
         ));
     }
 
-    let start_output = adb_command(adb_path)
-        .arg("start-server")
-        .output()
+    let start_output = AdbExecutor::new(adb_path)
+        .execute_with_timeout(&["start-server"], SERVER_RESTART_TIMEOUT)
         .map_err(|err| format!("Failed to run `{adb_path} start-server`: {err}"))?;
-    if !start_output.status.success() {
+    let start_output = ShellOutcome::from(start_output);
+    if !start_output.success {
         return Err(format!(
             "Failed to start the ADB server: {}",
             combined_output(&start_output).if_empty("unknown error")
@@ -347,19 +453,27 @@ pub fn install_apk(adb_path: &str, serial: &str, apk_path: &Path) -> Result<Stri
         .as_ref()
         .map(|(_dir, path)| path.as_path())
         .unwrap_or(apk_path);
-    let output = adb_command(adb_path)
-        .args(["-s", serial, "install", "-r"])
-        .arg(install_source)
-        .output()
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_timeout(
+            &[
+                "-s",
+                serial,
+                "install",
+                "-r",
+                &install_source.to_string_lossy(),
+            ],
+            INSTALL_TIMEOUT,
+        )
         .map_err(|err| {
             format!(
                 "Failed to run `{adb_path} -s {serial} install -r {}`: {err}",
                 apk_path.display()
             )
         })?;
+    let output = ShellOutcome::from(output);
 
     let combined = combined_output(&output);
-    if output.status.success() {
+    if output.success {
         if combined.is_empty() {
             Ok(format!("Installed {}.", apk_path.display()))
         } else {
@@ -380,20 +494,27 @@ pub fn push_file(
     source_path: &Path,
     remote_path: &str,
 ) -> Result<String, String> {
-    let output = adb_command(adb_path)
-        .args(["-s", serial, "push"])
-        .arg(source_path)
-        .arg(remote_path)
-        .output()
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_timeout(
+            &[
+                "-s",
+                serial,
+                "push",
+                &source_path.to_string_lossy(),
+                remote_path,
+            ],
+            PUSH_TIMEOUT,
+        )
         .map_err(|err| {
             format!(
                 "Failed to run `{adb_path} -s {serial} push {} {remote_path}`: {err}",
                 source_path.display()
             )
         })?;
+    let output = ShellOutcome::from(output);
 
     let combined = combined_output(&output);
-    if output.status.success() {
+    if output.success {
         if combined.is_empty() {
             Ok(format!(
                 "Pushed {} to {remote_path}.",
@@ -436,14 +557,10 @@ pub fn spawn_logcat(
         )
     })?;
 
-    let mut cmd = adb_command(adb_path);
-    cmd.args(["-s", serial, "logcat"])
-        .args(extra_args)
-        .stdout(Stdio::from(stdout_file))
-        .stderr(Stdio::from(stderr_file));
-
-    cmd.spawn()
-        .map(ManagedChild::new)
+    let mut args: Vec<&str> = vec!["-s", serial, "logcat"];
+    args.extend(extra_args.iter().map(String::as_str));
+    AdbExecutor::new(adb_path)
+        .spawn_streaming(&args, Stdio::from(stdout_file), Stdio::from(stderr_file))
         .map_err(|err| format!("Failed to start logcat for {serial}: {err}"))
 }
 
@@ -499,35 +616,29 @@ pub fn parse_logcat_args(input: &str) -> Vec<String> {
     args
 }
 
-pub(crate) fn adb_command(adb_path: &str) -> Command {
-    let mut command = Command::new(adb_path);
-    hide_window(&mut command);
-    command
+fn adb_shell(adb_path: &str, serial: &str, args: &[&str]) -> Result<ShellOutcome, AdbError> {
+    adb_shell_with_limit(adb_path, serial, args, SHELL_TIMEOUT, SHELL_STDOUT_LIMIT)
 }
 
-fn adb_shell_command(adb_path: &str, serial: &str, args: &[&str]) -> Result<Output, String> {
-    adb_command(adb_path)
-        .args(["-s", serial, "shell"])
-        .args(args)
-        .output()
-        .map_err(|err| {
-            format!(
-                "Failed to run `{adb_path} -s {serial} shell {}`: {err}",
-                args.join(" ")
-            )
-        })
+fn adb_shell_with_limit(
+    adb_path: &str,
+    serial: &str,
+    args: &[&str],
+    timeout: Duration,
+    stdout_limit: usize,
+) -> Result<ShellOutcome, AdbError> {
+    let mut command = vec!["-s", serial, "shell"];
+    command.extend_from_slice(args);
+    let output = AdbExecutor::new(adb_path).execute_with_options(
+        &command,
+        ExecOptions {
+            timeout: Some(timeout),
+            stdout_limit: Some(stdout_limit),
+            ..Default::default()
+        },
+    )?;
+    Ok(ShellOutcome::from(output))
 }
-
-#[cfg(target_os = "windows")]
-fn hide_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    command.creation_flags(CREATE_NO_WINDOW);
-}
-
-#[cfg(not(target_os = "windows"))]
-fn hide_window(_command: &mut Command) {}
 
 pub fn is_network_device_serial(serial: &str) -> bool {
     let serial = serial.trim().trim_end_matches('.');
@@ -567,12 +678,12 @@ impl EmptyStringExt for str {
     }
 }
 
-#[derive(Default)]
-struct DeviceMetadata {
-    identity_key: Option<String>,
-    android_version: Option<String>,
-    manufacturer: Option<String>,
-    model: Option<String>,
+#[derive(Clone, Default, Debug)]
+pub struct DeviceMetadata {
+    pub(crate) identity_key: Option<String>,
+    pub(crate) android_version: Option<String>,
+    pub(crate) manufacturer: Option<String>,
+    pub(crate) model: Option<String>,
 }
 
 fn parse_devices_output(stdout: &str) -> Vec<DeviceInfo> {
@@ -628,12 +739,11 @@ fn query_android_version(adb_path: &str, serial: &str) -> Option<String> {
 }
 
 fn adb_shell_getprop(adb_path: &str, serial: &str, key: &str) -> Option<String> {
-    let output = adb_command(adb_path)
-        .args(["-s", serial, "shell", "getprop", key])
-        .output()
+    let output = AdbExecutor::new(adb_path)
+        .execute_with_timeout(&["-s", serial, "shell", "getprop", key], SHELL_TIMEOUT)
         .ok()?;
 
-    if !output.status.success() {
+    if !output.success() {
         return None;
     }
 
@@ -657,7 +767,7 @@ fn format_android_version(version: &str) -> String {
     }
 }
 
-fn combined_output(output: &Output) -> String {
+fn combined_output(output: &ShellOutcome) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     [stdout.trim(), stderr.trim()]
@@ -667,13 +777,13 @@ fn combined_output(output: &Output) -> String {
         .join("\n")
 }
 
-fn package_command_succeeded(output: &Output) -> bool {
+fn package_command_succeeded(output: &ShellOutcome) -> bool {
     let combined = combined_output(output);
     let lower = combined.to_ascii_lowercase();
-    output.status.success() && (combined.is_empty() || lower.contains("success"))
+    output.success && (combined.is_empty() || lower.contains("success"))
 }
 
-fn package_command_success_message(output: &Output, fallback: String) -> String {
+fn package_command_success_message(output: &ShellOutcome, fallback: String) -> String {
     let combined = combined_output(output);
     if combined.is_empty() {
         fallback
@@ -682,7 +792,7 @@ fn package_command_success_message(output: &Output, fallback: String) -> String 
     }
 }
 
-fn should_retry_clear_with_run_as(output: &Output) -> bool {
+fn should_retry_clear_with_run_as(output: &ShellOutcome) -> bool {
     let lower = combined_output(output).to_ascii_lowercase();
     lower.contains("android.permission.clear_app_user_data")
         || (lower.contains("securityexception")
@@ -690,12 +800,11 @@ fn should_retry_clear_with_run_as(output: &Output) -> bool {
             && (lower.contains("user data") || lower.contains("applicationuserdata")))
 }
 
-fn parse_connect_output(target: &str, output: &Output) -> Result<String, String> {
+fn parse_connect_output(target: &str, output: &ShellOutcome) -> Result<String, String> {
     let combined = combined_output(output);
     let lower = combined.to_ascii_lowercase();
 
-    if output.status.success()
-        && (lower.contains("connected to") || lower.contains("already connected to"))
+    if output.success && (lower.contains("connected to") || lower.contains("already connected to"))
     {
         return Ok(if combined.is_empty() {
             format!("Connected to {target}.")
@@ -711,11 +820,11 @@ fn parse_connect_output(target: &str, output: &Output) -> Result<String, String>
     }
 }
 
-fn parse_disconnect_output(target: &str, output: &Output) -> Result<String, String> {
+fn parse_disconnect_output(target: &str, output: &ShellOutcome) -> Result<String, String> {
     let combined = combined_output(output);
     let lower = combined.to_ascii_lowercase();
 
-    if output.status.success()
+    if output.success
         && (lower.contains("disconnected")
             || lower.contains("no such device")
             || lower.contains("not connected"))
@@ -808,17 +917,74 @@ fn is_valid_package_name(package: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_screenshot_png, format_android_version, is_network_device_serial,
-        package_command_succeeded, parse_component_token, parse_connect_output,
-        parse_devices_output, parse_disconnect_output, parse_foreground_app_from_activity_dump,
-        parse_foreground_app_from_window_dump, parse_installed_packages, parse_logcat_args,
-        should_retry_clear_with_run_as,
+        DeviceMetadataCache, ShellOutcome, decode_screenshot_png, format_android_version,
+        is_network_device_serial, package_command_succeeded, parse_component_token,
+        parse_connect_output, parse_devices_output, parse_disconnect_output,
+        parse_foreground_app_from_activity_dump, parse_foreground_app_from_window_dump,
+        parse_installed_packages, parse_logcat_args, should_retry_clear_with_run_as,
     };
-    use std::{io::Cursor, path::PathBuf, process::Output};
+    use std::{io::Cursor, path::PathBuf};
+
+    #[test]
+    fn metadata_cache_suppresses_getprop_storm_on_polls() {
+        let fixture = crate::wireless::tests::Fixture::new("display_devices=true");
+
+        // First discovery queries static metadata for both devices.
+        let first =
+            super::list_devices(&fixture.adb, DeviceMetadataCache::default(), false).unwrap();
+        assert_eq!(first.devices.len(), 2);
+        assert!(first.devices[0].model.is_some());
+        let first_log = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
+        let getprops_after_first = first_log.lines().filter(|l| l.contains("getprop")).count();
+        assert!(getprops_after_first > 0);
+        assert_eq!(first.metadata_cache.len(), 2);
+
+        // A cached poll re-queries nothing (PRD §17).
+        let second = super::list_devices(&fixture.adb, first.metadata_cache, false).unwrap();
+        let second_log = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
+        let getprops_after_second = second_log.lines().filter(|l| l.contains("getprop")).count();
+        assert_eq!(getprops_after_second, getprops_after_first);
+        // Metadata still comes back identical from the cache.
+        assert_eq!(second.devices[0].model, first.devices[0].model);
+        assert_eq!(second.devices[1].model, first.devices[1].model);
+
+        // Manual refresh forces a re-read (PRD §17).
+        let third = super::list_devices(&fixture.adb, second.metadata_cache, true).unwrap();
+        let third_log = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
+        let getprops_after_third = third_log.lines().filter(|l| l.contains("getprop")).count();
+        assert!(getprops_after_third > getprops_after_second);
+        drop(third);
+    }
+
+    #[test]
+    fn metadata_cache_reconnect_triggers_refresh() {
+        let fixture = crate::wireless::tests::Fixture::new("display_devices=true");
+        let first =
+            super::list_devices(&fixture.adb, DeviceMetadataCache::default(), false).unwrap();
+        let log_before = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
+        let getprops_before = log_before.lines().filter(|l| l.contains("getprop")).count();
+
+        // Device B unplugs: pruning drops its entry, so a later reappearance
+        // re-queries as a fresh discovery (PRD §17 reconnect rule).
+        let mut cache = first.metadata_cache;
+        cache.retain_serials(&["FIXTURE_USB_A".to_owned()]);
+        assert_eq!(cache.len(), 1);
+
+        let second = super::list_devices(&fixture.adb, cache, false).unwrap();
+        let log_after = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
+        let getprops_after = log_after.lines().filter(|l| l.contains("getprop")).count();
+        assert!(getprops_after > getprops_before);
+        assert!(
+            second
+                .devices
+                .iter()
+                .any(|d| d.serial == "FIXTURE_USB_B" && d.model.is_some())
+        );
+    }
 
     #[test]
     fn install_apk_stages_files_without_apk_suffix() {
-        let fixture = crate::wireless::tests::Fixture::new("");
+        let fixture = crate::wireless::tests::Fixture::new("display_devices=true");
         let dir = tempfile::tempdir().unwrap();
         let redownload = dir.path().join("demo.apk.1");
         std::fs::write(&redownload, b"apk-bytes").unwrap();
@@ -901,8 +1067,8 @@ ZY223JQ9K\toffline
 
     #[test]
     fn parse_connect_output_accepts_connected_message() {
-        let output = Output {
-            status: exit_status(0),
+        let output = ShellOutcome {
+            success: true,
             stdout: b"connected to 192.168.0.8:5555".to_vec(),
             stderr: Vec::new(),
         };
@@ -913,8 +1079,8 @@ ZY223JQ9K\toffline
 
     #[test]
     fn parse_connect_output_rejects_failed_message() {
-        let output = Output {
-            status: exit_status(1),
+        let output = ShellOutcome {
+            success: false,
             stdout: b"".to_vec(),
             stderr: b"failed to connect".to_vec(),
         };
@@ -925,13 +1091,13 @@ ZY223JQ9K\toffline
 
     #[test]
     fn parse_disconnect_output_accepts_success_and_missing_device() {
-        let success = Output {
-            status: exit_status(0),
+        let success = ShellOutcome {
+            success: true,
             stdout: b"disconnected 192.168.0.8:5555".to_vec(),
             stderr: Vec::new(),
         };
-        let missing = Output {
-            status: exit_status(0),
+        let missing = ShellOutcome {
+            success: true,
             stdout: Vec::new(),
             stderr: b"no such device '192.168.0.8:5555'".to_vec(),
         };
@@ -1005,8 +1171,8 @@ mCurrentFocus=Window{41dff5a u0 com.android.settings/com.android.settings.Settin
 
     #[test]
     fn clear_data_run_as_fallback_detects_permission_failure() {
-        let output = Output {
-            status: exit_status(1),
+        let output = ShellOutcome {
+            success: false,
             stdout: Vec::new(),
             stderr: b"Exception occurred while executing 'clear':\njava.lang.SecurityException: PID 16791 does not have permission android.permission.CLEAR_APP_USER_DATA to clear data of package com.example.app".to_vec(),
         };
@@ -1016,8 +1182,8 @@ mCurrentFocus=Window{41dff5a u0 com.android.settings/com.android.settings.Settin
 
     #[test]
     fn clear_data_run_as_fallback_ignores_unrelated_failures() {
-        let output = Output {
-            status: exit_status(1),
+        let output = ShellOutcome {
+            success: false,
             stdout: Vec::new(),
             stderr: b"Failed\nUnknown package: com.example.app".to_vec(),
         };
@@ -1027,18 +1193,18 @@ mCurrentFocus=Window{41dff5a u0 com.android.settings/com.android.settings.Settin
 
     #[test]
     fn package_command_succeeded_accepts_empty_or_success_output() {
-        let empty_success = Output {
-            status: exit_status(0),
+        let empty_success = ShellOutcome {
+            success: true,
             stdout: Vec::new(),
             stderr: Vec::new(),
         };
-        let explicit_success = Output {
-            status: exit_status(0),
+        let explicit_success = ShellOutcome {
+            success: true,
             stdout: b"Success".to_vec(),
             stderr: Vec::new(),
         };
-        let failed = Output {
-            status: exit_status(1),
+        let failed = ShellOutcome {
+            success: false,
             stdout: b"Success".to_vec(),
             stderr: Vec::new(),
         };
@@ -1084,17 +1250,5 @@ mCurrentFocus=Window{41dff5a u0 com.android.settings/com.android.settings.Settin
             parse_logcat_args("-v threadtime -e \"WindowManager:*\" *:E"),
             vec!["-v", "threadtime", "-e", "WindowManager:*", "*:E"],
         );
-    }
-
-    #[cfg(unix)]
-    fn exit_status(code: i32) -> std::process::ExitStatus {
-        use std::os::unix::process::ExitStatusExt;
-        std::process::ExitStatus::from_raw(code)
-    }
-
-    #[cfg(windows)]
-    fn exit_status(code: u32) -> std::process::ExitStatus {
-        use std::os::windows::process::ExitStatusExt;
-        std::process::ExitStatus::from_raw(code)
     }
 }

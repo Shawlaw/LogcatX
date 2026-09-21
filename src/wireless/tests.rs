@@ -1,9 +1,11 @@
 use super::*;
 use std::{
+    io::{Read, Write},
     net::TcpListener,
     path::PathBuf,
     process::Command,
     sync::{Mutex, OnceLock},
+    thread,
 };
 
 pub(crate) struct Fixture {
@@ -274,7 +276,13 @@ fn process_e2e_pair_rediscovers_changed_port_and_connects() {
         .to_string();
     assert_eq!(endpoint, "127.0.0.1:39001");
     crate::adb::connect_device(&fixture.adb, &endpoint).unwrap();
-    let devices = crate::adb::list_devices(&fixture.adb).unwrap();
+    let devices = crate::adb::list_devices(
+        &fixture.adb,
+        crate::adb::DeviceMetadataCache::default(),
+        false,
+    )
+    .unwrap()
+    .devices;
     assert_eq!(devices.len(), 1);
     assert_eq!(devices[0].serial, endpoint);
     let log = std::fs::read_to_string(fixture.dir.path().join("calls.log")).unwrap();
@@ -287,14 +295,17 @@ fn process_e2e_pair_rediscovers_changed_port_and_connects() {
 fn process_deadline_and_pairing_failure_are_bounded() {
     let fixture = Fixture::new("mode=hang");
     let start = Instant::now();
-    let error = run_adb(
-        &fixture.adb,
-        &["mdns", "services"],
-        None,
-        Duration::from_millis(150),
-        &CancelToken::default(),
-    )
-    .unwrap_err();
+    let error = AdbExecutor::new(&fixture.adb)
+        .execute_with_options(
+            &["mdns", "services"],
+            ExecOptions {
+                timeout: Some(Duration::from_millis(150)),
+                cancel: Some(CancelToken::new()),
+                ..Default::default()
+            },
+        )
+        .map_err(Failure::from_adb_error)
+        .unwrap_err();
     assert_eq!(error.key, "connect.error.timeout");
     assert!(start.elapsed() < Duration::from_secs(3));
     let fixture = Fixture::new("");
@@ -302,7 +313,7 @@ fn process_deadline_and_pairing_failure_are_bounded() {
         &fixture.adb,
         "127.0.0.1:37001",
         "999999",
-        &CancelToken::default(),
+        &CancelToken::new(),
     )
     .unwrap_err();
     assert_eq!(error.key, "connect.error.pair");

@@ -105,8 +105,17 @@ impl DropOutcome {
 
 #[derive(Debug)]
 pub enum AppEvent {
-    DevicesRefreshed(Result<Vec<DeviceInfo>, String>),
-    DevicesPolled(Result<Vec<DeviceInfo>, String>),
+    /// Discovery responses carry the generation they were spawned with;
+    /// anything older than the app's current generation is discarded
+    /// (PRD §18: a late reply must never overwrite newer state).
+    DevicesRefreshed {
+        generation: u64,
+        result: Result<crate::adb::DiscoveryOutcome, String>,
+    },
+    DevicesPolled {
+        generation: u64,
+        result: Result<crate::adb::DiscoveryOutcome, String>,
+    },
     LogStorageRefreshed(Result<fs_utils::LogStorageReport, String>),
     CleanupPreviewed {
         request_id: u64,
