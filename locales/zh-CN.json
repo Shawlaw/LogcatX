@@ -435,6 +435,10 @@
     "files.transfer_cancelled": "已取消",
     "files.transfer_cancel": "取消",
     "files.transfer_retry": "重试",
-    "files.dropped_queued": "拖入的文件已加入上传队列：{path}"
+    "files.dropped_queued": "拖入的文件已加入上传队列：{path}",
+    "update.notes_loading": "正在加载更新说明……",
+    "update.notes_section": "更新内容",
+    "update.notes_unavailable": "更新说明暂时无法加载。",
+    "update.notes_retry": "重试"
   }
 }

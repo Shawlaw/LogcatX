@@ -3,7 +3,7 @@
     windows_subsystem = "windows"
 )]
 
-use logcatx::{app, build_info, config, fs_utils, i18n, updater};
+use logcatx::{app, build_info, config, fs_utils, i18n};
 
 const DEFAULT_WINDOW_SIZE: [f32; 2] = [1280.0, 820.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [1100.0, 720.0];
@@ -19,19 +19,9 @@ fn main() -> eframe::Result<()> {
         .unwrap_or_else(|err| fatal_error(&err));
     desktop_logger::set_panic_hook(&paths.app_log_path);
 
-    // When the update helper restarted us it waits for this acknowledgement
-    // before discarding rollback copies of the previous version.
-    match desktop_updater::acknowledge_if_requested() {
-        Ok(true) => {
-            log::info!("Acknowledged applied application update");
-            // The helper cannot delete its own copied executable while it is
-            // still running, so sweep those copies from this new process.
-            let updates_dir = updater::updates_dir(&paths.config_dir);
-            std::thread::spawn(move || updater::cleanup_helper_copies(&updates_dir));
-        }
-        Ok(false) => {}
-        Err(err) => log::warn!("Failed to acknowledge applied update: {err}"),
-    }
+    // NOTE: the applied-update ACK is intentionally NOT sent here. The app
+    // acknowledges on its first rendered frame instead, so a build that
+    // fails during bootstrap keeps the helper's rollback material (PRD §32).
 
     let config_exists = paths.config_path.exists();
     let (config, startup_error) = match config::load_config(&paths.config_path, &paths) {

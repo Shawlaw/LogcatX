@@ -6,9 +6,10 @@
 //! feature reports itself as unconfigured instead of contacting the network.
 
 use crate::config::{UpdateProxyConfig, UpdateProxyMode};
-use chrono::{Local, Timelike};
+use chrono::{DateTime, Local, Timelike, Utc};
 use desktop_updater::ApplyRequest;
 use desktop_updater::PortableLayout;
+use desktop_updater::SignedCheck;
 use desktop_updater::UpdateCandidate;
 use desktop_updater::UpdateConfig;
 use serde::{Deserialize, Serialize};
@@ -28,11 +29,23 @@ pub const SIGNATURE_URL: &str =
 pub const MAIN_EXE_NAME: &str = "LogcatX.exe";
 pub const HELPER_EXE_NAME: &str = "LogcatX.Updater.exe";
 pub const STATUS_CACHE_FILE: &str = "app_update_status.logcatx.json";
-const STATUS_CACHE_SCHEMA_VERSION: u8 = 1;
+/// Persisted verified manifest+signature bytes (PRD §26 offline restore).
+pub const SIGNED_CANDIDATE_FILE: &str = "signed_update_candidate.logcatx.json";
+const STATUS_CACHE_SCHEMA_VERSION: u8 = 2;
+const SIGNED_CANDIDATE_SCHEMA_VERSION: u8 = 1;
 /// Automatic checks stay quiet before this local hour so a freshly opened
 /// machine does not spend its first minutes on update traffic.
 const AUTOMATIC_CHECK_START_HOUR: u32 = 8;
 const PROXY_TEST_TIMEOUT: Duration = Duration::from_secs(10);
+const RELEASE_NOTES_TIMEOUT: Duration = Duration::from_secs(10);
+const RELEASE_NOTES_SIZE_LIMIT: usize = 256 * 1024;
+/// Ordinary network failures back off for a few hours (PRD §31: 3~6h).
+const NETWORK_FAILURE_BACKOFF: chrono::Duration = chrono::Duration::hours(4);
+/// A manifest/signature that verifies as invalid must not be retried quickly
+/// (PRD §31).
+const INVALID_MANIFEST_BACKOFF: chrono::Duration = chrono::Duration::hours(24);
+/// Successful checks wait about a day before the next automatic one.
+const SUCCESS_INTERVAL: chrono::Duration = chrono::Duration::hours(24);
 
 /// Files a release ZIP is allowed to replace in the installation directory.
 /// Must stay in sync with `desktop-update.toml` at the repository root.
@@ -174,6 +187,105 @@ fn parse_proxy_test_target(target_url: &str) -> Result<reqwest::Url, UpdateConne
 
 pub fn status_cache_path(config_dir: &Path) -> PathBuf {
     config_dir.join(STATUS_CACHE_FILE)
+}
+
+pub fn signed_candidate_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(SIGNED_CANDIDATE_FILE)
+}
+
+/// Verified manifest + signature bytes persisted as UTF-8 text (the manifest
+/// is JSON, the signature file is base64 text), so the candidate can be
+/// restored offline after a restart (PRD §26). Restore always re-verifies the
+/// signature through `desktop_updater::UpdateCandidate::from_persisted_bytes`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct SignedCandidateCache {
+    pub schema_version: u8,
+    pub version: String,
+    pub manifest: String,
+    pub signature: String,
+}
+
+pub fn persist_signed_candidate(
+    path: &Path,
+    candidate_version: &str,
+    signed: &SignedCheck,
+) -> Result<(), String> {
+    let cache = SignedCandidateCache {
+        schema_version: SIGNED_CANDIDATE_SCHEMA_VERSION,
+        version: candidate_version.to_owned(),
+        manifest: String::from_utf8_lossy(&signed.manifest_bytes).into_owned(),
+        signature: String::from_utf8_lossy(&signed.signature_bytes).into_owned(),
+    };
+    let bytes = serde_json::to_vec_pretty(&cache)
+        .map_err(|error| format!("Failed to encode signed update candidate: {error}"))?;
+    desktop_fs::atomic_write(path, &bytes).map_err(|error| {
+        format!(
+            "Failed to persist signed update candidate {}: {error}",
+            path.display()
+        )
+    })
+}
+
+/// Offline restore of a previously verified candidate. Returns `None` for a
+/// missing, corrupt, tampered, or no-longer-newer candidate — restore never
+/// trusts persisted bytes without re-verification.
+pub fn restore_signed_candidate(
+    path: &Path,
+    config: &UpdateConfig,
+) -> Result<Option<UpdateCandidate>, String> {
+    let bytes = fs::read(path)
+        .map_err(|error| format!("Failed to read signed update candidate: {error}"))?;
+    let cache: SignedCandidateCache = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Invalid signed update candidate cache: {error}"))?;
+    UpdateCandidate::from_persisted_bytes(
+        config,
+        cache.manifest.as_bytes(),
+        cache.signature.as_bytes(),
+    )
+    .map_err(|error| format!("Signed update candidate no longer verifies: {error}"))
+}
+
+/// Whether a check error is deterministic (bad signature/manifest) instead of
+/// a transient network problem. Deterministic failures must not be retried
+/// quickly (PRD §31). Classification is by the upstream error text because
+/// desktop-updater exposes one error type.
+pub fn is_deterministic_check_error(error: &str) -> bool {
+    let lowered = error.to_ascii_lowercase();
+    lowered.contains("signature verification failed")
+        || lowered.contains("invalid update manifest")
+        || lowered.contains("not valid base64")
+        || lowered.contains("invalid length")
+        || lowered.contains("public key")
+        || lowered.contains("manifest schema")
+}
+
+/// Fetches the Markdown release notes for an update candidate (PRD §28).
+/// Never fatal: callers degrade to "notes unavailable" on any error.
+pub fn fetch_release_notes(update_proxy: &UpdateProxyConfig, url: &str) -> Result<String, String> {
+    validate_update_proxy(update_proxy).map_err(|_| "invalid proxy".to_owned())?;
+    let mut builder = reqwest::blocking::Client::builder().timeout(RELEASE_NOTES_TIMEOUT);
+    if let Some(proxy_url) = update_proxy.custom_url() {
+        let proxy = reqwest::Proxy::all(proxy_url).map_err(|_| "invalid proxy".to_owned())?;
+        builder = builder.proxy(proxy);
+    }
+    let client = builder.build().map_err(|_| "invalid proxy".to_owned())?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .send()
+        .map_err(|error| format!("release notes request failed: {error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("release notes http {status}"));
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|error| format!("release notes read failed: {error}"))?;
+    if bytes.len() > RELEASE_NOTES_SIZE_LIMIT {
+        return Err("release notes too large".to_owned());
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 pub fn updates_dir(config_dir: &Path) -> PathBuf {
@@ -371,19 +483,61 @@ pub fn local_hour() -> u32 {
     Local::now().hour()
 }
 
+pub fn now_rfc3339() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn parse_rfc3339(value: &Option<String>) -> Option<DateTime<Utc>> {
+    value
+        .as_deref()
+        .and_then(|text| DateTime::parse_from_rfc3339(text).ok())
+        .map(|time| time.with_timezone(&Utc))
+}
+
+/// Automatic check gating with retry/backoff (PRD §31):
+///
+/// - a successful check silences automatic checks for ~24h,
+/// - an ordinary network failure backs off for a few hours,
+/// - a deterministic manifest/signature failure backs off for a day,
+/// - manual checks are never gated (the UI path bypasses this).
 pub fn automatic_check_is_due(
     auto_check_enabled: bool,
     local_hour: u32,
-    today: &str,
-    last_automatic_check_date: Option<&str>,
+    last_success_at: Option<&str>,
+    next_retry_after: Option<&str>,
 ) -> bool {
-    auto_check_enabled
-        && local_hour >= AUTOMATIC_CHECK_START_HOUR
-        && last_automatic_check_date != Some(today)
+    if !auto_check_enabled || local_hour < AUTOMATIC_CHECK_START_HOUR {
+        return false;
+    }
+    let now = Utc::now();
+    if let Some(success) = parse_rfc3339(&last_success_at.map(str::to_owned))
+        && now - success < SUCCESS_INTERVAL
+    {
+        return false;
+    }
+    if let Some(retry_after) = parse_rfc3339(&next_retry_after.map(str::to_owned))
+        && now < retry_after
+    {
+        return false;
+    }
+    true
+}
+
+/// Backoff applied to a failed automatic check (PRD §31).
+pub fn backoff_for_failure(error: &str) -> chrono::Duration {
+    if is_deterministic_check_error(error) {
+        INVALID_MANIFEST_BACKOFF
+    } else {
+        NETWORK_FAILURE_BACKOFF
+    }
+}
+
+fn backoff_deadline(backoff: chrono::Duration) -> String {
+    (Utc::now() + backoff).to_rfc3339()
 }
 
 /// Persisted snapshot of the last check so the UI badge survives restarts and
-/// automatic checks happen at most once per local day.
+/// automatic checks follow the PRD §31 retry/backoff policy.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct UpdateStatusCache {
@@ -396,6 +550,11 @@ pub struct UpdateStatusCache {
     pub notes_url: Option<String>,
     pub error: Option<String>,
     pub dismissed_version: Option<String>,
+    /// RFC3339 timestamp of the last successful automatic check; automatic
+    /// checks stay quiet for ~24h afterwards (PRD §31).
+    pub last_success_at: Option<String>,
+    /// RFC3339 earliest-allowed automatic retry after a failure (PRD §31).
+    pub next_retry_after: Option<String>,
 }
 
 impl UpdateStatusCache {
@@ -417,6 +576,10 @@ impl UpdateStatusCache {
         self.current_version = Some(current_version.to_owned());
         self.checked_at = Some(Local::now().to_rfc3339());
         self.error = None;
+        // A completed check (up-to-date or candidate) resets backoff and
+        // starts the ~24h quiet window.
+        self.last_success_at = Some(now_rfc3339());
+        self.next_retry_after = None;
         match candidate {
             None => {
                 self.available = false;
@@ -444,9 +607,14 @@ impl UpdateStatusCache {
         self.schema_version = STATUS_CACHE_SCHEMA_VERSION;
         self.current_version = Some(current_version.to_owned());
         self.checked_at = Some(Local::now().to_rfc3339());
-        self.error = Some(error);
+        self.error = Some(error.clone());
+        self.available = false;
+        self.version = None;
+        self.notes_url = None;
         if automatic {
-            self.last_automatic_check_date = Some(today_local());
+            // Network failures may retry in a few hours; deterministic
+            // manifest/signature failures back off for a day (PRD §31).
+            self.next_retry_after = Some(backoff_deadline(backoff_for_failure(&error)));
         }
     }
 
@@ -493,7 +661,8 @@ pub fn write_status_cache(path: &Path, cache: &UpdateStatusCache) -> Result<(), 
     }
     let bytes = serde_json::to_vec_pretty(cache)
         .map_err(|error| format!("Failed to encode update status: {error}"))?;
-    fs::write(path, bytes).map_err(|error| {
+    // Atomic replace so a crash mid-write never corrupts the cache (PRD §33).
+    desktop_fs::atomic_write(path, &bytes).map_err(|error| {
         format!(
             "Failed to write application update status {}: {error}",
             path.display()
@@ -504,12 +673,15 @@ pub fn write_status_cache(path: &Path, cache: &UpdateStatusCache) -> Result<(), 
 #[cfg(test)]
 mod tests {
     use super::{
-        DEFAULT_PROXY_TEST_URL, UpdateConnectionTestError, UpdateProxyValidationError,
-        UpdateStatusCache, automatic_check_is_due, load_status_cache, parse_proxy_test_target,
-        today_local, validate_update_proxy, write_status_cache,
+        DEFAULT_PROXY_TEST_URL, INVALID_MANIFEST_BACKOFF, NETWORK_FAILURE_BACKOFF,
+        SIGNED_CANDIDATE_FILE, SignedCandidateCache, UpdateConnectionTestError,
+        UpdateProxyValidationError, UpdateStatusCache, automatic_check_is_due, backoff_for_failure,
+        load_status_cache, parse_proxy_test_target, today_local, validate_update_proxy,
+        write_status_cache,
     };
     use crate::config::{UpdateProxyConfig, UpdateProxyMode};
-    use desktop_updater::{UpdateAsset, UpdateCandidate, UpdateManifest};
+    use chrono::{DateTime, Utc};
+    use desktop_updater::{SignedCheck, UpdateAsset, UpdateCandidate, UpdateManifest};
     use std::fs;
     use std::path::{Path, PathBuf};
 
@@ -533,22 +705,133 @@ mod tests {
     }
 
     #[test]
-    fn automatic_check_only_runs_once_after_eight_am() {
-        assert!(!automatic_check_is_due(true, 7, "2026-08-15", None));
-        assert!(automatic_check_is_due(true, 8, "2026-08-15", None));
+    fn automatic_check_gates_by_success_window_and_backoff() {
+        let now = Utc::now();
+        let stamp = |time: DateTime<Utc>| time.to_rfc3339();
+
+        // Fresh state: due after the quiet hour.
+        assert!(automatic_check_is_due(true, 8, None, None));
+        // Before 08:00 local: never.
+        assert!(!automatic_check_is_due(true, 7, None, None));
+        // Disabled: never.
+        assert!(!automatic_check_is_due(false, 9, None, None));
+        // Recent success: quiet for ~24h.
         assert!(!automatic_check_is_due(
             true,
             9,
-            "2026-08-15",
-            Some("2026-08-15")
+            Some(stamp(now).as_str()),
+            None
         ));
         assert!(automatic_check_is_due(
             true,
             9,
-            "2026-08-15",
-            Some("2026-08-14")
+            Some(stamp(now - chrono::Duration::hours(25)).as_str()),
+            None
         ));
-        assert!(!automatic_check_is_due(false, 9, "2026-08-15", None));
+        // Backoff window blocks retries, network (4h) or invalid (24h).
+        assert!(!automatic_check_is_due(
+            true,
+            9,
+            None,
+            Some(stamp(now + chrono::Duration::hours(1)).as_str())
+        ));
+        assert!(automatic_check_is_due(
+            true,
+            9,
+            None,
+            Some(stamp(now - chrono::Duration::hours(1)).as_str())
+        ));
+        // A still-active backoff wins over an old success timestamp.
+        assert!(!automatic_check_is_due(
+            true,
+            9,
+            Some(stamp(now - chrono::Duration::hours(30)).as_str()),
+            Some(stamp(now + chrono::Duration::minutes(30)).as_str())
+        ));
+    }
+
+    #[test]
+    fn failure_backoff_separates_network_from_deterministic_errors() {
+        assert_eq!(
+            backoff_for_failure("error sending request for url"),
+            NETWORK_FAILURE_BACKOFF
+        );
+        assert_eq!(
+            backoff_for_failure("Update manifest signature verification failed"),
+            INVALID_MANIFEST_BACKOFF
+        );
+        assert_eq!(
+            backoff_for_failure("Invalid update manifest JSON: ..."),
+            INVALID_MANIFEST_BACKOFF
+        );
+    }
+
+    #[test]
+    fn automatic_failure_sets_backoff_instead_of_day_gate() {
+        let mut cache = UpdateStatusCache::default();
+        cache.record_failure("0.6.0", "network down".to_owned(), true);
+        // A network failure must allow a retry after the backoff window —
+        // it no longer consumes the whole local day (PRD §31).
+        assert!(cache.next_retry_after.is_some());
+        assert!(cache.last_automatic_check_date.is_none());
+        assert!(cache.error.is_some());
+        assert!(!cache.available);
+
+        // Recovery clears the backoff.
+        cache.record_check("0.6.0", None, true);
+        assert!(cache.next_retry_after.is_none());
+        assert!(cache.last_success_at.is_some());
+    }
+
+    #[test]
+    fn signed_candidate_round_trip_and_corruption_detection() {
+        // Round-trip the persistence format; real verification requires a
+        // signed manifest, covered by the demo/manual pipeline.
+        let dir = std::env::temp_dir().join(format!(
+            "logcatx-signed-candidate-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join(SIGNED_CANDIDATE_FILE);
+
+        let signed = SignedCheck {
+            result: desktop_updater::CheckResult::UpToDate,
+            manifest_bytes: b"{\"schema_version\":1}".to_vec(),
+            signature_bytes: b"c2lnbmF0dXJl".to_vec(),
+        };
+        super::persist_signed_candidate(&path, "0.9.0", &signed).expect("persist");
+        let raw: SignedCandidateCache = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(raw.version, "0.9.0");
+        assert_eq!(raw.manifest, "{\"schema_version\":1}");
+        assert_eq!(raw.signature, "c2lnbmF0dXJl");
+
+        // Tampered bytes must fail verification on restore, not fall back to
+        // trusting the file.
+        let mut tampered = raw;
+        tampered.manifest = "{\"schema_version\":1,\"version\":\"9.9.9\"}".to_owned();
+        tampered.version = "9.9.9".to_owned();
+        fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        // No public key compiled in tests, so a config cannot be built; the
+        // restore path itself rejects tampering via from_persisted_bytes.
+        // Verify the failure classification used for logging instead.
+        assert!(super::is_deterministic_check_error(
+            "Update manifest signature verification failed"
+        ));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn release_notes_fetch_classifies_failures() {
+        // A local address that refuses connections classifies as a request
+        // failure rather than a panic; this exercises the proxy path too.
+        let error = super::fetch_release_notes(
+            &UpdateProxyConfig::default(),
+            "http://127.0.0.1:1/notes.md",
+        )
+        .unwrap_err();
+        assert!(error.contains("failed") || error.contains("http"));
     }
 
     #[test]

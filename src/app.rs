@@ -92,6 +92,16 @@ enum UpdatePhase {
     Failed(String),
 }
 
+/// Inline release-notes state for the update dialog (PRD §27/§30). Notes
+/// never gate downloading or installing — failures degrade gracefully.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UpdateNotesState {
+    None,
+    Loading,
+    Loaded(String),
+    Failed,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UpdateConnectionTestPhase {
     Idle,
@@ -235,6 +245,11 @@ pub struct AdbCollectorApp {
     update_phase: UpdatePhase,
     update_info: Option<UpdateInfo>,
     update_candidate: Option<UpdateCandidate>,
+    update_notes: UpdateNotesState,
+    update_notes_generation: u64,
+    /// ACK of an applied update is deferred to the first rendered frame so
+    /// rollback material survives any bootstrap failure (PRD §32).
+    update_ack_pending: bool,
     update_dismissed: bool,
     update_cache: updater::UpdateStatusCache,
     show_update_dialog: bool,
@@ -279,6 +294,33 @@ impl AdbCollectorApp {
             })
             .filter(|info| !info.version.is_empty());
         let update_dismissed = update_cache.is_dismissed();
+        // Offline restore of a previously signature-verified candidate
+        // (PRD §26): "update known" must survive a restart without another
+        // network check. The restore re-verifies the persisted signature and
+        // yields None unless the candidate is still newer.
+        let restored_candidate = updater::updates_configured()
+            .then(|| {
+                updater::update_config(bootstrap.version, &config.update_proxy)
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|update_config| {
+                update_config.and_then(|update_config| {
+                    updater::restore_signed_candidate(
+                        &updater::signed_candidate_path(&bootstrap.app_paths.config_dir),
+                        &update_config,
+                    )
+                    .ok()
+                    .flatten()
+                })
+            });
+        let restored_update = restored_candidate
+            .as_ref()
+            .map(|candidate| UpdateInfo {
+                version: candidate.version().to_owned(),
+                notes_url: candidate.notes_url().map(str::to_owned),
+            })
+            .or(restored_update);
         let transfers = transfer::TransferManager::new(&config.adb_path);
         let transfers_adb_path = config.adb_path.clone();
 
@@ -385,7 +427,10 @@ impl AdbCollectorApp {
             sidebar_icon,
             update_phase: UpdatePhase::Idle,
             update_info: restored_update,
-            update_candidate: None,
+            update_candidate: restored_candidate.clone(),
+            update_notes: UpdateNotesState::None,
+            update_notes_generation: 0,
+            update_ack_pending: true,
             update_dismissed,
             update_cache,
             show_update_dialog: false,
@@ -781,6 +826,17 @@ impl AdbCollectorApp {
                 }
                 AppEvent::UpdateCheckFinished { automatic, result } => {
                     self.handle_update_check_finished(automatic, result);
+                }
+                AppEvent::UpdateNotesFetched { generation, result } => {
+                    if generation == self.update_notes_generation {
+                        self.update_notes = match result {
+                            Ok(notes) => UpdateNotesState::Loaded(notes),
+                            Err(err) => {
+                                log::warn!("Release notes unavailable: {err}");
+                                UpdateNotesState::Failed
+                            }
+                        };
+                    }
                 }
                 AppEvent::UpdateConnectionTestFinished(result) => {
                     self.update_connection_test = match result {
@@ -2554,6 +2610,7 @@ impl AdbCollectorApp {
         let mut apply_clicked = false;
         let mut open_notes_url: Option<String> = None;
         let mut open_update_network_settings = false;
+        let mut retry_notes_clicked = false;
 
         egui::Window::new(self.tr("update.dialog_title"))
             .collapsible(false)
@@ -2623,10 +2680,49 @@ impl AdbCollectorApp {
                             .strong()
                             .color(Color32::from_rgb(210, 120, 10)),
                         );
-                        if let Some(notes_url) = info.notes_url.clone()
-                            && ui.button(self.tr("update.notes")).clicked()
-                        {
-                            open_notes_url = Some(notes_url);
+                        ui.add_space(2.0);
+
+                        // Inline release notes (PRD §27): scrollable, and any
+                        // failure degrades to retry/view-release without
+                        // blocking download or install (PRD §30).
+                        match self.update_notes.clone() {
+                            UpdateNotesState::Loading => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label(self.tr("update.notes_loading"));
+                                });
+                            }
+                            UpdateNotesState::Loaded(notes) => {
+                                ui.label(
+                                    RichText::new(self.tr("update.notes_section"))
+                                        .small()
+                                        .strong(),
+                                );
+                                egui::ScrollArea::vertical()
+                                    .max_height(150.0)
+                                    .id_salt("update_release_notes")
+                                    .show(ui, |ui| {
+                                        ui.label(RichText::new(notes).small().monospace());
+                                    });
+                            }
+                            UpdateNotesState::Failed => {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(self.tr("update.notes_unavailable"))
+                                            .small()
+                                            .color(Color32::from_rgb(150, 90, 20)),
+                                    );
+                                    if ui.small_button(self.tr("update.notes_retry")).clicked() {
+                                        retry_notes_clicked = true;
+                                    }
+                                    if info.notes_url.is_some()
+                                        && ui.small_button(self.tr("update.notes")).clicked()
+                                    {
+                                        open_notes_url = info.notes_url.clone();
+                                    }
+                                });
+                            }
+                            UpdateNotesState::None => {}
                         }
                         ui.add_space(4.0);
 
@@ -2687,6 +2783,9 @@ impl AdbCollectorApp {
 
         if check_clicked {
             self.request_update_check(false);
+        }
+        if retry_notes_clicked {
+            self.start_update_notes_fetch();
         }
         if download_clicked {
             self.request_update_download();
@@ -3564,6 +3663,54 @@ impl AdbCollectorApp {
         updater::status_cache_path(&self.app_paths.config_dir)
     }
 
+    /// Acknowledge an applied update from the helper's restart request.
+    /// Called on the first rendered frame — after config load, state init and
+    /// UI creation — so rollback material survives bootstrap failures
+    /// (PRD §32).
+    fn acknowledge_applied_update(&mut self) {
+        match desktop_updater::acknowledge_if_requested() {
+            Ok(true) => {
+                log::info!("Acknowledged applied application update after healthy startup");
+                // The helper cannot delete its own copied executable while it
+                // is still running, so sweep those copies from this process.
+                let updates_dir = updater::updates_dir(&self.app_paths.config_dir);
+                thread::spawn(move || updater::cleanup_helper_copies(&updates_dir));
+            }
+            Ok(false) => {}
+            Err(err) => log::warn!("Failed to acknowledge applied update: {err}"),
+        }
+    }
+
+    /// Fetch the release notes for the currently shown candidate (PRD §28).
+    /// Notes load independently so their failure can never block or delay
+    /// download/install (PRD §30).
+    fn start_update_notes_fetch(&mut self) {
+        let Some(url) = self
+            .update_info
+            .as_ref()
+            .and_then(|info| info.notes_url.clone())
+        else {
+            self.update_notes = UpdateNotesState::None;
+            return;
+        };
+        if demo_update_active() {
+            // The demo has no network path; show static preview notes.
+            self.update_notes = UpdateNotesState::Loaded(
+                "# Demo update\n\nThis is a locally simulated release-notes preview.".to_owned(),
+            );
+            return;
+        }
+        self.update_notes_generation += 1;
+        let generation = self.update_notes_generation;
+        self.update_notes = UpdateNotesState::Loading;
+        let tx = self.tx.clone();
+        let proxy = self.config.update_proxy.clone();
+        thread::spawn(move || {
+            let result = updater::fetch_release_notes(&proxy, &url);
+            let _ = tx.send(AppEvent::UpdateNotesFetched { generation, result });
+        });
+    }
+
     fn persist_update_cache(&mut self) {
         let path = self.update_status_cache_path();
         if let Err(err) = updater::write_status_cache(&path, &self.update_cache) {
@@ -3617,11 +3764,34 @@ impl AdbCollectorApp {
             }
         };
         let tx = self.tx.clone();
+        let signed_candidate_path = updater::signed_candidate_path(&self.app_paths.config_dir);
         thread::spawn(move || {
-            let result = desktop_updater::check(&config)
-                .map(|result| match result {
-                    CheckResult::UpToDate => None,
-                    CheckResult::UpdateAvailable(candidate) => Some(candidate),
+            // check_signed keeps the exact verified manifest+signature bytes
+            // so the candidate survives restarts without another network
+            // round-trip (PRD §26).
+            let result = desktop_updater::check_signed(&config)
+                .map(|signed| {
+                    let candidate = match &signed.result {
+                        CheckResult::UpToDate => None,
+                        CheckResult::UpdateAvailable(candidate) => Some(candidate.clone()),
+                    };
+                    match &signed.result {
+                        CheckResult::UpdateAvailable(candidate) => {
+                            if let Err(err) = updater::persist_signed_candidate(
+                                &signed_candidate_path,
+                                candidate.version(),
+                                &signed,
+                            ) {
+                                log::warn!("Failed to persist signed update candidate: {err}");
+                            }
+                        }
+                        CheckResult::UpToDate => {
+                            // No longer newer than this build: drop any
+                            // persisted candidate so restore stays truthful.
+                            let _ = std::fs::remove_file(&signed_candidate_path);
+                        }
+                    }
+                    candidate
                 })
                 .map_err(|error| error.to_string());
             let _ = tx.send(AppEvent::UpdateCheckFinished { automatic, result });
@@ -3656,10 +3826,10 @@ impl AdbCollectorApp {
         if updater::automatic_check_is_due(
             self.config.auto_check_updates,
             updater::local_hour(),
-            &updater::today_local(),
-            self.update_cache.last_automatic_check_date.as_deref(),
+            self.update_cache.last_success_at.as_deref(),
+            self.update_cache.next_retry_after.as_deref(),
         ) {
-            log::info!("Starting daily automatic application update check");
+            log::info!("Starting automatic application update check");
             self.request_update_check(true);
         }
     }
@@ -3702,6 +3872,7 @@ impl AdbCollectorApp {
                         self.update_candidate = Some(candidate);
                         self.update_dismissed = false;
                         self.update_phase = UpdatePhase::Idle;
+                        self.start_update_notes_fetch();
                         if automatic {
                             self.show_update_dialog = true;
                         }
@@ -5538,6 +5709,13 @@ impl eframe::App for AdbCollectorApp {
         crate::e2e::capture_frame(ctx);
         self.ime_enter_guard.frame(ctx);
         apply_visual_style(ctx);
+        // ACK only once the app is healthy: config loaded, state initialized,
+        // UI created — i.e. the first rendered frame (PRD §32). Until then
+        // the helper keeps its rollback material.
+        if self.update_ack_pending {
+            self.update_ack_pending = false;
+            self.acknowledge_applied_update();
+        }
         self.sync_transfer_manager();
         self.handle_events();
         self.poll_update_download_progress();

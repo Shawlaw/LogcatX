@@ -8,11 +8,11 @@ default-run = "logcatx"
 [dependencies]
 arboard = "3.6.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
-desktop-config = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-config" }
-desktop-fs = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-fs" }
-desktop-i18n = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-i18n" }
-desktop-logger = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-logger" }
-desktop-updater = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.4", package = "desktop-updater" }
+desktop-config = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.6", package = "desktop-config" }
+desktop-fs = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.6", package = "desktop-fs" }
+desktop-i18n = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.6", package = "desktop-i18n" }
+desktop-logger = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.6", package = "desktop-logger" }
+desktop-updater = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.6", package = "desktop-updater" }
 directories = "5"
 eframe = "0.31"
 image = { version = "0.25.10", default-features = false, features = ["png"] }

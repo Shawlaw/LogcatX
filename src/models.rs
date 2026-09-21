@@ -132,6 +132,12 @@ pub enum AppEvent {
         generation: u64,
         result: Result<(), String>,
     },
+    /// Release-notes fetch finished; stale generations are discarded
+    /// (PRD §30: notes never block the update flow).
+    UpdateNotesFetched {
+        generation: u64,
+        result: Result<String, String>,
+    },
     LogStorageRefreshed(Result<fs_utils::LogStorageReport, String>),
     CleanupPreviewed {
         request_id: u64,

@@ -435,6 +435,10 @@
     "files.transfer_cancelled": "Cancelled",
     "files.transfer_cancel": "Cancel",
     "files.transfer_retry": "Retry",
-    "files.dropped_queued": "Dropped files queued for upload to {path}."
+    "files.dropped_queued": "Dropped files queued for upload to {path}.",
+    "update.notes_loading": "Loading release notes...",
+    "update.notes_section": "Release notes",
+    "update.notes_unavailable": "Release notes are temporarily unavailable.",
+    "update.notes_retry": "Retry"
   }
 }

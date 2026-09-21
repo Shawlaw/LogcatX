@@ -913,7 +913,7 @@ dependencies = [
 [[package]]
 name = "desktop-config"
 version = "0.1.0"
-source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.4#85ae97aba2cf36b1603bfa42b0f9f5e90412d98f"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.6#a836a463d25285a5c901423440549c19bcd8e246"
 dependencies = [
  "directories",
  "serde",
@@ -922,13 +922,13 @@ dependencies = [
 
 [[package]]
 name = "desktop-fs"
-version = "0.1.1"
-source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.4#85ae97aba2cf36b1603bfa42b0f9f5e90412d98f"
+version = "0.1.2"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.6#a836a463d25285a5c901423440549c19bcd8e246"
 
 [[package]]
 name = "desktop-i18n"
 version = "0.1.0"
-source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.4#85ae97aba2cf36b1603bfa42b0f9f5e90412d98f"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.6#a836a463d25285a5c901423440549c19bcd8e246"
 dependencies = [
  "serde",
  "serde_json",
@@ -938,7 +938,7 @@ dependencies = [
 [[package]]
 name = "desktop-logger"
 version = "0.1.0"
-source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.4#85ae97aba2cf36b1603bfa42b0f9f5e90412d98f"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.6#a836a463d25285a5c901423440549c19bcd8e246"
 dependencies = [
  "chrono",
  "log",
@@ -946,8 +946,8 @@ dependencies = [
 
 [[package]]
 name = "desktop-updater"
-version = "0.1.4"
-source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.4#85ae97aba2cf36b1603bfa42b0f9f5e90412d98f"
+version = "0.1.5"
+source = "git+https://github.com/Shawlaw/DeskFoundry?tag=v0.1.6#a836a463d25285a5c901423440549c19bcd8e246"
 dependencies = [
  "base64",
  "ed25519-dalek",
