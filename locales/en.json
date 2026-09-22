@@ -439,6 +439,12 @@
     "update.notes_loading": "Loading release notes...",
     "update.notes_section": "Release notes",
     "update.notes_unavailable": "Release notes are temporarily unavailable.",
-    "update.notes_retry": "Retry"
+    "update.notes_retry": "Retry",
+    "device.state.authorizing": "Authorizing",
+    "device.state.connecting": "Connecting",
+    "device.state.recovery": "Recovery",
+    "device.state.sideload": "Sideload",
+    "device.state.bootloader": "Bootloader",
+    "device.state.rescue": "Rescue"
   }
 }

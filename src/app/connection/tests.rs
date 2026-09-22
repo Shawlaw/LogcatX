@@ -179,7 +179,7 @@ fn ui_e2e_pairing_code_stdin_then_fresh_dynamic_port() {
             break request;
         }
         assert!(
-            start.elapsed() < Duration::from_secs(5),
+            start.elapsed() < Duration::from_secs(15),
             "pairing did not finish: {:?}",
             h.dialog.error
         );

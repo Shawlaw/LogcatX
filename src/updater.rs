@@ -626,6 +626,11 @@ impl UpdateStatusCache {
         self.current_version = Some(current_version.to_owned());
         self.checked_at = Some(Local::now().to_rfc3339());
         self.last_automatic_check_date = Some(today_local());
+        // The skip is itself a completed decision: it must also satisfy the
+        // timestamp gate (PRD §31), or unconfigured builds retry on every
+        // focus event.
+        self.last_success_at = Some(now_rfc3339());
+        self.next_retry_after = None;
     }
 
     pub fn dismiss_available(&mut self) {
@@ -781,6 +786,24 @@ mod tests {
         cache.record_check("0.6.0", None, true);
         assert!(cache.next_retry_after.is_none());
         assert!(cache.last_success_at.is_some());
+    }
+
+    #[test]
+    fn automatic_skip_gates_the_timestamp_window() {
+        // Unconfigured builds record a "skip"; that decision must satisfy
+        // the focus-gate too, or every focus event re-triggers a check
+        // (trial log showed checks firing every few minutes).
+        let mut cache = UpdateStatusCache::default();
+        cache.record_automatic_skipped("0.9.0");
+        assert!(!automatic_check_is_due(
+            true,
+            9,
+            cache.last_success_at.as_deref(),
+            cache.next_retry_after.as_deref()
+        ));
+        // After the quiet window passes, checks become due again.
+        let stale = (Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+        assert!(automatic_check_is_due(true, 9, Some(stale.as_str()), None));
     }
 
     #[test]

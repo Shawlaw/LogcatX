@@ -275,6 +275,12 @@ impl AdbCollectorApp {
             !bootstrap.config_exists || !config.is_complete() || bootstrap.startup_error.is_some();
         let (tx, rx) = mpsc::channel();
 
+        // egui's double-click window defaults to 0.3s; Windows users expect
+        // the system default (0.5s). Without this, ordinary-paced double
+        // clicks on Files-page directories register as two single clicks.
+        cc.egui_ctx
+            .options_mut(|options| options.input_options.max_double_click_delay = 0.5);
+
         let sidebar_icon =
             eframe::icon_data::from_png_bytes(include_bytes!("../icons/icon_128.png"))
                 .ok()
@@ -743,10 +749,7 @@ impl AdbCollectorApp {
                 } => {
                     let device_name = self.device_identity_label(&serial);
                     if let Some(device) = self.find_device_mut(&serial) {
-                        device.run_state = DeviceRunState::Running;
-                        device.output_path = Some(output_path.clone());
-                        device.child = Some(child);
-                        device.started_at = Some(std::time::SystemTime::now());
+                        device.session_spawned(output_path, child);
                     }
                     self.set_info(
                         self.tr_args("status.started_collection", &[("serial", device_name)]),
@@ -771,13 +774,7 @@ impl AdbCollectorApp {
                     }
 
                     if let Some(device) = self.find_device_mut(&serial) {
-                        device.child = None;
-                        device.started_at = None;
-                        device.output_path = None;
-                        device.run_state = match error {
-                            Some(ref err) => DeviceRunState::Error(err.clone()),
-                            None => DeviceRunState::Idle,
-                        };
+                        device.session_ended(error.clone());
                     }
 
                     if let Some(err) = error {
@@ -5022,6 +5019,24 @@ impl AdbCollectorApp {
             .map(|device| (device.info.identity_key.clone(), device))
             .collect();
 
+        // Identity resolution only happens for ready transports; a wireless
+        // endpoint in offline/authorizing/... states (or whose getprop timed
+        // out) falls back to identity = serial and used to spawn a duplicate
+        // row for a device we already know. Fold those transports into the
+        // known device before grouping.
+        let known_transport_identities: HashMap<String, String> = existing
+            .values()
+            .flat_map(|device| {
+                let identity = device.info.identity_key.clone();
+                device
+                    .transport_serials
+                    .iter()
+                    .map(move |serial| (serial.clone(), identity.clone()))
+            })
+            .collect();
+        let mut devices = devices;
+        route_transports_to_known_identities(&mut devices, &known_transport_identities);
+
         let mut grouped: HashMap<String, Vec<DeviceInfo>> = HashMap::new();
         for info in devices {
             grouped
@@ -5451,6 +5466,12 @@ impl AdbCollectorApp {
             "offline" => "device.state.offline",
             "unauthorized" => "device.state.unauthorized",
             "disconnected" => "device.state.disconnected",
+            "authorizing" => "device.state.authorizing",
+            "connecting" => "device.state.connecting",
+            "recovery" => "device.state.recovery",
+            "sideload" => "device.state.sideload",
+            "bootloader" => "device.state.bootloader",
+            "rescue" => "device.state.rescue",
             _ => "device.state.unknown",
         }
     }
@@ -5739,6 +5760,24 @@ fn pick_primary_device_info(infos: &[DeviceInfo]) -> DeviceInfo {
         .min_by_key(|info| device_transport_rank(info))
         .cloned()
         .unwrap_or_else(|| infos[0].clone())
+}
+
+/// Fold freshly scanned transports whose identity could not be resolved
+/// (identity fell back to the serial: non-ready state or failed metadata
+/// query) into a device we already track by that serial, so the same
+/// physical device shows one row instead of an orphan duplicate.
+fn route_transports_to_known_identities(
+    infos: &mut [DeviceInfo],
+    known_transport_identities: &HashMap<String, String>,
+) {
+    for info in infos {
+        if info.identity_key != info.serial {
+            continue; // proper identity already resolved
+        }
+        if let Some(identity) = known_transport_identities.get(&info.serial) {
+            info.identity_key = identity.clone();
+        }
+    }
 }
 
 fn device_transport_rank(info: &DeviceInfo) -> (u8, u8, String) {
@@ -6039,12 +6078,67 @@ mod tests {
         SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT, build_device_push_destination,
         classify_dropped_paths, content_view_width, device_transport_rank,
         filter_installed_packages, format_device_model_name, install_dropped_apks,
-        is_current_cleanup_preview_response, pick_primary_device_info, settings_error_scroll_area,
+        is_current_cleanup_preview_response, pick_primary_device_info,
+        route_transports_to_known_identities, settings_error_scroll_area,
         settings_path_input_width, should_reveal_proxy_settings_content,
     };
     use crate::models::DeviceInfo;
     use eframe::egui;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+
+    fn transport(serial: &str, identity: &str, state: &str) -> DeviceInfo {
+        DeviceInfo {
+            serial: serial.to_owned(),
+            identity_key: identity.to_owned(),
+            state: state.to_owned(),
+            android_version: None,
+            manufacturer: None,
+            model: None,
+        }
+    }
+
+    /// Wireless endpoints that are not ready (offline/authorizing/...) cannot
+    /// resolve a real identity and must fold into the device we already
+    /// track by serial — one physical device, one row (trial bug 3).
+    #[test]
+    fn route_transports_folds_unresolved_wireless_into_known_device() {
+        let mut known: HashMap<String, String> = HashMap::new();
+        known.insert(
+            "192.168.3.7:38421".to_owned(),
+            "3KQYD25310200835".to_owned(),
+        );
+        let mut infos = vec![
+            transport("3KQYD25310200835", "3KQYD25310200835", "device"),
+            transport("192.168.3.7:38421", "192.168.3.7:38421", "authorizing"),
+        ];
+        route_transports_to_known_identities(&mut infos, &known);
+        assert!(
+            infos
+                .iter()
+                .all(|info| info.identity_key == "3KQYD25310200835")
+        );
+    }
+
+    #[test]
+    fn route_transports_leaves_resolved_and_unknown_transports_alone() {
+        let mut known: HashMap<String, String> = HashMap::new();
+        known.insert(
+            "192.168.3.7:38421".to_owned(),
+            "3KQYD25310200835".to_owned(),
+        );
+
+        // Resolved identities are never rewritten.
+        let mut infos = vec![transport("usb-1", "ZY223JQ9K", "device")];
+        route_transports_to_known_identities(&mut infos, &known);
+        assert_eq!(infos[0].identity_key, "ZY223JQ9K");
+
+        // A serial we have never seen keeps its own identity (real new
+        // device), so it still shows as its own row.
+        let mut infos = vec![transport("10.0.0.9:5555", "10.0.0.9:5555", "offline")];
+        route_transports_to_known_identities(&mut infos, &known);
+        assert_eq!(infos[0].identity_key, "10.0.0.9:5555");
+    }
 
     #[test]
     fn classify_dropped_paths_separates_apks_from_other_files() {

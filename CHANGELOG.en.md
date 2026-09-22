@@ -25,6 +25,10 @@ All notable changes to this project will be documented in this file.
 - Configuration and update state are written atomically, so an interrupted write no longer corrupts files; 0.8 configs migrate seamlessly and missing new fields never block startup
 - Windows numeric FILEVERSION now mirrors the semantic version (0.9.0.0) instead of the build date
 - Removed the incorrect `run-as <pkg> pm clear` fallback; clear-data failures now surface their real reason
+- Fixed "copy latest log path" graying out and the latest-log column going empty after a session ended (the path now survives session end)
+- Fixed double-click failing to enter directories on the Files page (double-click window widened from 0.3s to 0.5s, matching the Windows system default)
+- Fixed the same physical device appearing as a separate, hard-to-remove row when its wireless transport is in a non-ready state (authorizing/offline/...); added display text for authorizing/connecting/recovery and similar states
+- Fixed unconfigured-update builds issuing an update check on every window focus
 
 ## [0.8.0] - 2026-09-17
 

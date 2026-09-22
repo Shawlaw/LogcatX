@@ -142,6 +142,16 @@ fn generate_build_info() {
     .expect("failed to write generated build_info.rs");
 
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    // Keep the embedded commit fresh across local incremental builds: HEAD
+    // changes on branch switches, the ref file on commits to the current
+    // branch (packed refs fall back to a build.rs touch). Missing paths are
+    // ignored by cargo, so this stays harmless outside a git checkout.
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    if let Ok(head_ref) = std::fs::read_to_string(".git/HEAD")
+        && let Some(reference) = head_ref.trim().strip_prefix("ref: ")
+    {
+        println!("cargo:rerun-if-changed=.git/{reference}");
+    }
 }
 
 fn resolve_commit() -> (String, bool) {

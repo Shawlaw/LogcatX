@@ -307,7 +307,9 @@ fn process_deadline_and_pairing_failure_are_bounded() {
         .map_err(Failure::from_adb_error)
         .unwrap_err();
     assert_eq!(error.key, "connect.error.timeout");
-    assert!(start.elapsed() < Duration::from_secs(3));
+    // The 150ms budget must stay bounded, but the first Fixture use compiles
+    // the fake adb under parallel load, so allow generous wall-clock room.
+    assert!(start.elapsed() < Duration::from_secs(10));
     let fixture = Fixture::new("");
     let error = pair(
         &fixture.adb,

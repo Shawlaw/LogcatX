@@ -56,6 +56,28 @@ impl DeviceEntry {
                 .iter()
                 .any(|serial| serial == serial_or_identity)
     }
+
+    /// State transition when a logcat session's process handle arrives.
+    pub fn session_spawned(&mut self, output_path: PathBuf, child: SharedChild) {
+        self.run_state = DeviceRunState::Running;
+        self.output_path = Some(output_path);
+        self.child = Some(child);
+        self.started_at = Some(SystemTime::now());
+    }
+
+    /// State transition when a logcat session ends (stopped, exited, or
+    /// failed to spawn). The latest-log path is deliberately RETAINED: the
+    /// table's latest-log column and the copy-path action read it after the
+    /// session is over. Only live process state is cleared. This invariant
+    /// regressed once (0.9.0 trial bug 1) and is pinned by tests.
+    pub fn session_ended(&mut self, error: Option<String>) {
+        self.child = None;
+        self.started_at = None;
+        self.run_state = match error {
+            Some(err) => DeviceRunState::Error(err),
+            None => DeviceRunState::Idle,
+        };
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -207,6 +229,8 @@ pub enum AppEvent {
 #[cfg(test)]
 mod tests {
     use super::{DeviceEntry, DeviceInfo, DeviceRunState};
+    use std::path::{Path, PathBuf};
+    use std::time::SystemTime;
 
     #[test]
     fn device_entry_matches_identity_primary_and_secondary_serials() {
@@ -231,6 +255,80 @@ mod tests {
 
         entry.info.identity_key = "ABC123".to_owned();
         assert!(entry.matches_serial("ABC123"));
+    }
+
+    fn sample_entry() -> DeviceEntry {
+        DeviceEntry {
+            info: DeviceInfo {
+                serial: "ZY223JQ9K".to_owned(),
+                identity_key: "ZY223JQ9K".to_owned(),
+                state: "device".to_owned(),
+                android_version: None,
+                manufacturer: None,
+                model: None,
+            },
+            transport_serials: vec!["ZY223JQ9K".to_owned()],
+            run_state: DeviceRunState::Idle,
+            output_path: None,
+            started_at: None,
+            child: None,
+        }
+    }
+
+    /// Trial bug 1 regression pin: a session that ran and stopped must keep
+    /// its latest-log path — the copy-path action and the table column read
+    /// it after the session is over. (0.9.0 RC cleared it on session end.)
+    #[test]
+    fn session_end_retains_latest_log_path() {
+        let mut entry = sample_entry();
+        entry.output_path = Some(PathBuf::from(r"C:\logs\ZY223JQ9K-20260923.log"));
+        entry.run_state = DeviceRunState::Running;
+        entry.started_at = Some(SystemTime::now());
+
+        entry.session_ended(None);
+
+        assert_eq!(
+            entry.output_path.as_deref(),
+            Some(Path::new(r"C:\logs\ZY223JQ9K-20260923.log")),
+            "latest-log path must survive session end"
+        );
+        assert!(matches!(entry.run_state, DeviceRunState::Idle));
+        assert!(entry.child.is_none());
+        assert!(entry.started_at.is_none());
+        assert!(!entry.is_active());
+    }
+
+    #[test]
+    fn session_end_maps_error_state_and_keeps_path() {
+        let mut entry = sample_entry();
+        entry.output_path = Some(PathBuf::from("/logs/x.log"));
+        entry.run_state = DeviceRunState::Stopping;
+
+        entry.session_ended(Some("collector crashed".to_owned()));
+
+        assert!(matches!(
+            &entry.run_state,
+            DeviceRunState::Error(message) if message == "collector crashed"
+        ));
+        assert_eq!(entry.output_path.as_deref(), Some(Path::new("/logs/x.log")));
+    }
+
+    #[test]
+    fn session_spawned_transitions_to_running_with_path_and_time() {
+        let mut entry = sample_entry();
+        let before = SystemTime::now();
+        entry.session_spawned(
+            PathBuf::from("/logs/new.log"),
+            std::sync::Arc::new(std::sync::Mutex::new(None)),
+        );
+
+        assert!(matches!(entry.run_state, DeviceRunState::Running));
+        assert_eq!(
+            entry.output_path.as_deref(),
+            Some(Path::new("/logs/new.log"))
+        );
+        assert!(entry.started_at.is_some_and(|started| started >= before));
+        assert!(entry.is_active());
     }
 }
 
