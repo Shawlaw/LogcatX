@@ -95,6 +95,9 @@ pub(crate) fn sort_entries(entries: &mut [RemoteEntry], sort: FilesSort) {
 
 impl AdbCollectorApp {
     /// First entry to the Files page: pick a device and open /sdcard.
+    /// Runs its auto-navigation exactly ONCE per page entry — a failed
+    /// listing must surface its error instead of re-requesting every frame
+    /// (the field-trial log showed ~8 retries/second hammering on errors).
     pub(crate) fn files_enter_page(&mut self) {
         if self.files_serial.is_none() {
             let serial = self
@@ -104,14 +107,28 @@ impl AdbCollectorApp {
                 .and_then(|id| self.device_primary_transport_serial(&id));
             self.files_serial = serial;
         }
-        if self.files_entries.is_empty() && !self.files_list_loading {
-            let cwd = self.files_cwd.clone();
-            self.files_navigate(cwd);
+        if self.files_page_opened {
+            return;
         }
+        self.files_page_opened = true;
+        // /sdcard rather than /: several devices restrict `cd /`, and the
+        // PRD's normal-user paths all live under /sdcard anyway.
+        let start = if self.files_cwd.as_str() == "/" {
+            RemotePath::new("/sdcard").unwrap_or_else(|_| RemotePath::root())
+        } else {
+            self.files_cwd.clone()
+        };
+        self.files_navigate(start);
     }
 
     pub(crate) fn files_navigate(&mut self, path: RemotePath) {
         if path != self.files_cwd {
+            log::info!(
+                "Files: navigating {} -> {} (device {})",
+                self.files_cwd,
+                path,
+                self.files_serial.as_deref().unwrap_or("-")
+            );
             self.files_history.push(self.files_cwd.clone());
             if self.files_history.len() > 64 {
                 self.files_history.remove(0);
@@ -140,6 +157,13 @@ impl AdbCollectorApp {
         let generation = self.files_list_generation;
         self.files_list_loading = true;
         self.files_error = None;
+        // Entering a different directory drops the old listing immediately
+        // so the user sees one loading state instead of stale rows that
+        // suddenly swap (field-trial bug 5).
+        if self.files_entries_path.as_ref() != Some(&self.files_cwd) {
+            self.files_entries.clear();
+            self.files_selected.clear();
+        }
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
         let path = self.files_cwd.clone();
@@ -188,12 +212,25 @@ impl AdbCollectorApp {
         self.files_list_loading = false;
         match result {
             Ok(entries) => {
+                let directories = entries
+                    .iter()
+                    .filter(|entry| matches!(entry.kind, RemoteEntryKind::Directory))
+                    .count();
+                log::info!(
+                    "Files: listed {} ({} entries, {} directories)",
+                    self.files_cwd,
+                    entries.len(),
+                    directories
+                );
                 self.files_error = None;
+                self.files_entries_path = Some(self.files_cwd.clone());
                 self.files_entries = entries;
                 self.files_selected.clear();
             }
             Err(err) => {
+                log::warn!("Files: listing {} failed: {err}", self.files_cwd);
                 self.files_entries.clear();
+                self.files_entries_path = None;
                 self.files_selected.clear();
                 self.files_error = Some(err);
             }
@@ -625,6 +662,13 @@ impl AdbCollectorApp {
         let mut sorted = self.files_entries.clone();
         sort_entries(&mut sorted, self.files_sort);
 
+        // Fixed info-column widths shared by header and rows so the columns
+        // line up one-to-one (field-trial bug 4): name is flexible, then
+        // size / modified / kind in the same order everywhere.
+        const COL_SIZE: f32 = 84.0;
+        const COL_MODIFIED: f32 = 122.0;
+        const COL_KIND: f32 = 46.0;
+
         egui::Frame::new()
             .stroke(egui::Stroke::new(1.0, Color32::from_rgb(233, 236, 242)))
             .corner_radius(egui::CornerRadius::same(10))
@@ -644,25 +688,50 @@ impl AdbCollectorApp {
                         }
                     }
                     self.files_sort_button(ui, FilesSortField::Name, self.tr("files.col_name"));
-                    ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                        self.files_sort_button(
-                            ui,
-                            FilesSortField::Modified,
-                            self.tr("files.col_modified"),
-                        );
-                        ui.add_space(18.0);
-                        self.files_sort_button(ui, FilesSortField::Size, self.tr("files.col_size"));
-                        ui.add_space(18.0);
-                        let _ = ui.label(RichText::new(self.tr("files.col_kind")).small().weak());
-                    });
+                    // Flexible spacer pushes the info columns to the right.
+                    let remaining = (ui.available_width()
+                        - COL_SIZE
+                        - COL_MODIFIED
+                        - COL_KIND
+                        - 3.0 * ui.spacing().item_spacing.x)
+                        .max(0.0);
+                    ui.add_space(remaining);
+                    self.files_sort_button(ui, FilesSortField::Size, self.tr("files.col_size"));
+                    self.files_sort_button_sized(
+                        ui,
+                        FilesSortField::Modified,
+                        self.tr("files.col_modified"),
+                        Some(COL_MODIFIED),
+                    );
+                    ui.add_sized(
+                        [COL_KIND, ui.available_height()],
+                        egui::Label::new(RichText::new(self.tr("files.col_kind")).small().strong())
+                            .selectable(false),
+                    );
                 });
                 ui.separator();
 
-                if sorted.is_empty() && !self.files_list_loading {
+                if self.files_list_loading {
+                    // Loading state instead of stale rows: entering a
+                    // directory shows one centered spinner until the new
+                    // listing lands (field-trial bug 5).
+                    ui.add_space(12.0);
+                    ui.vertical_centered(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(RichText::new(self.tr("files.loading")).weak());
+                        });
+                    });
+                    ui.add_space(12.0);
+                    return;
+                }
+
+                if sorted.is_empty() {
                     ui.add_space(12.0);
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new(self.tr("files.empty_dir")).weak());
                     });
+                    return;
                 }
 
                 egui::ScrollArea::vertical()
@@ -705,22 +774,16 @@ impl AdbCollectorApp {
                                 if is_dir && name_response.double_clicked() {
                                     open = true;
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
-                                    ui.label(
-                                        RichText::new(Self::files_kind_label(&entry.kind))
-                                            .small()
-                                            .weak(),
-                                    );
-                                    ui.add_space(12.0);
-                                    ui.label(
-                                        RichText::new(Self::files_modified_label(
-                                            entry.modified_unix_secs,
-                                        ))
-                                        .small()
-                                        .weak(),
-                                    );
-                                    ui.add_space(12.0);
-                                    ui.label(
+                                let remaining = (ui.available_width()
+                                    - COL_SIZE
+                                    - COL_MODIFIED
+                                    - COL_KIND
+                                    - 3.0 * ui.spacing().item_spacing.x)
+                                    .max(0.0);
+                                ui.add_space(remaining);
+                                ui.add_sized(
+                                    [COL_SIZE, ui.available_height()],
+                                    egui::Label::new(
                                         RichText::new(if is_dir {
                                             "—".to_owned()
                                         } else {
@@ -728,8 +791,29 @@ impl AdbCollectorApp {
                                         })
                                         .small()
                                         .weak(),
-                                    );
-                                });
+                                    )
+                                    .selectable(false),
+                                );
+                                ui.add_sized(
+                                    [COL_MODIFIED, ui.available_height()],
+                                    egui::Label::new(
+                                        RichText::new(Self::files_modified_label(
+                                            entry.modified_unix_secs,
+                                        ))
+                                        .small()
+                                        .weak(),
+                                    )
+                                    .selectable(false),
+                                );
+                                ui.add_sized(
+                                    [COL_KIND, ui.available_height()],
+                                    egui::Label::new(
+                                        RichText::new(Self::files_kind_label(&entry.kind))
+                                            .small()
+                                            .weak(),
+                                    )
+                                    .selectable(false),
+                                );
                             });
                             if open && let Ok(target) = self.files_cwd.join(&entry.name) {
                                 let target = target.clone();
@@ -743,6 +827,16 @@ impl AdbCollectorApp {
     /// Sort header: first click selects the field ascending, clicking the
     /// active field toggles direction (PRD §6.1 sorting).
     fn files_sort_button(&mut self, ui: &mut egui::Ui, field: FilesSortField, label: String) {
+        self.files_sort_button_sized(ui, field, label, None)
+    }
+
+    fn files_sort_button_sized(
+        &mut self,
+        ui: &mut egui::Ui,
+        field: FilesSortField,
+        label: String,
+        width: Option<f32>,
+    ) {
         let marker = if self.files_sort.field == field {
             if self.files_sort.ascending {
                 " ▲"
@@ -752,12 +846,12 @@ impl AdbCollectorApp {
         } else {
             ""
         };
-        if ui
-            .add(egui::Button::new(
-                RichText::new(format!("{label}{marker}")).small().strong(),
-            ))
-            .clicked()
-        {
+        let button = egui::Button::new(RichText::new(format!("{label}{marker}")).small().strong());
+        let response = match width {
+            Some(width) => ui.add_sized([width, ui.available_height()], button),
+            None => ui.add(button),
+        };
+        if response.clicked() {
             if self.files_sort.field == field {
                 self.files_sort.ascending = !self.files_sort.ascending;
             } else {
@@ -1205,6 +1299,97 @@ mod tests {
         assert_eq!(entries[0].name, "z-dir"); // directories first
         assert_eq!(entries[1].name, "a.txt");
         assert_eq!(entries[2].name, "b.txt");
+    }
+
+    /// Empirical reproduction of the Files-page double-click with synthetic
+    /// pointer input (no window needed). Mirrors the exact widget structure
+    /// of a listing row: `ScrollArea::show_rows` + `ui.horizontal` +
+    /// `selectable_label`, with the app's widened double-click window.
+    #[test]
+    fn directory_name_double_click_registers_in_ui_harness() {
+        use egui::{CentralPanel, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};
+        use std::sync::atomic::Ordering;
+
+        let ctx = egui::Context::default();
+        // Same option the app sets at startup (AdbCollectorApp::new).
+        ctx.options_mut(|options| options.input_options.max_double_click_delay = 0.5);
+
+        let label_rect = std::sync::Arc::new(std::sync::Mutex::new(Rect::NOTHING));
+        let singles = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+        let double_fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let run_frame = |time: f64, events: Vec<egui::Event>| {
+            let rect_cell = label_rect.clone();
+            let singles = singles.clone();
+            let double_fired = double_fired.clone();
+            let input = RawInput {
+                time: Some(time),
+                events,
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, true])
+                        .show_rows(ui, 26.0, 1, |ui, range| {
+                            for _index in range {
+                                ui.horizontal(|ui| {
+                                    let mut checked = false;
+                                    ui.checkbox(&mut checked, "");
+                                    ui.label("📁");
+                                    let response = ui.selectable_label(
+                                        false,
+                                        egui::RichText::new("Directory Name").strong(),
+                                    );
+                                    *rect_cell.lock().unwrap() = response.rect;
+                                    if response.clicked() {
+                                        *singles.lock().unwrap() += 1;
+                                    }
+                                    if response.double_clicked() {
+                                        double_fired.store(true, Ordering::SeqCst);
+                                    }
+                                });
+                            }
+                        });
+                });
+            });
+        };
+
+        // Frame 0: discover the label position (no input).
+        run_frame(0.0, Vec::new());
+        let pos = label_rect.lock().unwrap().center();
+        assert!(label_rect.lock().unwrap().is_positive(), "label rendered");
+
+        let press = || egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: true,
+            modifiers: Modifiers::default(),
+        };
+        let release = || egui::Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed: false,
+            modifiers: Modifiers::default(),
+        };
+        let moved = |pos: Pos2| egui::Event::PointerMoved(pos);
+
+        // First click: press at t=0.05, release at t=0.10.
+        run_frame(0.05, vec![moved(pos), press()]);
+        run_frame(0.10, vec![release()]);
+        assert_eq!(*singles.lock().unwrap(), 1, "single click registers");
+        assert!(!double_fired.load(Ordering::SeqCst));
+
+        // Second click 250ms later — within the 0.5s window.
+        run_frame(0.35, vec![press()]);
+        run_frame(0.40, vec![release()]);
+
+        assert_eq!(*singles.lock().unwrap(), 2, "second click registers");
+        assert!(
+            double_fired.load(Ordering::SeqCst),
+            "double click must fire with the widened window"
+        );
     }
 
     #[test]

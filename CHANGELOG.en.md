@@ -26,7 +26,14 @@ All notable changes to this project will be documented in this file.
 - Windows numeric FILEVERSION now mirrors the semantic version (0.9.0.0) instead of the build date
 - Removed the incorrect `run-as <pkg> pm clear` fallback; clear-data failures now surface their real reason
 - Fixed "copy latest log path" graying out and the latest-log column going empty after a session ended (the path now survives session end)
-- Fixed double-click failing to enter directories on the Files page (double-click window widened from 0.3s to 0.5s, matching the Windows system default)
+- Fixed double-click failing to enter directories on the Files page: the double-click window widened from 0.3s to 0.5s (matching the Windows system default), and the listing protocol switched to POSIX file tests ([ -d ]/[ -f ]/[ -L ]) with space-separated metadata — no longer depending on per-device stat support for %F and tab escapes, which misclassified directories on real devices and broke double-click navigation
+- Fixed hidden carriage returns leaking into file names from real adb shell CR/LF output
+- Unified the file listing columns between header and rows (checkbox, name, size, modified, kind aligned one-to-one); the modified column is now sortable
+- Entering a directory now clears the old listing immediately and shows a centered loading indicator instead of stale rows suddenly swapping; a failed listing no longer retries every frame (it previously re-requested about 8 times per second on errors)
+- The Files page now opens /sdcard by default (some devices restrict the root); device command failures without output no longer render a blank error banner
+- Wireless endpoints stuck in handshake states (authorizing/connecting/unknown) that cannot be attributed to a known device no longer render as an operable-dead "unknown state" row; they appear once the handshake completes
+ output
+- Wireless device aggregation now folds non-ready (authorizing/offline) transports with rotated ports into the device known by host IP — one row per physical device; disconnecting a device now clears all of its wireless endpoints so stale dead ports can be removed
 - Fixed the same physical device appearing as a separate, hard-to-remove row when its wireless transport is in a non-ready state (authorizing/offline/...); added display text for authorizing/connecting/recovery and similar states
 - Fixed unconfigured-update builds issuing an update check on every window focus
 

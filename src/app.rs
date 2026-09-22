@@ -221,6 +221,12 @@ pub struct AdbCollectorApp {
     files_serial: Option<String>,
     files_run_as_package: Option<String>,
     files_cwd: remote_fs::RemotePath,
+    /// Directory the currently displayed entries belong to; navigating
+    /// elsewhere clears the listing immediately (no stale flash).
+    files_entries_path: Option<remote_fs::RemotePath>,
+    /// Whether the Files page auto-navigation already ran for this visit
+    /// (prevents per-frame re-requests when a listing fails).
+    files_page_opened: bool,
     files_history: Vec<remote_fs::RemotePath>,
     files_entries: Vec<remote_fs::RemoteEntry>,
     files_list_generation: u64,
@@ -414,6 +420,8 @@ impl AdbCollectorApp {
             files_serial: None,
             files_run_as_package: None,
             files_cwd: remote_fs::RemotePath::root(),
+            files_entries_path: None,
+            files_page_opened: false,
             files_history: Vec::new(),
             files_entries: Vec::new(),
             files_list_generation: 0,
@@ -4222,10 +4230,43 @@ impl AdbCollectorApp {
         self.disconnecting_serial = Some(serial.clone());
         self.set_info(self.tr_args("status.device_disconnecting", &[("serial", device_name)]));
 
+        // Wireless debugging rotates ports; one device may expose several
+        // endpoints of which only some are alive. Disconnect every network
+        // endpoint of the device so a dead ghost port cannot survive because
+        // only the first serial was disconnected (trial bug 3).
+        let all_serials = self
+            .find_device(&serial)
+            .map(|device| {
+                device
+                    .transport_serials
+                    .iter()
+                    .filter(|candidate| adb::is_network_device_serial(candidate))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|| vec![serial.clone()]);
+
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
         thread::spawn(move || {
-            let result = adb::disconnect_device(&adb_path, &serial);
+            let mut first_ok: Option<String> = None;
+            let mut first_err: Option<String> = None;
+            for endpoint in &all_serials {
+                match adb::disconnect_device(&adb_path, endpoint) {
+                    Ok(message) => {
+                        first_ok.get_or_insert(message);
+                    }
+                    Err(err) => {
+                        first_err.get_or_insert(err);
+                    }
+                }
+            }
+            let result = match (first_ok, first_err) {
+                (Some(message), None) => Ok(message),
+                (None, Some(err)) => Err(err),
+                (Some(message), Some(err)) => Err(format!("{message}\nPartially failed: {err}")),
+                (None, None) => Ok(String::new()),
+            };
             let _ = tx.send(AppEvent::DeviceDisconnectFinished { serial, result });
         });
     }
@@ -5037,6 +5078,52 @@ impl AdbCollectorApp {
         let mut devices = devices;
         route_transports_to_known_identities(&mut devices, &known_transport_identities);
 
+        // Wireless debugging rotates ports, so a non-ready endpoint on a host
+        // we already track belongs to that device even when the exact
+        // serial:port was never seen before. Fold by host, both against
+        // existing entries and within this scan (trial bug 3: the ghost row
+        // showed "unknown state", was unoperable and hard to remove).
+        let mut known_host_identities: HashMap<String, String> = existing
+            .values()
+            .flat_map(|device| {
+                let identity = device.info.identity_key.clone();
+                device
+                    .transport_serials
+                    .iter()
+                    .filter(|serial| adb::is_network_device_serial(serial))
+                    .filter_map(move |serial| {
+                        network_serial_host(serial).map(|host| (host.to_owned(), identity.clone()))
+                    })
+            })
+            .collect();
+        for info in &devices {
+            if info.identity_key != info.serial
+                && adb::is_network_device_serial(&info.serial)
+                && let Some(host) = network_serial_host(&info.serial)
+            {
+                known_host_identities
+                    .entry(host.to_owned())
+                    .or_insert_with(|| info.identity_key.clone());
+            }
+        }
+        fold_unresolved_wireless_by_host(&mut devices, &known_host_identities);
+
+        // Field diagnostics for the recurring "ghost device" reports: log
+        // what the scanner saw and what the folds decided, at debug level so
+        // ordinary runs stay quiet.
+        if log::log_enabled!(log::Level::Debug) {
+            for info in &devices {
+                log::debug!(
+                    "Discovery: {} state={} identity={}",
+                    info.serial,
+                    info.state,
+                    info.identity_key
+                );
+            }
+        }
+
+        let devices = hide_unattributed_handshake_endpoints(devices);
+
         let mut grouped: HashMap<String, Vec<DeviceInfo>> = HashMap::new();
         for info in devices {
             grouped
@@ -5780,6 +5867,63 @@ fn route_transports_to_known_identities(
     }
 }
 
+/// Host part of an `IP:port` network serial (mdns instance serials carry no
+/// host and return `None`).
+fn network_serial_host(serial: &str) -> Option<&str> {
+    serial.rsplit_once(':').map(|(host, _)| host)
+}
+
+/// Fold still-unresolved wireless transports into a device known by HOST:
+/// wireless debugging rotates ports, so `authorizing`/`offline` endpoints on
+/// a host we track belong to that device even at a never-seen port.
+fn fold_unresolved_wireless_by_host(
+    infos: &mut [DeviceInfo],
+    known_host_identities: &HashMap<String, String>,
+) {
+    for info in infos {
+        if info.identity_key != info.serial {
+            continue; // already routed or resolved
+        }
+        if !adb::is_network_device_serial(&info.serial) {
+            continue;
+        }
+        if let Some(host) = network_serial_host(&info.serial)
+            && let Some(identity) = known_host_identities.get(host)
+        {
+            info.identity_key = identity.clone();
+        }
+    }
+}
+
+/// Drop network transports that are still in an adb handshake state
+/// (authorizing/connecting/unknown — including bare mdns-instance rows some
+/// adb builds print without a state column) and could not be attributed to
+/// any known device. They are adb's connection noise, not user-visible
+/// devices: unhided they render as an operable-dead "unknown state" row that
+/// refuses to go away (trial bug 3). They reappear once the handshake
+/// completes and the state becomes device/offline/unauthorized.
+fn hide_unattributed_handshake_endpoints(devices: Vec<DeviceInfo>) -> Vec<DeviceInfo> {
+    devices
+        .into_iter()
+        .filter(|info| {
+            let attributed = info.identity_key != info.serial;
+            let handshake_noise = matches!(
+                info.state.as_str(),
+                "unknown" | "authorizing" | "connecting" | ""
+            );
+            if !attributed && handshake_noise && adb::is_network_device_serial(&info.serial) {
+                log::info!(
+                    "Discovery: hiding unattributed handshake endpoint {} (state {:?})",
+                    info.serial,
+                    info.state
+                );
+                return false;
+            }
+            true
+        })
+        .collect()
+}
+
 fn device_transport_rank(info: &DeviceInfo) -> (u8, u8, String) {
     let state_rank = if info.state == "device" { 0 } else { 1 };
     let transport_rank = if adb::is_network_device_serial(&info.serial) {
@@ -6077,7 +6221,8 @@ mod tests {
         DEFAULT_NEW_DISPLAY_DPI, DEFAULT_NEW_DISPLAY_HEIGHT, DEFAULT_NEW_DISPLAY_WIDTH,
         SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT, build_device_push_destination,
         classify_dropped_paths, content_view_width, device_transport_rank,
-        filter_installed_packages, format_device_model_name, install_dropped_apks,
+        filter_installed_packages, fold_unresolved_wireless_by_host, format_device_model_name,
+        hide_unattributed_handshake_endpoints, install_dropped_apks,
         is_current_cleanup_preview_response, pick_primary_device_info,
         route_transports_to_known_identities, settings_error_scroll_area,
         settings_path_input_width, should_reveal_proxy_settings_content,
@@ -6138,6 +6283,59 @@ mod tests {
         let mut infos = vec![transport("10.0.0.9:5555", "10.0.0.9:5555", "offline")];
         route_transports_to_known_identities(&mut infos, &known);
         assert_eq!(infos[0].identity_key, "10.0.0.9:5555");
+    }
+
+    /// Wireless debugging rotates ports: a non-ready endpoint on a KNOWN
+    /// host folds into that device even at a never-seen port — including
+    /// when both arrive in the same scan (first discovery).
+    #[test]
+    fn fold_unresolved_wireless_by_host_merges_rotated_ports() {
+        let mut hosts: HashMap<String, String> = HashMap::new();
+        hosts.insert("192.168.3.7".to_owned(), "3KQYD25310200835".to_owned());
+
+        let mut infos = vec![
+            transport("192.168.3.7:46119", "192.168.3.7:46119", "authorizing"),
+            transport("usb-1", "OTHER-ID", "device"),
+        ];
+        fold_unresolved_wireless_by_host(&mut infos, &hosts);
+        assert_eq!(infos[0].identity_key, "3KQYD25310200835");
+        assert_eq!(infos[1].identity_key, "OTHER-ID");
+
+        // A different host is a different device and stays its own row.
+        let mut infos = vec![transport("10.0.0.9:5555", "10.0.0.9:5555", "offline")];
+        fold_unresolved_wireless_by_host(&mut infos, &hosts);
+        assert_eq!(infos[0].identity_key, "10.0.0.9:5555");
+
+        // USB transports never participate in host folding.
+        let mut infos = vec![transport("usb-2", "usb-2", "offline")];
+        fold_unresolved_wireless_by_host(&mut infos, &hosts);
+        assert_eq!(infos[0].identity_key, "usb-2");
+    }
+
+    /// Trial bug 3 (third round): unattributed network endpoints stuck in
+    /// adb handshake states are connection noise and must not render as
+    /// dead "unknown state" rows.
+    #[test]
+    fn hide_unattributed_handshake_endpoints_drops_noise_keeps_real() {
+        let devices = vec![
+            // Ghost: unattributed network endpoint in a handshake state.
+            transport(
+                "adb-1234-YQ._adb-tls-connect._tcp",
+                "adb-1234-YQ._adb-tls-connect._tcp",
+                "unknown",
+            ),
+            transport("192.168.3.136:46119", "192.168.3.136:46119", "authorizing"),
+            // Real devices: ready, resolved, or meaningful offline states stay.
+            transport("192.168.3.136:41271", "CLOUD-ID", "device"),
+            transport("10.0.0.9:5555", "10.0.0.9:5555", "offline"),
+            transport("usb-1", "usb-1", "unknown"),
+        ];
+        let kept = hide_unattributed_handshake_endpoints(devices);
+        let kept_serials: Vec<&str> = kept.iter().map(|info| info.serial.as_str()).collect();
+        assert_eq!(
+            kept_serials,
+            vec!["192.168.3.136:41271", "10.0.0.9:5555", "usb-1",]
+        );
     }
 
     #[test]

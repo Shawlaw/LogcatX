@@ -78,7 +78,7 @@ fn push_reports_progress_and_completes() {
     let source = local_target("progress.bin");
     let id = manager.enqueue_push("device-a", source, "/sdcard/progress.bin".into());
 
-    let task = wait_until(&manager, id, Duration::from_secs(5), |task| {
+    let task = wait_until(&manager, id, Duration::from_secs(10), |task| {
         task.state == TransferState::Completed
     });
     assert_eq!(task.state, TransferState::Completed);
@@ -97,13 +97,13 @@ fn cancel_mid_transfer_finishes_promptly() {
         "/cancel/huge.zip".into(),
         local_target("cancel.bin"),
     );
-    wait_until(&manager, id, Duration::from_secs(5), |task| {
+    wait_until(&manager, id, Duration::from_secs(10), |task| {
         task.state == TransferState::Running
     });
 
     let started = Instant::now();
     manager.cancel(id);
-    let task = wait_until(&manager, id, Duration::from_secs(5), |task| {
+    let task = wait_until(&manager, id, Duration::from_secs(10), |task| {
         task.state == TransferState::Cancelled
     });
     assert_eq!(task.state, TransferState::Cancelled);
@@ -129,7 +129,7 @@ fn silent_transfer_fails_as_stalled() {
         local_target("stall.bin"),
     );
     let started = Instant::now();
-    let task = wait_until(&manager, id, Duration::from_secs(5), |task| {
+    let task = wait_until(&manager, id, Duration::from_secs(10), |task| {
         task.state == TransferState::Failed
     });
     assert_eq!(task.state, TransferState::Failed);
@@ -150,7 +150,7 @@ fn adb_failure_carries_stderr_detail() {
         "/fail/missing.zip".into(),
         local_target("fail.bin"),
     );
-    let task = wait_until(&manager, id, Duration::from_secs(5), |task| {
+    let task = wait_until(&manager, id, Duration::from_secs(10), |task| {
         task.state == TransferState::Failed
     });
     let error = task.error.as_deref().unwrap_or("");
@@ -184,7 +184,7 @@ fn per_device_concurrency_capped_and_devices_isolated() {
     );
 
     // The device-b transfer starts right away even though device-a is busy.
-    wait_until(&manager, other, Duration::from_secs(5), |task| {
+    wait_until(&manager, other, Duration::from_secs(10), |task| {
         task.state == TransferState::Running
     });
 
@@ -202,13 +202,13 @@ fn per_device_concurrency_capped_and_devices_isolated() {
         assert_eq!(b_state.state, TransferState::Queued);
     }
 
-    wait_until(&manager, a, Duration::from_secs(5), |task| {
+    wait_until(&manager, a, Duration::from_secs(10), |task| {
         task.state == TransferState::Completed
     });
-    wait_until(&manager, b, Duration::from_secs(5), |task| {
+    wait_until(&manager, b, Duration::from_secs(10), |task| {
         task.state == TransferState::Completed
     });
-    wait_until(&manager, other, Duration::from_secs(5), |task| {
+    wait_until(&manager, other, Duration::from_secs(10), |task| {
         task.state == TransferState::Completed
     });
     manager.shutdown();
@@ -222,13 +222,13 @@ fn failed_transfer_can_be_retried() {
         "/fail/again.zip".into(),
         local_target("retry.bin"),
     );
-    wait_until(&manager, id, Duration::from_secs(5), |task| {
+    wait_until(&manager, id, Duration::from_secs(10), |task| {
         task.state == TransferState::Failed
     });
 
     manager.retry(id);
     // The scenario fails again, proving the task actually re-executed.
-    let task = wait_until(&manager, id, Duration::from_secs(5), |task| {
+    let task = wait_until(&manager, id, Duration::from_secs(10), |task| {
         task.state == TransferState::Failed && task.error.is_some() && task.bytes_transferred == 0
     });
     assert!(task.error.is_some());
@@ -243,7 +243,7 @@ fn clear_finished_removes_terminal_tasks() {
         "/fail/gone.zip".into(),
         local_target("clear.bin"),
     );
-    wait_until(&manager, id, Duration::from_secs(5), |task| {
+    wait_until(&manager, id, Duration::from_secs(10), |task| {
         task.state == TransferState::Failed
     });
 

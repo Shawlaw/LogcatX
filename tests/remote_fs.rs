@@ -20,15 +20,15 @@ fn remote_fs() -> RemoteFs {
         std::fs::write(
             &script_path,
             concat!(
-                "shell cd '/data/files' * => out:hello world.txt\\nregular file\\t10\\t1\\n",
-                "中文文件.txt\\nregular file\\t30\\t3\\n | exit:0\n",
-                "shell cd '/data/empty' * => out:*\\nERR\\n | exit:0\n",
+                "shell cd '/data/files' * => out:f\\nhello world.txt\\n10 1\\n",
+                "f\\n中文文件.txt\\n30 3\\nd\\n子目录\\n0 0\\n | exit:0\n",
+                "shell cd '/data/empty' * => out:f\\n*\\n- -\\n | exit:0\n",
                 "shell cd '/data/missing' * => err:sh: cd: /data/missing: No such file or directory | exit:42\n",
                 "shell cd '/data/locked' * => err:sh: cd: /data/locked: Permission denied | exit:42\n",
                 "shell mkdir -p '/data/新建 目录' => exit:0\n",
                 "shell mv '/data/a b.txt' '/data/a b2.txt' => exit:0\n",
                 "shell rm -rf '/data/删除 我' => exit:0\n",
-                "shell stat -c '%F' '/data/a$b.txt' * => out:regular file\\n | exit:0\n",
+                "shell if [ -d '/data/a$b.txt' ]* => out:f\\n | exit:0\n",
             ),
         )
         .expect("write script");
@@ -45,12 +45,14 @@ fn list_parses_special_names_from_machine_protocol() {
     let entries = fs
         .list(&RemotePath::new("/data/files").unwrap())
         .expect("listing succeeds");
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].name, "hello world.txt");
     assert_eq!(entries[0].kind, RemoteEntryKind::File);
     assert_eq!(entries[0].size, 10);
     assert_eq!(entries[1].name, "中文文件.txt");
     assert_eq!(entries[1].size, 30);
+    assert_eq!(entries[2].name, "子目录");
+    assert_eq!(entries[2].kind, RemoteEntryKind::Directory);
 }
 
 #[test]

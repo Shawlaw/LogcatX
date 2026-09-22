@@ -172,11 +172,6 @@ pub fn shell_quote(arg: &str) -> String {
     quoted
 }
 
-/// Escape for embedding into a double-quoted `stat -c` format string.
-fn quote_stat_format(format: &str) -> String {
-    format.replace('\\', "\\\\").replace('\'', "'\\''")
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteEntryKind {
     Directory,
@@ -186,16 +181,14 @@ pub enum RemoteEntryKind {
 }
 
 impl RemoteEntryKind {
-    fn parse(stat_kind: &str) -> Self {
-        let lowered = stat_kind.trim().to_ascii_lowercase();
-        if lowered.contains("directory") {
-            RemoteEntryKind::Directory
-        } else if lowered.contains("symbolic link") {
-            RemoteEntryKind::Symlink
-        } else if lowered.contains("regular file") || lowered.contains("regular empty file") {
-            RemoteEntryKind::File
-        } else {
-            RemoteEntryKind::Other(stat_kind.trim().to_owned())
+    /// Parse a protocol kind marker emitted by the listing script's
+    /// `[ -d ]/[ -L ]/[ -f ]` tests: `d`, `l`, `f`, or anything else.
+    fn parse_marker(marker: &str) -> Self {
+        match marker.trim() {
+            "d" => RemoteEntryKind::Directory,
+            "l" => RemoteEntryKind::Symlink,
+            "f" => RemoteEntryKind::File,
+            other => RemoteEntryKind::Other(other.to_owned()),
         }
     }
 }
@@ -208,61 +201,58 @@ pub struct RemoteEntry {
     pub modified_unix_secs: Option<u64>,
 }
 
-/// Parse the two-line-per-entry listing protocol; also returns entries whose
-/// stat failed (missing metadata) with zeroed size and `None` mtime so the
-/// UI can still show the name (PRD §44 "missing metadata").
+/// Parse the three-line-per-entry listing protocol: kind marker (`d`/`f`/
+/// `l`/`o`), name, `size mtime` (`- -` when stat failed). Entries with
+/// missing metadata still list with zeroed size and `None` mtime so the UI
+/// can show the name (PRD §44 "missing metadata"). Tolerates the `\r\n`
+/// line endings a real `adb shell` pty appends.
 pub(crate) fn parse_listing(stdout: &str) -> Vec<RemoteEntry> {
-    let mut entries = Vec::new();
-    let mut lines = stdout.lines().peekable();
-    // The shell prints nothing for an empty directory except a single
-    // unmatched glob line ("*") followed by our ERR marker; drop that pair.
-    let mut raw_pairs: Vec<(String, Option<String>)> = Vec::new();
-    while let Some(name_line) = lines.next() {
-        if name_line.is_empty() {
-            continue;
-        }
-        let meta_line = lines.next();
-        raw_pairs.push((name_line.to_owned(), meta_line.map(str::to_owned)));
+    // A real adb shell emits \r\n; strip the carriage returns first so names
+    // never carry a hidden trailing \r into display or path joins.
+    let lines: Vec<&str> = stdout
+        .lines()
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    // Collect complete (kind, name, meta) triplets; a truncated tail leaves
+    // fewer than three lines and is ignored (protocol cut, not corruption).
+    let mut triplets: Vec<(&str, &str, &str)> = Vec::new();
+    let mut cursor = 0;
+    while cursor + 2 < lines.len() {
+        triplets.push((lines[cursor], lines[cursor + 1], lines[cursor + 2]));
+        cursor += 3;
     }
-    if raw_pairs.len() == 1 {
-        let (name, meta) = &raw_pairs[0];
-        if name == "*" && meta.as_deref().is_some_and(|m| m.trim() == "ERR") {
+
+    // The shell prints nothing for an empty directory except one unmatched
+    // glob iteration: kind "f"/"o" for the literal "*", name "*", meta "- -".
+    if triplets.len() == 1 {
+        let (kind, name, meta) = triplets[0];
+        if name == "*" && meta.trim() == "- -" && (kind == "f" || kind == "o") {
             return Vec::new();
         }
     }
-    for (name, meta) in raw_pairs {
-        if name == "*" && meta.as_deref().is_some_and(|m| m.trim() == "ERR") {
-            // A lone literal-star file would be indistinguishable from the
-            // empty-glob marker; keep only when more entries follow.
-            if entries.is_empty() {
-                continue;
+
+    triplets
+        .into_iter()
+        .map(|(kind, name, meta)| {
+            let kind = RemoteEntryKind::parse_marker(kind);
+            let (size, mtime) = parse_size_mtime(meta);
+            RemoteEntry {
+                name: name.to_owned(),
+                kind,
+                size,
+                modified_unix_secs: mtime,
             }
-        }
-        let (kind, size, mtime) = match meta.as_deref() {
-            Some(meta) if meta.trim() != "ERR" => match parse_stat_line(meta.trim()) {
-                Some(parsed) => parsed,
-                None => (RemoteEntryKind::Other(String::new()), 0, None),
-            },
-            _ => (RemoteEntryKind::Other(String::new()), 0, None),
-        };
-        entries.push(RemoteEntry {
-            name,
-            kind,
-            size,
-            modified_unix_secs: mtime,
-        });
-    }
-    entries
+        })
+        .collect()
 }
 
-fn parse_stat_line(line: &str) -> Option<(RemoteEntryKind, u64, Option<u64>)> {
-    let mut parts = line.split('\t');
-    let kind = parts.next()?.to_owned();
-    let size: u64 = parts.next()?.trim().parse().ok()?;
-    let mtime = parts
-        .next()
-        .and_then(|value| value.trim().parse::<u64>().ok());
-    Some((RemoteEntryKind::parse(&kind), size, mtime))
+fn parse_size_mtime(meta: &str) -> (u64, Option<u64>) {
+    let mut parts = meta.split_whitespace();
+    let size = parts.next().and_then(|value| value.parse::<u64>().ok());
+    let mtime = parts.next().and_then(|value| value.parse::<u64>().ok());
+    (size.unwrap_or(0), mtime)
 }
 
 /// Remote filesystem handle bound to one device (optionally through run-as).
@@ -327,18 +317,38 @@ impl RemoteFs {
         } else if lowered.contains("no such file") || lowered.contains("not found") {
             RemoteFsError::NotFound
         } else {
-            RemoteFsError::DeviceError(stderr.trim().to_owned())
+            let detail = stderr.trim();
+            // Devices can fail with a bare non-zero exit and no stderr; an
+            // empty error message would render as a blank banner.
+            if detail.is_empty() {
+                RemoteFsError::DeviceError("device command failed without output".to_owned())
+            } else {
+                RemoteFsError::DeviceError(detail.to_owned())
+            }
         }
     }
 
     /// List one directory. Distinguishes not-found / no-permission / other
     /// failures instead of a blanket "operation failed" (PRD §8).
+    ///
+    /// Protocol notes (learned from the 0.9.0 field trial): the device shell
+    /// is POSIX, so directory detection uses `[ -d ]` tests instead of
+    /// `stat -c '%F'` (whose output and escape handling vary across
+    /// toybox/GNU), and size/mtime use plain space-separated `%s %Y` — no
+    /// `\t` escapes that a device stat may print literally. Each entry is
+    /// three lines: kind marker (`d`/`f`/`l`/`o`), name, `size mtime`
+    /// (`- -` when stat fails). The parser tolerates the `\r\n` line endings
+    /// a real `adb shell` pty produces.
     pub fn list(&self, path: &RemotePath) -> Result<Vec<RemoteEntry>, RemoteFsError> {
         let script = format!(
-            "cd {dir} 2>/dev/null || exit 42; for entry in *; do printf '%s\\n' \"$entry\"; \
-             stat -c {fmt} \"$entry\" 2>/dev/null || printf 'ERR\\n'; done",
+            "cd {dir} 2>/dev/null || exit 42; for entry in *; do \
+             if [ -d \"$entry\" ]; then printf 'd\\n'; \
+             elif [ -L \"$entry\" ]; then printf 'l\\n'; \
+             elif [ -f \"$entry\" ]; then printf 'f\\n'; \
+             else printf 'o\\n'; fi; \
+             printf '%s\\n' \"$entry\"; \
+             stat -c '%s %Y' \"$entry\" 2>/dev/null || printf -- '- -\\n'; done",
             dir = shell_quote(path.as_str()),
-            fmt = shell_quote(&quote_stat_format("%F\\t%s\\t%Y")),
         );
         let output = self.shell(&script)?;
         if !output.success() {
@@ -390,18 +400,22 @@ impl RemoteFs {
         }
     }
 
-    /// Quick existence + kind probe.
+    /// Quick existence + kind probe using POSIX file tests (same reasoning
+    /// as `list`: no dependency on stat format/escape support).
     pub fn stat(&self, path: &RemotePath) -> Result<RemoteEntryKind, RemoteFsError> {
+        let quoted = shell_quote(path.as_str());
         let script = format!(
-            "stat -c {fmt} {path} 2>/dev/null || exit 42",
-            fmt = shell_quote(&quote_stat_format("%F")),
-            path = shell_quote(path.as_str()),
+            "if [ -d {path} ]; then printf 'd\\n'; \
+             elif [ -L {path} ]; then printf 'l\\n'; \
+             elif [ -f {path} ]; then printf 'f\\n'; \
+             else printf 'o\\n'; fi",
+            path = quoted,
         );
         let output = self.shell(&script)?;
         if !output.success() {
             return Err(Self::classify_cd_failure(&output.stderr_lossy()));
         }
-        Ok(RemoteEntryKind::parse(&output.stdout_lossy()))
+        Ok(RemoteEntryKind::parse_marker(output.stdout_lossy().trim()))
     }
 }
 
@@ -478,23 +492,38 @@ mod tests {
 
     #[test]
     fn parse_listing_reads_files_directories_and_symlinks() {
-        let stdout = "Download\ndirectory\t0\t1726992000\n\
-                      log.zip\nregular file\t1283457780\t1726999200\n\
-                      link\nsymbolic link\t11\t1726999300\n";
+        let stdout = "d\nDownload\n0 1726992000\n\
+                      f\nlog.zip\n1283457780 1726999200\n\
+                      l\nlink\n11 1726999300\n";
         let entries = parse_listing(stdout);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].kind, RemoteEntryKind::Directory);
+        assert_eq!(entries[0].name, "Download");
         assert_eq!(entries[1].kind, RemoteEntryKind::File);
         assert_eq!(entries[1].size, 1283457780);
         assert_eq!(entries[1].modified_unix_secs, Some(1726999200));
         assert_eq!(entries[2].kind, RemoteEntryKind::Symlink);
     }
 
+    /// Real `adb shell` output carries \r\n from the device pty; names must
+    /// come back clean (0.9.0 field trial carried hidden \r into names).
+    #[test]
+    fn parse_listing_strips_carriage_returns_from_crlf_output() {
+        let stdout = "d\r\n\r\nDownload\r\n0 1726992000\r\nf\r\nhello world.txt\r\n10 1\r\n";
+        let entries = parse_listing(stdout);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "Download");
+        assert_eq!(entries[0].kind, RemoteEntryKind::Directory);
+        assert_eq!(entries[1].name, "hello world.txt");
+        assert_eq!(entries[1].size, 10);
+        assert_eq!(entries[1].modified_unix_secs, Some(1));
+    }
+
     #[test]
     fn parse_listing_survives_names_with_spaces_and_specials() {
-        let stdout = "hello world.txt\nregular file\t10\t1\n\
-                      a'b$c.txt\nregular file\t20\t2\n\
-                      \u{4e2d}\u{6587}\u{6587}\u{4ef6}.txt\nregular file\t30\t3\n";
+        let stdout = "f\nhello world.txt\n10 1\n\
+                      f\na'b$c.txt\n20 2\n\
+                      f\n\u{4e2d}\u{6587}\u{6587}\u{4ef6}.txt\n30 3\n";
         let entries = parse_listing(stdout);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].name, "hello world.txt");
@@ -505,7 +534,7 @@ mod tests {
     #[test]
     fn parse_listing_keeps_entries_with_missing_metadata() {
         // stat failed (permission) — the name still lists with zeroed data.
-        let stdout = "locked.db\nERR\nvisible.txt\nregular file\t5\t9\n";
+        let stdout = "f\nlocked.db\n- -\nf\nvisible.txt\n5 9\n";
         let entries = parse_listing(stdout);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "locked.db");
@@ -516,18 +545,24 @@ mod tests {
 
     #[test]
     fn parse_listing_detects_empty_directory_glob_marker() {
-        assert!(parse_listing("*\nERR\n").is_empty());
+        assert!(parse_listing("f\n*\n- -\n").is_empty());
         // A literal-star file among others still lists.
-        let entries = parse_listing("a.txt\nregular file\t1\t1\n*\nERR\n");
+        let entries = parse_listing("f\na.txt\n1 1\nf\n*\n2 2\n");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].name, "*");
+        assert_eq!(entries[1].size, 2);
     }
 
     #[test]
-    fn parse_listing_handles_unknown_kinds() {
-        let stdout = "fifo\nfifo file\t0\t0\nsocket\nsocket\t0\t0\n";
+    fn parse_listing_handles_unknown_kinds_and_truncated_tail() {
+        let stdout = "o\nfifo\n0 0\no\nsocket\n0 0\n";
         let entries = parse_listing(stdout);
         assert!(matches!(entries[0].kind, RemoteEntryKind::Other(_)));
         assert!(matches!(entries[1].kind, RemoteEntryKind::Other(_)));
+
+        // A truncated tail (fewer than three lines) is dropped, not garbled.
+        let truncated = parse_listing("d\nDownload\n0 0\nf\norphan");
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0].name, "Download");
     }
 }
