@@ -107,6 +107,9 @@ pub struct TransferTask {
     pub bytes_total: Option<u64>,
     pub speed_bps: Option<u64>,
     pub error: Option<String>,
+    /// Local-time formatted stamp recorded when the task reaches a terminal
+    /// state, shown in the transfers list (field-trial bug 10).
+    pub finished_at: Option<String>,
 }
 
 impl TransferTask {
@@ -371,6 +374,7 @@ impl Scheduler {
                     bytes_total: None,
                     speed_bps: None,
                     error: None,
+                    finished_at: None,
                 };
                 log::info!(
                     "transfer #{} queued on {}: {}",
@@ -563,9 +567,11 @@ impl TransferWorker<'_> {
             state,
             error.as_deref().unwrap_or("")
         );
+        let finished_at = chrono::Local::now().format("%m-%d %H:%M:%S").to_string();
         self.update(|task| {
             task.state = state;
             task.error = error;
+            task.finished_at = Some(finished_at);
         });
     }
 }
@@ -911,6 +917,7 @@ mod tests {
             bytes_total: None,
             speed_bps: None,
             error: None,
+            finished_at: None,
         };
         assert_eq!(task.progress_fraction(), None);
         task.bytes_total = Some(0);

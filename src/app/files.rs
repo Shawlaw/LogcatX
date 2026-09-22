@@ -14,6 +14,12 @@ use crate::{
 use eframe::egui::{self, Align, Color32, RichText};
 use std::thread;
 
+/// Header cells (checkbox, sort buttons, kind label) share one exact height
+/// so they sit on a common center line (trial bug 17); plain `ui.horizontal`
+/// top-aligns children, which only lines up when every child is the same
+/// height.
+const HEADER_ROW_HEIGHT: f32 = 24.0;
+
 /// Quick locations offered on the Files page (PRD §6.1).
 pub(crate) const QUICK_PATHS: &[&str] = &[
     "/sdcard",
@@ -108,6 +114,12 @@ impl AdbCollectorApp {
             self.files_serial = serial;
         }
         if self.files_page_opened {
+            return;
+        }
+        // The auto-navigation may run before the first device poll lands
+        // (serial still None): defer marking the page opened so a later
+        // frame retries once a device is known.
+        if self.files_serial.is_none() {
             return;
         }
         self.files_page_opened = true;
@@ -420,6 +432,7 @@ impl AdbCollectorApp {
                 .desired_width(ui.available_width() - 80.0)
                 .show(ui)
                 .response;
+            super::text_menu::text_edit_menu(&response, &mut self.files_path_input, &self.i18n);
             if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                 go = true;
             }
@@ -497,13 +510,22 @@ impl AdbCollectorApp {
                     self.files_navigate(target);
                 }
             }
-            ui.separator();
+        });
+
+        // run-as gets its own row: sharing it with quick paths cramped both
+        // controls (field-trial bug 9).
+        ui.horizontal(|ui| {
             ui.label(RichText::new(self.tr("files.run_as_label")).small().weak());
             let run_as_response = egui::TextEdit::singleline(&mut self.files_run_as_input)
                 .hint_text("com.example.app")
-                .desired_width(180.0)
+                .desired_width(200.0)
                 .show(ui)
                 .response;
+            super::text_menu::text_edit_menu(
+                &run_as_response,
+                &mut self.files_run_as_input,
+                &self.i18n,
+            );
             let open_run_as = ui.button(self.tr("files.run_as_open")).clicked()
                 || (run_as_response.lost_focus()
                     && ui.input(|input| input.key_pressed(egui::Key::Enter)));
@@ -668,18 +690,33 @@ impl AdbCollectorApp {
         const COL_SIZE: f32 = 84.0;
         const COL_MODIFIED: f32 = 122.0;
         const COL_KIND: f32 = 46.0;
+        // Fixed cell height: sized widgets must never adopt the remaining
+        // panel height, or the header swallows the whole listing (trial
+        // bug 11).
+        const CELL_HEIGHT: f32 = 18.0;
 
         egui::Frame::new()
             .stroke(egui::Stroke::new(1.0, Color32::from_rgb(233, 236, 242)))
             .corner_radius(egui::CornerRadius::same(10))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {
+                // Plain horizontal: inside this page-level scroll area a
+                // `horizontal_centered` row adopts the whole remaining
+                // height (its children end up mid-panel and everything
+                // below is pushed off-screen) — trial bug 11.
                 ui.horizontal(|ui| {
                     let all_selected = !sorted.is_empty()
                         && sorted
                             .iter()
                             .all(|entry| self.files_selected.contains(&entry.name));
-                    if ui.checkbox(&mut all_selected.clone(), "").changed() {
+                    if super::styled_checkbox_sized(
+                        ui,
+                        egui::vec2(18.0, HEADER_ROW_HEIGHT),
+                        &mut all_selected.clone(),
+                        "",
+                    )
+                    .changed()
+                    {
                         if all_selected {
                             self.files_selected =
                                 sorted.iter().map(|entry| entry.name.clone()).collect();
@@ -704,7 +741,7 @@ impl AdbCollectorApp {
                         Some(COL_MODIFIED),
                     );
                     ui.add_sized(
-                        [COL_KIND, ui.available_height()],
+                        [COL_KIND, HEADER_ROW_HEIGHT],
                         egui::Label::new(RichText::new(self.tr("files.col_kind")).small().strong())
                             .selectable(false),
                     );
@@ -726,68 +763,176 @@ impl AdbCollectorApp {
                     return;
                 }
 
-                if sorted.is_empty() {
+                // The "../" parent shortcut always leads the list (never at
+                // the root), is not selectable, and is the only row in an
+                // empty directory (field-trial bug 16) — with an explicit
+                // empty-dir hint below it so the state reads as intentional
+                // rather than a failed listing.
+                let parent_row = self.files_cwd.parent();
+                let total_rows = sorted.len() + usize::from(parent_row.is_some());
+                if total_rows == 0 {
                     ui.add_space(12.0);
                     ui.vertical_centered(|ui| {
                         ui.label(RichText::new(self.tr("files.empty_dir")).weak());
                     });
                     return;
                 }
-
                 egui::ScrollArea::vertical()
                     .max_height(ui.available_height() - 8.0)
                     .auto_shrink([false, true])
-                    .show_rows(ui, 26.0, sorted.len(), |ui, range| {
+                    // The row height must match the actual per-row widget
+                    // height (CELL_HEIGHT + item spacing): `show_rows`
+                    // reserves `rows * (height + spacing) - spacing` of
+                    // scrollable content, so an inflated hint leaves a
+                    // blank tail that the scrollbar still covers (trial
+                    // bug 19).
+                    .show_rows(ui, CELL_HEIGHT, total_rows, |ui, range| {
                         for index in range {
-                            let entry = &sorted[index];
-                            let is_dir = matches!(entry.kind, RemoteEntryKind::Directory);
-                            let mut selected = self.files_selected.contains(&entry.name);
+                            let is_parent_entry = parent_row.is_some() && index == 0;
+                            // Unpack the row data up front: the parent
+                            // shortcut has no backing RemoteEntry.
+                            let (name, kind, size, mtime) = if is_parent_entry {
+                                ("..".to_owned(), RemoteEntryKind::Directory, 0, None)
+                            } else {
+                                let entry = &sorted[index - usize::from(parent_row.is_some())];
+                                (
+                                    entry.name.clone(),
+                                    entry.kind.clone(),
+                                    entry.size,
+                                    entry.modified_unix_secs,
+                                )
+                            };
+                            let is_dir = matches!(kind, RemoteEntryKind::Directory);
+                            let mut selected =
+                                !is_parent_entry && self.files_selected.contains(&name);
                             let mut open = false;
+                            let mut download_file = false;
+                            // Plain horizontal (not centered): see the header
+                            // comment above — centered rows adopt the full
+                            // remaining height inside this scroll context.
                             ui.horizontal(|ui| {
-                                if ui.checkbox(&mut selected, "").changed() {
+                                if !is_parent_entry
+                                    && super::styled_checkbox_sized(
+                                        ui,
+                                        egui::vec2(18.0, CELL_HEIGHT),
+                                        &mut selected,
+                                        "",
+                                    )
+                                    .changed()
+                                {
                                     if selected {
-                                        self.files_selected.insert(entry.name.clone());
+                                        self.files_selected.insert(name.clone());
                                     } else {
-                                        self.files_selected.remove(&entry.name);
+                                        self.files_selected.remove(&name);
                                     }
                                 }
-                                let icon = match entry.kind {
+                                if is_parent_entry {
+                                    // Occupies the checkbox column.
+                                    ui.add_space(18.0);
+                                }
+                                let icon = match kind {
                                     RemoteEntryKind::Directory => "📁",
                                     RemoteEntryKind::File => "📄",
                                     RemoteEntryKind::Symlink => "🔗",
                                     RemoteEntryKind::Other(_) => "❔",
                                 };
-                                ui.label(icon);
-                                let name_response = ui.selectable_label(
-                                    false,
-                                    RichText::new(&entry.name)
-                                        .strong()
-                                        .color(Color32::from_rgb(45, 52, 66)),
+                                ui.add_sized(
+                                    [22.0, CELL_HEIGHT],
+                                    egui::Label::new(RichText::new(icon)).selectable(false),
                                 );
-                                if name_response.clicked() {
-                                    if selected {
-                                        self.files_selected.remove(&entry.name);
-                                    } else {
-                                        self.files_selected.insert(entry.name.clone());
-                                    }
-                                }
-                                if is_dir && name_response.double_clicked() {
-                                    open = true;
-                                }
-                                let remaining = (ui.available_width()
+                                // The name fills the flexible slot between
+                                // the icon and the fixed info columns.
+                                // Truncation keeps the row one line tall no
+                                // matter how long the name is, so every cell
+                                // shares the same center line (trial bug 12);
+                                // the fixed slot also keeps the info columns
+                                // pinned for every row (trial bug 4). The
+                                // slot is left-anchored — `add_sized` would
+                                // center short names in the wide slot
+                                // (trial bug 18). Truncated labels show the
+                                // full name on hover automatically.
+                                let name_width = (ui.available_width()
                                     - COL_SIZE
                                     - COL_MODIFIED
                                     - COL_KIND
                                     - 3.0 * ui.spacing().item_spacing.x)
                                     .max(0.0);
-                                ui.add_space(remaining);
+                                let name_response = ui
+                                    .allocate_ui_with_layout(
+                                        egui::vec2(name_width, CELL_HEIGHT),
+                                        egui::Layout::left_to_right(Align::Center),
+                                        |ui| {
+                                            ui.set_min_width(name_width);
+                                            ui.add(
+                                                egui::Label::new(
+                                                    RichText::new(name.clone())
+                                                        .strong()
+                                                        .color(Color32::from_rgb(45, 52, 66)),
+                                                )
+                                                .truncate()
+                                                .selectable(false)
+                                                .sense(egui::Sense::click()),
+                                            )
+                                        },
+                                    )
+                                    .inner;
+                                if is_parent_entry {
+                                    // Any click on ".." goes up.
+                                    if name_response.clicked() || name_response.double_clicked() {
+                                        open = true;
+                                    }
+                                } else if name_response.clicked() {
+                                    if selected {
+                                        self.files_selected.remove(&name);
+                                    } else {
+                                        self.files_selected.insert(name.clone());
+                                    }
+                                }
+                                if !is_parent_entry && name_response.double_clicked() {
+                                    if is_dir {
+                                        open = true;
+                                    } else {
+                                        // Double-clicking a file downloads it
+                                        // while leaving the current
+                                        // multi-selection untouched
+                                        // (field-trial bugs 8/13).
+                                        download_file = true;
+                                    }
+                                }
+                                // Right-click on a name copies it (or its
+                                // full remote path). Labels and the path are
+                                // prepared up front so the menu closure never
+                                // borrows `self` (the row closure already
+                                // holds it mutably).
+                                if !is_parent_entry {
+                                    let copy_name_label = self.tr("files.copy_name");
+                                    let copy_path_label = self.tr("files.copy_full_path");
+                                    let full_path = self
+                                        .files_cwd
+                                        .join(&name)
+                                        .ok()
+                                        .map(|path| path.as_str().to_owned());
+                                    name_response.context_menu(|ui| {
+                                        if ui.button(&copy_name_label).clicked() {
+                                            ui.ctx().copy_text(name.clone());
+                                            ui.close_menu();
+                                        }
+                                        if let Some(path) = &full_path
+                                            && ui.button(&copy_path_label).clicked()
+                                        {
+                                            ui.ctx().copy_text(path.clone());
+                                            ui.close_menu();
+                                        }
+                                    });
+                                }
+                                let show_meta = !is_parent_entry;
                                 ui.add_sized(
-                                    [COL_SIZE, ui.available_height()],
+                                    [COL_SIZE, CELL_HEIGHT],
                                     egui::Label::new(
-                                        RichText::new(if is_dir {
+                                        RichText::new(if !show_meta || is_dir {
                                             "—".to_owned()
                                         } else {
-                                            desktop_fs::format_bytes(entry.size)
+                                            desktop_fs::format_bytes(size)
                                         })
                                         .small()
                                         .weak(),
@@ -795,32 +940,57 @@ impl AdbCollectorApp {
                                     .selectable(false),
                                 );
                                 ui.add_sized(
-                                    [COL_MODIFIED, ui.available_height()],
+                                    [COL_MODIFIED, CELL_HEIGHT],
                                     egui::Label::new(
-                                        RichText::new(Self::files_modified_label(
-                                            entry.modified_unix_secs,
-                                        ))
+                                        RichText::new(if show_meta {
+                                            Self::files_modified_label(mtime)
+                                        } else {
+                                            "—".to_owned()
+                                        })
                                         .small()
                                         .weak(),
                                     )
                                     .selectable(false),
                                 );
                                 ui.add_sized(
-                                    [COL_KIND, ui.available_height()],
+                                    [COL_KIND, CELL_HEIGHT],
                                     egui::Label::new(
-                                        RichText::new(Self::files_kind_label(&entry.kind))
-                                            .small()
-                                            .weak(),
+                                        RichText::new(if show_meta {
+                                            Self::files_kind_label(&kind)
+                                        } else {
+                                            "-".to_owned()
+                                        })
+                                        .small()
+                                        .weak(),
                                     )
                                     .selectable(false),
                                 );
                             });
-                            if open && let Ok(target) = self.files_cwd.join(&entry.name) {
-                                let target = target.clone();
-                                self.files_navigate(target);
+                            if open {
+                                if is_parent_entry {
+                                    if let Some(parent) = parent_row.clone() {
+                                        self.files_navigate(parent);
+                                    }
+                                } else if let Ok(target) = self.files_cwd.join(&name) {
+                                    let target = target.clone();
+                                    self.files_navigate(target);
+                                }
+                            }
+                            if download_file && let Ok(path) = self.files_cwd.join(&name) {
+                                // Download just this file; the selection stays
+                                // exactly as the user left it (bug 13).
+                                self.files_pick_download_for(vec![path]);
                             }
                         }
                     });
+                // Empty directories still carry the "../" row above; add a
+                // clear "nothing here" hint under it.
+                if sorted.is_empty() {
+                    ui.add_space(10.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(RichText::new(self.tr("files.empty_dir")).weak());
+                    });
+                }
             });
     }
 
@@ -846,11 +1016,11 @@ impl AdbCollectorApp {
         } else {
             ""
         };
-        let button = egui::Button::new(RichText::new(format!("{label}{marker}")).small().strong());
-        let response = match width {
-            Some(width) => ui.add_sized([width, ui.available_height()], button),
-            None => ui.add(button),
-        };
+        let button = egui::Button::new(RichText::new(format!("{label}{marker}")).small().strong())
+            // Exact header cell height keeps every header element on one
+            // center line (trial bug 17); width stays natural when unset.
+            .min_size(egui::vec2(width.unwrap_or(0.0), HEADER_ROW_HEIGHT));
+        let response = ui.add(button);
         if response.clicked() {
             if self.files_sort.field == field {
                 self.files_sort.ascending = !self.files_sort.ascending;
@@ -927,6 +1097,13 @@ impl AdbCollectorApp {
     }
 
     fn files_pick_download(&mut self) {
+        self.files_pick_download_for(self.files_selected_paths());
+    }
+
+    /// Download specific remote paths; the current selection is left exactly
+    /// as-is (field-trial bug 13: double-click downloads one file without
+    /// clearing multi-selection).
+    fn files_pick_download_for(&mut self, paths: Vec<RemotePath>) {
         let Some(serial) = self.files_serial.clone() else {
             return;
         };
@@ -936,7 +1113,7 @@ impl AdbCollectorApp {
         else {
             return;
         };
-        for path in self.files_selected_paths() {
+        for path in paths {
             let name = path
                 .file_name()
                 .map(|name| name.to_owned())
@@ -1037,6 +1214,9 @@ impl AdbCollectorApp {
                                 .small()
                                 .color(Color32::from_rgb(46, 125, 50)),
                         );
+                        if let Some(finished_at) = &task.finished_at {
+                            let _ = ui.label(RichText::new(finished_at.clone()).small().weak());
+                        }
                     }
                     TransferState::Failed => {
                         let _ = ui.label(
@@ -1048,6 +1228,9 @@ impl AdbCollectorApp {
                             .small()
                             .color(Color32::from_rgb(190, 60, 60)),
                         );
+                        if let Some(finished_at) = &task.finished_at {
+                            let _ = ui.label(RichText::new(finished_at.clone()).small().weak());
+                        }
                     }
                     TransferState::Cancelled => {
                         let _ = ui.label(
@@ -1055,6 +1238,9 @@ impl AdbCollectorApp {
                                 .small()
                                 .weak(),
                         );
+                        if let Some(finished_at) = &task.finished_at {
+                            let _ = ui.label(RichText::new(finished_at.clone()).small().weak());
+                        }
                     }
                 }
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
@@ -1068,12 +1254,104 @@ impl AdbCollectorApp {
                     {
                         self.transfers.retry(task.id);
                     }
+                    // Completed-transfer shortcuts (field-trial bug 10):
+                    // pulled files open on the PC, pushed files jump back to
+                    // their destination directory in the Files page. Local
+                    // targets are existence-checked first; missing ones raise
+                    // a modal alert instead of invoking Explorer (bug 14).
+                    // The three shortcut buttons get extra padding so their
+                    // labels are not flush against the borders (bug 15).
+                    if task.state == TransferState::Completed {
+                        let saved_padding = ui.spacing().button_padding;
+                        ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
+                        match &task.operation {
+                            crate::transfer::TransferOperation::Pull { destination, .. } => {
+                                if ui.button(self.tr("files.open_folder")).clicked() {
+                                    match destination.parent().filter(|p| p.is_dir()) {
+                                        Some(parent) => {
+                                            if let Err(err) = crate::fs_utils::open_path(parent) {
+                                                self.set_error(err);
+                                            }
+                                        }
+                                        None => {
+                                            self.files_alert = Some(self.tr_args(
+                                                "files.open_missing",
+                                                &[("path", destination.display().to_string())],
+                                            ))
+                                        }
+                                    }
+                                }
+                                if ui.button(self.tr("files.open_file")).clicked() {
+                                    if destination.is_file() {
+                                        if let Err(err) = crate::fs_utils::open_path(destination) {
+                                            self.set_error(err);
+                                        }
+                                    } else {
+                                        self.files_alert = Some(self.tr_args(
+                                            "files.open_missing",
+                                            &[("path", destination.display().to_string())],
+                                        ));
+                                    }
+                                }
+                            }
+                            crate::transfer::TransferOperation::Push { destination, .. } => {
+                                if ui.button(self.tr("files.jump_to_destination")).clicked() {
+                                    let device = task.device.clone();
+                                    self.jump_files_to_remote_destination(&device, destination);
+                                }
+                            }
+                        }
+                        ui.spacing_mut().button_padding = saved_padding;
+                    }
                 });
             });
         }
     }
 
+    /// Switch the Files page to `device` and open the directory containing
+    /// the remote `destination` path (field-trial bug 10).
+    fn jump_files_to_remote_destination(&mut self, device: &str, destination: &str) {
+        self.files_serial = Some(device.to_owned());
+        self.files_run_as_package = None;
+        match crate::remote_fs::RemotePath::new(destination)
+            .ok()
+            .and_then(|path| path.parent())
+        {
+            Some(parent) => {
+                let parent = parent.clone();
+                self.files_navigate(parent);
+            }
+            None => {
+                let root = RemotePath::root();
+                self.files_navigate(root);
+            }
+        }
+    }
+
     fn ui_files_dialogs(&mut self, ctx: &egui::Context) {
+        // Modal alert for missing local transfer targets (bug 14): requires
+        // an explicit OK, unlike the passive status line.
+        if let Some(message) = self.files_alert.clone() {
+            let mut open = true;
+            egui::Window::new(self.tr("files.alert_title"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label(message);
+                    ui.add_space(8.0);
+                    ui.vertical_centered(|ui| {
+                        if ui.button(self.tr("files.alert_ok")).clicked() {
+                            self.files_alert = None;
+                        }
+                    });
+                });
+            if !open {
+                self.files_alert = None;
+            }
+        }
+
         if self.files_show_mkdir {
             let mut open = true;
             egui::Window::new(self.tr("files.mkdir"))
@@ -1081,7 +1359,12 @@ impl AdbCollectorApp {
                 .collapsible(false)
                 .show(ctx, |ui| {
                     ui.label(self.tr("files.mkdir_hint"));
-                    ui.text_edit_singleline(&mut self.files_mkdir_input);
+                    let response = ui.text_edit_singleline(&mut self.files_mkdir_input);
+                    super::text_menu::text_edit_menu(
+                        &response,
+                        &mut self.files_mkdir_input,
+                        &self.i18n,
+                    );
                     ui.horizontal(|ui| {
                         if ui.button(self.tr("files.create")).clicked() {
                             let name = self.files_mkdir_input.trim().to_owned();
@@ -1122,7 +1405,12 @@ impl AdbCollectorApp {
                             self.tr_args("files.rename_hint", &[("name", target_name.clone())]),
                         );
                     }
-                    ui.text_edit_singleline(&mut self.files_rename_input);
+                    let response = ui.text_edit_singleline(&mut self.files_rename_input);
+                    super::text_menu::text_edit_menu(
+                        &response,
+                        &mut self.files_rename_input,
+                        &self.i18n,
+                    );
                     ui.horizontal(|ui| {
                         if ui.button(self.tr("files.apply")).clicked() {
                             let input = self.files_rename_input.trim().to_owned();
@@ -1303,8 +1591,9 @@ mod tests {
 
     /// Empirical reproduction of the Files-page double-click with synthetic
     /// pointer input (no window needed). Mirrors the exact widget structure
-    /// of a listing row: `ScrollArea::show_rows` + `ui.horizontal` +
-    /// `selectable_label`, with the app's widened double-click window.
+    /// of a listing row: `ScrollArea::show_rows` + `ui.horizontal` + a
+    /// click-sensing truncated `Label` name cell, with the app's widened
+    /// double-click window.
     #[test]
     fn directory_name_double_click_registers_in_ui_harness() {
         use egui::{CentralPanel, Modifiers, PointerButton, Pos2, RawInput, Rect, Vec2};

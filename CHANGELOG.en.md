@@ -20,6 +20,7 @@ All notable changes to this project will be documented in this file.
 - Diagnostics carry the build commit: settings and the update dialog show v0.9.0 (commit), and `LogcatX.exe --version` works from the command line; the main UI stays version-only
 - Plain file drops no longer block: they enqueue immediately and multiple batches can be in flight
 
+- Every text field now has a Windows-style right-click menu (cut/copy/paste/select all, with exact character-boundary handling for CJK text); right-clicking a file name offers copying the name or its full remote path
 ### Fixed
 - Log cleanup never follows symlinks/junctions and can never delete outside the configured log root; logcat sessions started mid-cleanup are protected by a live registry check
 - Configuration and update state are written atomically, so an interrupted write no longer corrupts files; 0.8 configs migrate seamlessly and missing new fields never block startup
@@ -32,8 +33,23 @@ All notable changes to this project will be documented in this file.
 - Entering a directory now clears the old listing immediately and shows a centered loading indicator instead of stale rows suddenly swapping; a failed listing no longer retries every frame (it previously re-requested about 8 times per second on errors)
 - The Files page now opens /sdcard by default (some devices restrict the root); device command failures without output no longer render a blank error banner
 - Wireless endpoints stuck in handshake states (authorizing/connecting/unknown) that cannot be attributed to a known device no longer render as an operable-dead "unknown state" row; they appear once the handshake completes
+- Fixed the "unknown state" ghost device caused by adb mDNS service advertisement rows (adb-<serial>-<random>, with the advertisement suffix landing in the state column): advertisements fold into the device whose serial they embed, and unattributable ones are not shown
+- File rows vertically center their elements; Files-page checkboxes reuse the settings-page accent style so the checked state is clearly visible
+- Double-clicking a file now equals selecting it and pressing download
+- The "app data (run-as)" input moved to its own row instead of sharing the quick-paths line
+- Transfers list: completed downloads to the PC offer "open file" and "open folder"; uploads to a device offer "show in Files"; every finished entry shows a readable completion timestamp
+- Definitively fixed the file-list header swallowing the whole page: header and rows previously used a vertically-centered horizontal layout, which adopts the entire remaining height inside the page scroll area and parks its content mid-panel; rows are now fixed-height, the header sits flush at the top, and the list reclaims its full visible area
+- File names now render in a fixed-width truncated cell: overlong names stay on one line with an ellipsis (hover shows the full name), no name can stretch its row, checkbox/icon/text share one center line, and the size/modified/kind columns stay pinned across all rows
+- Double-clicking a file to download no longer clears the current multi-selection
+- "Open file / open folder" verify the local target exists first and raise a confirmation dialog when missing instead of invoking Explorer
+- The three transfer shortcut buttons gained padding so their labels are no longer flush against the borders
+- The file list gains a pinned leading "../" row for going up one directory (hidden at the root), available even in empty directories
  output
 - Wireless device aggregation now folds non-ready (authorizing/offline) transports with rotated ports into the device known by host IP — one row per physical device; disconnecting a device now clears all of its wireless endpoints so stale dead ports can be removed
+- File-list header elements (checkbox, name/size/modified sort buttons, kind label) now share one exact cell height and a common center line
+- The name column is left-aligned; short names no longer center inside the wide column, and truncated names show the full name on hover
+- Fixed a blank tail at the bottom of the file-list scroll area: the virtual-scroll row-height hint exceeded the real row height, so the scrollbar covered content that did not exist
+- Fixed the empty-directory "*" entry: the POSIX listing script now skips the shell's unexpanded glob leftover (surfaced as an "other kind" entry on some devices); empty directories show an explicit empty-dir hint with the ../ parent row retained
 - Fixed the same physical device appearing as a separate, hard-to-remove row when its wireless transport is in a non-ready state (authorizing/offline/...); added display text for authorizing/connecting/recovery and similar states
 - Fixed unconfigured-update builds issuing an update check on every window focus
 

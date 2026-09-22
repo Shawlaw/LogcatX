@@ -306,7 +306,7 @@ fn accessibility_value_replacement_normalizes_and_respects_disabled_fields() {
     let mut id = egui::Id::NULL;
     let _ = ctx.run(Default::default(), |ctx| {
         egui::CentralPanel::default().show(ctx, |ui| {
-            id = normalized_edit(ui, &mut text, "address", "", false, false).id;
+            id = normalized_edit(ui, &mut text, "address", "", false, false, &I18n::new("en")).id;
         });
     });
     let event = || {
@@ -329,7 +329,15 @@ fn accessibility_value_replacement_normalizes_and_respects_disabled_fields() {
                     if !enabled {
                         ui.disable();
                     }
-                    let response = normalized_edit(ui, &mut text, "address", "", false, false);
+                    let response = normalized_edit(
+                        ui,
+                        &mut text,
+                        "address",
+                        "",
+                        false,
+                        false,
+                        &I18n::new("en"),
+                    );
                     assert_eq!(response.changed(), enabled);
                 });
             },

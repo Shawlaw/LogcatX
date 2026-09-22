@@ -379,6 +379,12 @@
     "status.update_downloaded": "Update package for {version} has been downloaded and verified.",
     "nav.files": "Files",
     "files.title": "Files",
+    "menu.copy": "Copy",
+    "menu.cut": "Cut",
+    "menu.paste": "Paste",
+    "menu.select_all": "Select all",
+    "files.copy_name": "Copy file name",
+    "files.copy_full_path": "Copy full path",
     "files.no_device": "No device",
     "files.no_device_hint": "Connect a device to browse its files.",
     "files.back": "Back",
@@ -445,6 +451,12 @@
     "device.state.recovery": "Recovery",
     "device.state.sideload": "Sideload",
     "device.state.bootloader": "Bootloader",
-    "device.state.rescue": "Rescue"
+    "device.state.rescue": "Rescue",
+    "files.open_file": "Open file",
+    "files.open_folder": "Open folder",
+    "files.jump_to_destination": "Show in Files",
+    "files.alert_title": "LogcatX",
+    "files.alert_ok": "OK",
+    "files.open_missing": "The file or folder no longer exists (moved, renamed, or deleted): {path}"
   }
 }

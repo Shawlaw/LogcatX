@@ -532,6 +532,7 @@ impl ConnectionDialog {
                                             "192.168.0.8:37001",
                                             composing,
                                             false,
+                                            i18n,
                                         );
                                         endpoint_feedback(
                                             ui,
@@ -549,6 +550,7 @@ impl ConnectionDialog {
                                                 "123456",
                                                 composing,
                                                 true,
+                                                i18n,
                                             );
                                             let valid =
                                                 wireless::parse_endpoint(&self.pair_target, true)
@@ -591,6 +593,7 @@ impl ConnectionDialog {
                                         "192.168.0.8",
                                         composing,
                                         false,
+                                        i18n,
                                     );
                                     let valid = wireless::parse_scan_ip(&self.scan_input).is_ok();
                                     if !composing && !self.scan_input.is_empty() && !valid {
@@ -694,6 +697,7 @@ impl ConnectionDialog {
                                         "192.168.0.8:5555",
                                         composing,
                                         false,
+                                        i18n,
                                     );
                                     let valid = endpoint_feedback(
                                         ui,
@@ -801,6 +805,7 @@ fn normalized_edit(
     hint: &str,
     composing: bool,
     compact: bool,
+    i18n: &I18n,
 ) -> egui::Response {
     let widget_id = ui.make_persistent_id(egui::Id::new(id));
     // egui 0.31 advertises UIA ValuePattern but does not apply SetValue to
@@ -835,6 +840,7 @@ fn normalized_edit(
     if !composing && (response.changed() || response.lost_focus()) {
         *text = wireless::normalize_input(text);
     }
+    super::text_menu::text_edit_menu(&response, text, i18n);
     response
 }
 

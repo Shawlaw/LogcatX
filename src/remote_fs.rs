@@ -6,19 +6,28 @@
 //! quotes, `$`, `&`, `|`, `;`, parens and trailing spaces survive verbatim.
 //!
 //! Directory listings never parse human-oriented `ls -l` text (PRD §7).
-//! The listing protocol is machine-oriented:
+//! The listing protocol is machine-oriented and POSIX-portable:
 //!
 //! ```sh
 //! cd '<dir>' 2>/dev/null || exit 42
 //! for entry in *; do
+//!     [ -e "$entry" ] || [ -L "$entry" ] || continue   # skip unexpanded glob
+//!     if   [ -d "$entry" ]; then printf 'd\n'
+//!     elif [ -L "$entry" ]; then printf 'l\n'
+//!     elif [ -f "$entry" ]; then printf 'f\n'
+//!     else                      printf 'o\n'
+//!     fi
 //!     printf '%s\n' "$entry"
-//!     stat -c '%F\t%s\t%Y' "$entry" 2>/dev/null || printf 'ERR\n'
+//!     stat -c '%s %Y' "$entry" 2>/dev/null || printf -- '- -\n'
 //! done
 //! ```
 //!
-//! Each entry contributes a name line and a `kind\tsize\tmtime` line, so
+//! Each entry contributes three lines (kind marker, name, `size mtime`), so
 //! names containing spaces, tabs-adjacent garbage or quotes never corrupt
-//! the parse. run-as appends the same shell prefix for debuggable app data
+//! the parse. An empty directory yields no output at all — the `[ -e ]`
+//! guard skips the one unexpanded `*` glob iteration a shell performs (the
+//! parser keeps a digit-free-stat fallback for outputs from the older
+//! protocol). run-as appends the same shell prefix for debuggable app data
 //! (PRD §9), presented by the UI as "app data (run-as)", never as normal
 //! filesystem access.
 
@@ -225,10 +234,14 @@ pub(crate) fn parse_listing(stdout: &str) -> Vec<RemoteEntry> {
     }
 
     // The shell prints nothing for an empty directory except one unmatched
-    // glob iteration: kind "f"/"o" for the literal "*", name "*", meta "- -".
+    // glob iteration for the literal "*". Its stat line never carries a
+    // number (the entry does not exist), so treat any digit-free meta as the
+    // glob leftover — some devices echo variants like "-- - -" for the
+    // fallback printf. The listing script also skips non-existent entries
+    // now, so this is defense for outputs from the older protocol.
     if triplets.len() == 1 {
-        let (kind, name, meta) = triplets[0];
-        if name == "*" && meta.trim() == "- -" && (kind == "f" || kind == "o") {
+        let (_, name, meta) = triplets[0];
+        if name == "*" && !meta.chars().any(|c| c.is_ascii_digit()) {
             return Vec::new();
         }
     }
@@ -342,6 +355,7 @@ impl RemoteFs {
     pub fn list(&self, path: &RemotePath) -> Result<Vec<RemoteEntry>, RemoteFsError> {
         let script = format!(
             "cd {dir} 2>/dev/null || exit 42; for entry in *; do \
+             [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue; \
              if [ -d \"$entry\" ]; then printf 'd\\n'; \
              elif [ -L \"$entry\" ]; then printf 'l\\n'; \
              elif [ -f \"$entry\" ]; then printf 'f\\n'; \
@@ -545,8 +559,18 @@ mod tests {
 
     #[test]
     fn parse_listing_detects_empty_directory_glob_marker() {
+        // Any digit-free stat line marks the unexpanded glob leftover; real
+        // devices have been observed emitting kind "o" (the literal "*"
+        // matches no -d/-L/-f test) and meta variants like "-- - -".
         assert!(parse_listing("f\n*\n- -\n").is_empty());
-        // A literal-star file among others still lists.
+        assert!(parse_listing("o\n*\n- -\n").is_empty());
+        assert!(parse_listing("o\n*\n-- - -\n").is_empty());
+        // A literal-star file with real metadata still lists…
+        let entries = parse_listing("f\n*\n7 9\n");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "*");
+        assert_eq!(entries[0].size, 7);
+        // …including among others.
         let entries = parse_listing("f\na.txt\n1 1\nf\n*\n2 2\n");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].name, "*");

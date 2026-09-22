@@ -12,6 +12,7 @@ use crate::{
 };
 mod connection;
 mod files;
+mod text_menu;
 use chrono::{Local, TimeZone};
 use desktop_updater::{CheckResult, DownloadedUpdate, UpdateCandidate};
 use eframe::egui::{self, Align, Color32, RichText};
@@ -244,6 +245,8 @@ pub struct AdbCollectorApp {
     files_move_mode: bool,
     files_delete_pending: Option<crate::models::FilesDeletePending>,
     files_pending_apk_drop: Option<Vec<PathBuf>>,
+    /// Modal alert text (requires OK), e.g. missing local transfer target.
+    files_alert: Option<String>,
     last_device_poll_at: Option<Instant>,
     last_device_snapshot: Vec<DeviceInfo>,
     last_auto_poll_error: Option<String>,
@@ -439,6 +442,7 @@ impl AdbCollectorApp {
             files_move_mode: false,
             files_delete_pending: None,
             files_pending_apk_drop: None,
+            files_alert: None,
             last_device_poll_at: None,
             last_device_snapshot: Vec::new(),
             last_auto_poll_error: None,
@@ -464,6 +468,20 @@ impl AdbCollectorApp {
         app.language_input = app.config.language.clone();
         app.auto_update_input = app.config.auto_check_updates;
         app.i18n.set_language(&app.config.language);
+
+        // E2E hook: jump straight to a page so native renderer screenshots
+        // can exercise deep views (e.g. the Files listing) without input
+        // injection. Only compiled with the `e2e` feature.
+        #[cfg(feature = "e2e")]
+        if let Some(page) = std::env::var("LOGCATX_E2E_PAGE").ok().as_deref() {
+            match page {
+                "files" => app.active_page = NavigationPage::Files,
+                "logs" => app.active_page = NavigationPage::Logs,
+                "log_files" => app.active_page = NavigationPage::LogFiles,
+                "settings" => app.active_page = NavigationPage::Settings,
+                _ => {}
+            }
+        }
 
         if !app.require_initial_setup {
             app.refresh_devices();
@@ -2194,10 +2212,11 @@ impl AdbCollectorApp {
         ui.label(self.tr("settings.adb"));
         let path_input_width = settings_path_input_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
-            ui.add_sized(
+            let response = ui.add_sized(
                 egui::vec2(path_input_width, 0.0),
                 egui::TextEdit::singleline(&mut self.adb_path_input),
             );
+            text_menu::text_edit_menu(&response, &mut self.adb_path_input, &self.i18n);
             if ui.button(self.tr("settings.browse")).clicked()
                 && let Some(path) = FileDialog::new().pick_file()
             {
@@ -2220,10 +2239,11 @@ impl AdbCollectorApp {
         ui.label(self.tr("settings.scrcpy"));
         let path_input_width = settings_path_input_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
-            ui.add_sized(
+            let response = ui.add_sized(
                 egui::vec2(path_input_width, 0.0),
                 egui::TextEdit::singleline(&mut self.scrcpy_path_input),
             );
+            text_menu::text_edit_menu(&response, &mut self.scrcpy_path_input, &self.i18n);
             if ui.button(self.tr("settings.browse")).clicked()
                 && let Some(path) = FileDialog::new().pick_file()
             {
@@ -2246,10 +2266,11 @@ impl AdbCollectorApp {
         ui.label(self.tr("settings.log_dir"));
         let path_input_width = settings_path_input_width(ui.available_width());
         ui.horizontal_wrapped(|ui| {
-            ui.add_sized(
+            let response = ui.add_sized(
                 egui::vec2(path_input_width, 0.0),
                 egui::TextEdit::singleline(&mut self.log_dir_input),
             );
+            text_menu::text_edit_menu(&response, &mut self.log_dir_input, &self.i18n);
             if ui.button(self.tr("settings.browse")).clicked()
                 && let Some(path) = FileDialog::new().pick_folder()
             {
@@ -2364,9 +2385,9 @@ impl AdbCollectorApp {
             ui.small(self.tr("update.proxy_automatic_hint"));
         } else {
             ui.label(self.tr("update.proxy_url"));
-            proxy_input_changed |= ui
-                .text_edit_singleline(&mut self.update_proxy_url_input)
-                .changed();
+            let response = ui.text_edit_singleline(&mut self.update_proxy_url_input);
+            text_menu::text_edit_menu(&response, &mut self.update_proxy_url_input, &self.i18n);
+            proxy_input_changed |= response.changed();
             ui.small(self.tr("update.proxy_url_hint"));
         }
 
@@ -2401,9 +2422,9 @@ impl AdbCollectorApp {
         )
         .show(ui, |ui| {
             ui.label(self.tr("update.proxy_test_url"));
-            test_target_changed |= ui
-                .text_edit_singleline(&mut self.update_proxy_test_url_input)
-                .changed();
+            let response = ui.text_edit_singleline(&mut self.update_proxy_test_url_input);
+            text_menu::text_edit_menu(&response, &mut self.update_proxy_test_url_input, &self.i18n);
+            test_target_changed |= response.changed();
             ui.small(self.tr("update.proxy_test_url_hint"));
         });
         if custom_target_response.header_response.clicked() {
@@ -2524,28 +2545,48 @@ impl AdbCollectorApp {
                     ui.label(dimensions_label);
                     ui.horizontal(|ui| {
                         ui.label(width_label);
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::singleline(&mut self.new_display_width_input)
                                 .desired_width(72.0),
                         );
+                        text_menu::text_edit_menu(
+                            &response,
+                            &mut self.new_display_width_input,
+                            &self.i18n,
+                        );
                         ui.label(height_label);
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::singleline(&mut self.new_display_height_input)
                                 .desired_width(72.0),
                         );
+                        text_menu::text_edit_menu(
+                            &response,
+                            &mut self.new_display_height_input,
+                            &self.i18n,
+                        );
                         ui.label(dpi_label);
-                        ui.add(
+                        let response = ui.add(
                             egui::TextEdit::singleline(&mut self.new_display_dpi_input)
                                 .desired_width(64.0),
+                        );
+                        text_menu::text_edit_menu(
+                            &response,
+                            &mut self.new_display_dpi_input,
+                            &self.i18n,
                         );
                     });
                 }
                 ui.add_space(6.0);
                 ui.label(start_app_label);
-                ui.add(
+                let response = ui.add(
                     egui::TextEdit::singleline(&mut self.new_display_start_app_input)
                         .hint_text("com.example.app")
                         .desired_width(300.0),
+                );
+                text_menu::text_edit_menu(
+                    &response,
+                    &mut self.new_display_start_app_input,
+                    &self.i18n,
                 );
                 ui.small(start_app_hint);
                 if self.new_display_apps_loading {
@@ -2560,10 +2601,15 @@ impl AdbCollectorApp {
                 } else {
                     ui.add_space(6.0);
                     ui.label(filter_apps_label);
-                    ui.add(
+                    let response = ui.add(
                         egui::TextEdit::singleline(&mut self.new_display_app_filter_input)
                             .hint_text(filter_apps_hint)
                             .desired_width(300.0),
+                    );
+                    text_menu::text_edit_menu(
+                        &response,
+                        &mut self.new_display_app_filter_input,
+                        &self.i18n,
                     );
                     let filtered_apps = filter_installed_packages(
                         &installed_apps,
@@ -2976,15 +3022,19 @@ impl AdbCollectorApp {
                                 before_date_label,
                             );
                         });
-                    if self.cleanup_time_filter == CleanupTimeFilter::BeforeDate
-                        && ui
-                            .add(
-                                egui::TextEdit::singleline(&mut self.cleanup_before_date_input)
-                                    .hint_text("YYYY-MM-DD"),
-                            )
-                            .changed()
-                    {
-                        refresh_preview = true;
+                    if self.cleanup_time_filter == CleanupTimeFilter::BeforeDate {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut self.cleanup_before_date_input)
+                                .hint_text("YYYY-MM-DD"),
+                        );
+                        text_menu::text_edit_menu(
+                            &response,
+                            &mut self.cleanup_before_date_input,
+                            &self.i18n,
+                        );
+                        if response.changed() {
+                            refresh_preview = true;
+                        }
                     }
                 });
                 if previous_filter != self.cleanup_time_filter {
@@ -3100,7 +3150,8 @@ impl AdbCollectorApp {
                 ));
                 ui.add_space(10.0);
                 ui.label(self.tr("alias.input"));
-                ui.text_edit_singleline(&mut self.alias_input_value);
+                let response = ui.text_edit_singleline(&mut self.alias_input_value);
+                text_menu::text_edit_menu(&response, &mut self.alias_input_value, &self.i18n);
                 ui.add_space(12.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     if ui.button(self.tr("settings.cancel")).clicked() {
@@ -3155,7 +3206,8 @@ impl AdbCollectorApp {
                 ));
                 ui.add_space(10.0);
                 ui.label(self.tr("logcat_args.input"));
-                ui.text_edit_singleline(&mut self.logcat_args_input_value);
+                let response = ui.text_edit_singleline(&mut self.logcat_args_input_value);
+                text_menu::text_edit_menu(&response, &mut self.logcat_args_input_value, &self.i18n);
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(self.tr("logcat_args.hint"))
@@ -5078,6 +5130,24 @@ impl AdbCollectorApp {
         let mut devices = devices;
         route_transports_to_known_identities(&mut devices, &known_transport_identities);
 
+        // adb also prints mDNS service advertisements (`adb-<serial>-<rand>`
+        // with the `._adb-tls-connect._tcp` suffix landing in the state
+        // column). Fold them into the device whose serial is embedded in the
+        // instance name; drop advertisements for absent devices (trial bug 3,
+        // final round — the ghost was `adb-320246822505-i1RtIB`).
+        let known_identities: HashSet<String> = existing
+            .keys()
+            .cloned()
+            .chain(
+                devices
+                    .iter()
+                    .filter(|info| info.identity_key != info.serial)
+                    .map(|info| info.identity_key.clone()),
+            )
+            .collect();
+        let devices = fold_mdns_advertisements(devices, &known_identities);
+        let mut devices = devices;
+
         // Wireless debugging rotates ports, so a non-ready endpoint on a host
         // we already track belongs to that device even when the exact
         // serial:port was never seen before. Fold by host, both against
@@ -5753,6 +5823,26 @@ fn styled_checkbox(
     checked: &mut bool,
     text: impl Into<egui::WidgetText>,
 ) -> egui::Response {
+    with_check_mark_colors(ui, |ui| {
+        ui.add_enabled(enabled, egui::Checkbox::new(checked, text))
+    })
+}
+
+/// Fixed-size variant of [`styled_checkbox`] for table cells that must share
+/// an exact height (Files header/rows): the checkbox is centered within
+/// `size` while keeping the accent-colored check mark.
+pub(crate) fn styled_checkbox_sized(
+    ui: &mut egui::Ui,
+    size: egui::Vec2,
+    checked: &mut bool,
+    text: impl Into<egui::WidgetText>,
+) -> egui::Response {
+    with_check_mark_colors(ui, |ui| {
+        ui.add_sized(size, egui::Checkbox::new(checked, text))
+    })
+}
+
+fn with_check_mark_colors<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let (saved_inactive, saved_hovered, saved_active) = {
         let visuals = ui.visuals_mut();
         (
@@ -5765,12 +5855,12 @@ fn styled_checkbox(
     visuals.widgets.inactive.fg_stroke.color = CHECK_MARK_COLOR;
     visuals.widgets.hovered.fg_stroke.color = CHECK_MARK_COLOR;
     visuals.widgets.active.fg_stroke.color = CHECK_MARK_COLOR;
-    let response = ui.add_enabled(enabled, egui::Checkbox::new(checked, text));
+    let result = add(ui);
     let visuals = ui.visuals_mut();
     visuals.widgets.inactive.fg_stroke.color = saved_inactive;
     visuals.widgets.hovered.fg_stroke.color = saved_hovered;
     visuals.widgets.active.fg_stroke.color = saved_active;
-    response
+    result
 }
 
 fn content_card_frame() -> egui::Frame {
@@ -5873,6 +5963,57 @@ fn network_serial_host(serial: &str) -> Option<&str> {
     serial.rsplit_once(':').map(|(host, _)| host)
 }
 
+/// True when the parsed line is an adb mDNS service advertisement: the
+/// `._adb-tls-connect._tcp` / `._adb._tcp` suffix lands in the state column
+/// because the advertisement name contains whitespace (field trial:
+/// serial `adb-320246822505-i1RtIB`, state `(2)._adb-tls-connect._tcp`).
+fn is_mdns_advertisement(info: &DeviceInfo) -> bool {
+    info.serial.contains("._adb-tls-connect._tcp")
+        || info.serial.contains("._adb._tcp")
+        || info.state.contains("._adb-tls-connect._tcp")
+        || info.state.contains("._adb._tcp")
+}
+
+/// Fold adb mDNS advertisements into the device whose serial is embedded in
+/// the instance name (`adb-<serial>-<random>`); drop advertisements that
+/// advertise something not currently present.
+fn fold_mdns_advertisements(
+    infos: Vec<DeviceInfo>,
+    known_identities: &HashSet<String>,
+) -> Vec<DeviceInfo> {
+    infos
+        .into_iter()
+        .filter_map(|mut info| {
+            if !is_mdns_advertisement(&info) {
+                return Some(info);
+            }
+            let haystack = format!("{} {}", info.serial, info.state);
+            match known_identities
+                .iter()
+                .find(|identity| haystack.contains(identity.as_str()))
+            {
+                Some(identity) => {
+                    log::debug!(
+                        "Discovery: folding mDNS advertisement {} into {}",
+                        info.serial,
+                        identity
+                    );
+                    info.identity_key = identity.clone();
+                    Some(info)
+                }
+                None => {
+                    log::info!(
+                        "Discovery: dropping unmatched mDNS advertisement {} (state {:?})",
+                        info.serial,
+                        info.state
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
 /// Fold still-unresolved wireless transports into a device known by HOST:
 /// wireless debugging rotates ports, so `authorizing`/`offline` endpoints on
 /// a host we track belong to that device even at a never-seen port.
@@ -5910,8 +6051,10 @@ fn hide_unattributed_handshake_endpoints(devices: Vec<DeviceInfo>) -> Vec<Device
             let handshake_noise = matches!(
                 info.state.as_str(),
                 "unknown" | "authorizing" | "connecting" | ""
-            );
-            if !attributed && handshake_noise && adb::is_network_device_serial(&info.serial) {
+            ) || is_mdns_advertisement(info);
+            let wireless_noise =
+                adb::is_network_device_serial(&info.serial) || is_mdns_advertisement(info);
+            if !attributed && handshake_noise && wireless_noise {
                 log::info!(
                     "Discovery: hiding unattributed handshake endpoint {} (state {:?})",
                     info.serial,
@@ -6221,15 +6364,15 @@ mod tests {
         DEFAULT_NEW_DISPLAY_DPI, DEFAULT_NEW_DISPLAY_HEIGHT, DEFAULT_NEW_DISPLAY_WIDTH,
         SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT, build_device_push_destination,
         classify_dropped_paths, content_view_width, device_transport_rank,
-        filter_installed_packages, fold_unresolved_wireless_by_host, format_device_model_name,
-        hide_unattributed_handshake_endpoints, install_dropped_apks,
+        filter_installed_packages, fold_mdns_advertisements, fold_unresolved_wireless_by_host,
+        format_device_model_name, hide_unattributed_handshake_endpoints, install_dropped_apks,
         is_current_cleanup_preview_response, pick_primary_device_info,
         route_transports_to_known_identities, settings_error_scroll_area,
         settings_path_input_width, should_reveal_proxy_settings_content,
     };
     use crate::models::DeviceInfo;
     use eframe::egui;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
 
     fn transport(serial: &str, identity: &str, state: &str) -> DeviceInfo {
@@ -6336,6 +6479,48 @@ mod tests {
             kept_serials,
             vec!["192.168.3.136:41271", "10.0.0.9:5555", "usb-1",]
         );
+    }
+
+    /// Trial bug 3 (final round): adb mDNS service advertisements parse as
+    /// serial + junk state. They fold into the device whose serial is
+    /// embedded in the instance name, or get dropped when unmatched.
+    #[test]
+    fn mdns_advertisements_fold_by_embedded_serial_or_drop() {
+        let mut identities = HashSet::new();
+        identities.insert("320246822505".to_owned());
+
+        // Field-trial shape: suffix lands in the state column, embedded
+        // serial matches the cloud phone's identity.
+        let devices = vec![
+            transport(
+                "adb-320246822505-i1RtIB",
+                "adb-320246822505-i1RtIB",
+                "(2)._adb-tls-connect._tcp",
+            ),
+            transport("adb-ABSENT-99", "adb-ABSENT-99", "._adb-tls-connect._tcp"),
+            transport("192.168.3.136:41271", "320246822505", "device"),
+        ];
+        let mut folded = fold_mdns_advertisements(devices, &identities);
+        assert_eq!(folded.len(), 2);
+        let mdns = folded
+            .iter_mut()
+            .find(|info| info.serial.starts_with("adb-"))
+            .expect("matched advertisement folded");
+        assert_eq!(mdns.identity_key, "320246822505");
+        assert!(
+            !folded.iter().any(|info| info.serial == "adb-ABSENT-99"),
+            "unmatched advertisement dropped"
+        );
+    }
+
+    #[test]
+    fn mdns_advertisement_rows_are_hidden_when_unattributed() {
+        let kept = hide_unattributed_handshake_endpoints(vec![
+            transport("adb-9999-Zz", "adb-9999-Zz", "(2)._adb-tls-connect._tcp"),
+            transport("usb-1", "usb-1", "unknown"),
+        ]);
+        let kept_serials: Vec<&str> = kept.iter().map(|info| info.serial.as_str()).collect();
+        assert_eq!(kept_serials, vec!["usb-1"]);
     }
 
     #[test]

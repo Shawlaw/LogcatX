@@ -379,6 +379,12 @@
     "status.update_downloaded": "版本 {version} 的更新包已下载并校验完成。",
     "nav.files": "文件",
     "files.title": "文件",
+    "menu.copy": "复制",
+    "menu.cut": "剪切",
+    "menu.paste": "粘贴",
+    "menu.select_all": "全选",
+    "files.copy_name": "复制文件名",
+    "files.copy_full_path": "复制完整路径",
     "files.no_device": "未选择设备",
     "files.no_device_hint": "连接设备后即可浏览其文件。",
     "files.back": "返回",
@@ -445,6 +451,12 @@
     "device.state.recovery": "恢复模式",
     "device.state.sideload": "侧载模式",
     "device.state.bootloader": "引导模式",
-    "device.state.rescue": "救援模式"
+    "device.state.rescue": "救援模式",
+    "files.open_file": "打开文件",
+    "files.open_folder": "打开所在目录",
+    "files.jump_to_destination": "跳转到目的目录",
+    "files.alert_title": "LogcatX",
+    "files.alert_ok": "确定",
+    "files.open_missing": "文件或文件夹已不存在（可能被移动、重命名或删除）：{path}"
   }
 }
