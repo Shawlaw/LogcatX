@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.9.0] - 2026-09-22
+
+### Added
+- Device files page: browse device directories with breadcrumbs, path jumping, name/size/time sorting, multi-select, quick paths (/sdcard, Download, DCIM, Pictures, Documents, /data/local/tmp) and persistent directory favorites
+- Unified transfer queue for upload/download with percentage, transferred bytes and live speed; per-task cancel, cancel-all, failed retry and clear-finished; identical behavior over USB and wireless
+- New folder, rename, move and delete (one confirmation for batch deletes showing the item count, with an extra warning when directories are included)
+- Drop files onto the Files page to upload into the current directory; dropped APKs offer install-or-upload choice
+- run-as browsing of debuggable app data (/data/data), clearly labeled as app data (run-as) instead of regular filesystem access
+
+### Enhanced
+- Unified ADB execution core: every adb call now has timeouts, cancellation, bounded output capture and child reaping, so a hanging command can no longer freeze the UI; wireless pair/connect share the same process management
+- Static device metadata (manufacturer/model/OS/serial) is cached across polls, ending the per-poll getprop storm; stale discovery replies can no longer overwrite newer state
+- Update experience: signature-verified update candidates persist across restarts (download-ready without another network check); the update dialog shows release notes inline (fetch failure never blocks download/install, with retry and view-release fallback); automatic checks back off 3-6h on network failure and 24h on invalid manifests; the applied-update ACK is sent only after a healthy start (first rendered frame), keeping rollback material when bootstrap fails
+- Diagnostics carry the build commit: settings and the update dialog show v0.9.0 (commit), and `LogcatX.exe --version` works from the command line; the main UI stays version-only
+- Plain file drops no longer block: they enqueue immediately and multiple batches can be in flight
+
+### Fixed
+- Log cleanup never follows symlinks/junctions and can never delete outside the configured log root; logcat sessions started mid-cleanup are protected by a live registry check
+- Configuration and update state are written atomically, so an interrupted write no longer corrupts files; 0.8 configs migrate seamlessly and missing new fields never block startup
+- Windows numeric FILEVERSION now mirrors the semantic version (0.9.0.0) instead of the build date
+- Removed the incorrect `run-as <pkg> pm clear` fallback; clear-data failures now surface their real reason
+
 ## [0.8.0] - 2026-09-17
 
 ### Added

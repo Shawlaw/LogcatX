@@ -2040,6 +2040,17 @@ impl AdbCollectorApp {
         content_ui.set_max_width(inner_rect.width());
         content_ui.heading(self.tr("settings.title"));
         content_ui.label(self.tr("settings.page_hint"));
+        // Diagnostics line (PRD §35): version + short commit live here and in
+        // the update dialog; the main UI sidebar stays version-only.
+        content_ui.label(
+            RichText::new(format!(
+                "LogcatX v{} ({})",
+                self.version,
+                crate::build_info::display_commit()
+            ))
+            .small()
+            .weak(),
+        );
         content_ui.add_space(10.0);
 
         // Split the remaining space into two fixed rectangles rather than
@@ -2637,7 +2648,10 @@ impl AdbCollectorApp {
                 ui.set_min_width(400.0);
                 ui.label(self.tr_args(
                     "update.current_version",
-                    &[("version", self.version.clone())],
+                    &[(
+                        "version",
+                        format!("{} ({})", self.version, crate::build_info::display_commit()),
+                    )],
                 ));
                 ui.add_space(6.0);
 

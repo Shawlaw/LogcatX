@@ -93,7 +93,39 @@ jobs:
             Write-Host "::error title=exe resources missing::LogcatX.exe carries no embedded VERSIONINFO/icon; the resource compiler lookup failed silently"
             exit 1
           }
+          # PRD §37/§49: numeric FILEVERSION must mirror the SemVer, never a
+          # build date or commit.
+          $expected = "${{ steps.release_meta.outputs.version }}.0"
+          if ($vi.FileVersion -ne $expected) {
+            Write-Host "::error title=version mismatch::FileVersion $($vi.FileVersion) != $expected"
+            exit 1
+          }
           Write-Host "::notice title=exe resources::LogcatX.exe ProductVersion=$($vi.ProductVersion) FileVersion=$($vi.FileVersion)"
+
+      # PRD §48: smoke-test the shipped artifact — unzip, verify the helper
+      # beside the exe, and read the version through the CLI surface.
+      - name: Release artifact smoke test
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: |
+          $version = "${{ steps.release_meta.outputs.version }}"
+          $smoke = Join-Path $env:RUNNER_TEMP "logcatx-smoke"
+          if (Test-Path $smoke) { Remove-Item -Recurse -Force $smoke }
+          Expand-Archive -Path "dist/${{ steps.release_meta.outputs.zip_name }}" -DestinationPath $smoke
+          if (-not (Test-Path (Join-Path $smoke "LogcatX.exe"))) {
+            Write-Host "::error title=smoke::LogcatX.exe missing from the shipped zip"
+            exit 1
+          }
+          if (-not (Test-Path (Join-Path $smoke "LogcatX.Updater.exe"))) {
+            Write-Host "::error title=smoke::LogcatX.Updater.exe missing from the shipped zip"
+            exit 1
+          }
+          $output = & (Join-Path $smoke "LogcatX.exe") --version | Out-String
+          Write-Host "smoke --version: $output"
+          if (-not ($output -match [regex]::Escape($version))) {
+            Write-Host "::error title=smoke::--version output did not contain $version"
+            exit 1
+          }
 
       - name: Verify expected artifact
         if: startsWith(github.ref, 'refs/tags/v')
