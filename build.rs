@@ -12,22 +12,17 @@ fn main() {
     let v_minor = version_parts.get(1).copied().unwrap_or(0);
     let v_patch = version_parts.get(2).copied().unwrap_or(0);
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs() as i64;
-    let total_days = secs / 86400;
-    let build_hour = ((secs % 86400) / 3600) as u32;
-    let (build_year, build_month, build_day) = days_to_ymd(total_days);
-
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".into());
     let icon_path = format!("{manifest_dir}/icons/icon.ico");
+    // Numeric FILEVERSION/PRODUCTVERSION mirror the SemVer (PRD §37): build
+    // timestamps or commits never substitute the numeric fields. The UI
+    // shows "0.9.0"; diagnostics show "0.9.0 + commit" via BuildInfo.
     let rc_content = format!(
         r#"1 ICON "{icon_path}"
 
 1 VERSIONINFO
-FILEVERSION {build_year},{build_month},{build_day},{build_hour}
-PRODUCTVERSION {v_major},{v_minor},{v_patch}
+FILEVERSION {v_major},{v_minor},{v_patch},0
+PRODUCTVERSION {v_major},{v_minor},{v_patch},0
 FILEFLAGSMASK 0x3fL
 FILEFLAGS 0x0L
 FILEOS 0x40004L

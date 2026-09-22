@@ -142,7 +142,12 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
     normalized.device_logcat_args = normalize_logcat_args(normalized.device_logcat_args);
     normalized.update_proxy = normalize_update_proxy(normalized.update_proxy);
 
-    desktop_config::save_pretty_json(path, &normalized)
+    // Atomic replace (PRD §33): a crash mid-write keeps the previous config
+    // intact instead of corrupting it.
+    let bytes = serde_json::to_vec_pretty(&normalized)
+        .map_err(|error| format!("Failed to encode configuration: {error}"))?;
+    desktop_fs::atomic_write(path, &bytes)
+        .map_err(|error| format!("Failed to write {}: {error}", fs_utils::display_path(path)))
 }
 
 /// Commit history and its transport metadata together, leaving memory unchanged
@@ -406,10 +411,111 @@ fn is_executable_file(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_RECENT_CONNECTIONS, default_app_log_max_size_mb, is_executable_file, normalize_aliases,
-        normalize_logcat_args, normalize_recent_connections, normalize_serial_list,
+        AppConfig, AppPaths, MAX_RECENT_CONNECTIONS, default_app_log_max_size_mb,
+        is_executable_file, load_config, normalize_aliases, normalize_logcat_args,
+        normalize_recent_connections, normalize_serial_list, save_config,
     };
     use std::{collections::BTreeMap, fs, path::PathBuf};
+
+    fn scratch_paths(label: &str) -> (PathBuf, AppPaths) {
+        let dir = std::env::temp_dir().join(format!(
+            "logcatx-config-migration-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let paths = AppPaths {
+            config_path: dir.join("config.json"),
+            config_dir: dir.clone(),
+            exe_dir: dir.clone(),
+            app_log_path: dir.join("app.log"),
+            portable_mode: false,
+        };
+        (dir, paths)
+    }
+
+    /// PRD §38: a 0.8 config (no 0.9 fields) must load with the new fields
+    /// defaulted — never a startup failure.
+    #[test]
+    fn config_from_0_8_loads_with_new_fields_defaulted() {
+        let (dir, paths) = scratch_paths("0-8");
+        let legacy = r#"{
+            "adb_path": "C:/platform-tools/adb.exe",
+            "scrcpy_path": "",
+            "log_dir": "C:/logs",
+            "app_logMaxSizeMb": 20,
+            "language": "zh-CN",
+            "deviceAliases": {"serial:1": "Pixel"},
+            "pinnedDevices": ["serial:1"],
+            "recentConnections": ["192.168.0.8:5555"],
+            "wirelessConnections": [],
+            "apkAutoInstallDevices": [],
+            "deviceLogcatArgs": {},
+            "autoCheckUpdates": true,
+            "updateProxy": {"mode": "Automatic", "url": ""}
+        }"#;
+        fs::write(&paths.config_path, legacy).expect("write legacy config");
+        let config = load_config(&paths.config_path, &paths).expect("legacy config loads");
+        assert_eq!(config.adb_path, "C:/platform-tools/adb.exe");
+        assert_eq!(config.language, "zh-CN");
+        assert!(config.file_favorites.is_empty(), "new field defaults");
+        assert!(config.auto_check_updates);
+
+        // Saving migrates it in-memory then persists atomically (§38/§33);
+        // the file reloads cleanly with paths normalized for this platform.
+        save_config(&paths.config_path, &config).expect("save migrated config");
+        let reloaded = load_config(&paths.config_path, &paths).expect("reload migrated");
+        assert!(reloaded.file_favorites.is_empty());
+        assert!(reloaded.adb_path.contains("adb.exe"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PRD §38: minimal/partial configs default every missing field.
+    #[test]
+    fn config_with_missing_fields_loads_with_defaults() {
+        let (dir, paths) = scratch_paths("minimal");
+        fs::write(&paths.config_path, r#"{"language":"en"}"#).expect("write minimal config");
+        let config = load_config(&paths.config_path, &paths).expect("minimal config loads");
+        assert_eq!(config.language, "en");
+        assert!(config.file_favorites.is_empty());
+        assert!(config.device_aliases.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PRD §38: a corrupt config reports an error instead of panicking; the
+    /// app layer falls back to defaults and keeps starting.
+    #[test]
+    fn corrupt_config_reports_error() {
+        let (dir, paths) = scratch_paths("corrupt");
+        fs::write(&paths.config_path, b"{ not json").expect("write corrupt config");
+        let error = load_config(&paths.config_path, &paths).expect_err("corrupt config errors");
+        assert!(!error.is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// PRD §33: saves never leave a torn or partially-written file — the
+    /// atomic replace leaves no temp residue and overwrites cleanly.
+    #[test]
+    fn save_config_replaces_atomically_without_temp_residue() {
+        let (dir, paths) = scratch_paths("atomic");
+        let mut config = AppConfig::with_defaults(&paths);
+        config.language = "en".to_owned();
+        save_config(&paths.config_path, &config).expect("first save");
+        config.language = "zh-CN".to_owned();
+        save_config(&paths.config_path, &config).expect("second save");
+        let reloaded = load_config(&paths.config_path, &paths).expect("reload");
+        assert_eq!(reloaded.language, "zh-CN");
+        let residue: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(residue.is_empty(), "temp leftovers: {residue:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn detect_adb_path_prefers_existing_candidate() {

@@ -183,6 +183,9 @@ pub enum AppEvent {
     },
     CollectionEnded {
         serial: String,
+        /// Session log path so the active-log registry can unregister it
+        /// precisely (PRD §24).
+        output_path: Option<PathBuf>,
         exit_code: Option<i32>,
         error: Option<String>,
     },

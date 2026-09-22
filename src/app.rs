@@ -245,6 +245,10 @@ pub struct AdbCollectorApp {
     update_phase: UpdatePhase,
     update_info: Option<UpdateInfo>,
     update_candidate: Option<UpdateCandidate>,
+    /// Live registry of in-flight logcat output paths, shared with cleanup
+    /// workers so delete-time checks see sessions started mid-cleanup
+    /// (PRD §24).
+    active_log_registry: std::sync::Arc<std::sync::Mutex<HashSet<PathBuf>>>,
     update_notes: UpdateNotesState,
     update_notes_generation: u64,
     /// ACK of an applied update is deferred to the first rendered frame so
@@ -428,6 +432,7 @@ impl AdbCollectorApp {
             update_phase: UpdatePhase::Idle,
             update_info: restored_update,
             update_candidate: restored_candidate.clone(),
+            active_log_registry: std::sync::Arc::default(),
             update_notes: UpdateNotesState::None,
             update_notes_generation: 0,
             update_ack_pending: true,
@@ -750,6 +755,7 @@ impl AdbCollectorApp {
                 }
                 AppEvent::CollectionEnded {
                     serial,
+                    output_path,
                     exit_code,
                     error,
                 } => {
@@ -759,9 +765,15 @@ impl AdbCollectorApp {
                         .map(|device| matches!(device.run_state, DeviceRunState::Stopping))
                         .unwrap_or(false);
 
+                    // Unregister from the live active-log registry (PRD §24).
+                    if let Some(path) = &output_path {
+                        self.unregister_active_log(path);
+                    }
+
                     if let Some(device) = self.find_device_mut(&serial) {
                         device.child = None;
                         device.started_at = None;
+                        device.output_path = None;
                         device.run_state = match error {
                             Some(ref err) => DeviceRunState::Error(err.clone()),
                             None => DeviceRunState::Idle,
@@ -4059,8 +4071,37 @@ impl AdbCollectorApp {
             .filter(|device| device.is_active())
             .filter_map(|device| device.output_path.clone())
             .collect();
+        // The live registry is authoritative for sessions started while a
+        // cleanup is already running (PRD §24).
+        {
+            let registry = self
+                .active_log_registry
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            for path in registry.iter() {
+                if !protected_paths.contains(path) {
+                    protected_paths.push(path.clone());
+                }
+            }
+        }
         protected_paths.push(self.app_paths.app_log_path.clone());
         protected_paths
+    }
+
+    fn register_active_log(&mut self, path: &Path) {
+        self.active_log_registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(path.to_path_buf());
+        log::debug!("Active log registered: {}", path.display());
+    }
+
+    fn unregister_active_log(&mut self, path: &Path) {
+        self.active_log_registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(path);
+        log::debug!("Active log unregistered: {}", path.display());
     }
 
     fn request_cleanup_preview(&mut self) {
@@ -4100,11 +4141,25 @@ impl AdbCollectorApp {
         let tx = self.tx.clone();
         let log_dir = PathBuf::from(self.config.log_dir.as_str());
         let protected_paths = self.protected_log_paths();
+        let active_registry = self.active_log_registry.clone();
 
         self.cleanup_in_progress = true;
         self.set_info(self.tr("status.clearing_history"));
         thread::spawn(move || {
-            let result = fs_utils::cleanup_matching_logs(&log_dir, &filter, &protected_paths);
+            // The closure queries the live registry at every delete so a
+            // logcat session started mid-cleanup stays protected (PRD §24).
+            let result =
+                fs_utils::cleanup_matching_logs(&log_dir, &filter, &protected_paths, |candidate| {
+                    let Ok(canonical) = std::fs::canonicalize(candidate) else {
+                        return false;
+                    };
+                    let registry = active_registry
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    registry.iter().any(|active| {
+                        std::fs::canonicalize(active).is_ok_and(|active| active == canonical)
+                    })
+                });
             let _ = tx.send(AppEvent::CleanupFinished(result));
         });
     }
@@ -4801,6 +4856,9 @@ impl AdbCollectorApp {
             device.run_state = DeviceRunState::Starting;
             device.output_path = Some(output_path.clone());
         }
+        // Register in the shared live registry BEFORE the session spawns so a
+        // cleanup that starts in between can never delete this log (PRD §24).
+        self.register_active_log(&output_path);
 
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
@@ -4822,6 +4880,7 @@ impl AdbCollectorApp {
                     } else {
                         let _ = tx.send(AppEvent::CollectionEnded {
                             serial: device_id_for_thread,
+                            output_path: Some(output_path),
                             exit_code: None,
                             error: Some("Failed to store collector process handle.".to_owned()),
                         });
@@ -4837,6 +4896,7 @@ impl AdbCollectorApp {
                     let (exit_code, error) = wait_for_process_exit(&child_holder);
                     let _ = tx.send(AppEvent::CollectionEnded {
                         serial: device_id_for_thread,
+                        output_path: Some(output_path.clone()),
                         exit_code,
                         error,
                     });
@@ -4844,6 +4904,7 @@ impl AdbCollectorApp {
                 Err(err) => {
                     let _ = tx.send(AppEvent::CollectionEnded {
                         serial: device_id_for_thread,
+                        output_path: Some(output_path),
                         exit_code: None,
                         error: Some(err),
                     });

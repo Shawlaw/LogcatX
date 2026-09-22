@@ -287,6 +287,12 @@ pub fn force_stop_package(adb_path: &str, serial: &str, package: &str) -> Result
 }
 
 pub fn clear_package_data(adb_path: &str, serial: &str, package: &str) -> Result<String, String> {
+    // Single `pm clear`, no run-as fallback: `run-as <pkg> pm clear <pkg>`
+    // executes as the app's own uid, which cannot grant the shell the
+    // CLEAR_APP_USER_DATA permission — the old retry only restated the
+    // failure with a misleading "permission escalation" framing (PRD §9).
+    // run-as remains valuable for file access on debuggable apps (Files
+    // page), which is what it actually supports.
     let output = adb_shell(adb_path, serial, &["pm", "clear", package]).map_err(|err| {
         format!("Failed to run `{adb_path} -s {serial} shell pm clear {package}`: {err}")
     })?;
@@ -298,35 +304,9 @@ pub fn clear_package_data(adb_path: &str, serial: &str, package: &str) -> Result
         ));
     }
 
-    let primary_error = format!(
+    Err(format!(
         "Failed to clear data for {package} on {serial}: {}",
         combined_output(&output).if_empty("unknown error")
-    );
-    if !should_retry_clear_with_run_as(&output) {
-        return Err(primary_error);
-    }
-
-    let run_as_output =
-        adb_shell(adb_path, serial, &["run-as", package, "pm", "clear", package]).map_err(
-            |err| {
-                format!(
-                "{primary_error}\nFailed to run `{adb_path} -s {serial} shell run-as {package} pm clear {package}`: {err}"
-            )
-            },
-        )?;
-
-    if package_command_succeeded(&run_as_output) {
-        let combined = combined_output(&run_as_output);
-        return Ok(if combined.is_empty() {
-            format!("Cleared data for {package} via run-as fallback.")
-        } else {
-            format!("{combined}\n(run-as fallback)")
-        });
-    }
-
-    Err(format!(
-        "{primary_error}\nRetry via `run-as {package} pm clear {package}` also failed: {}",
-        combined_output(&run_as_output).if_empty("unknown error")
     ))
 }
 
@@ -745,14 +725,6 @@ fn package_command_success_message(output: &ShellOutcome, fallback: String) -> S
     }
 }
 
-fn should_retry_clear_with_run_as(output: &ShellOutcome) -> bool {
-    let lower = combined_output(output).to_ascii_lowercase();
-    lower.contains("android.permission.clear_app_user_data")
-        || (lower.contains("securityexception")
-            && lower.contains("clear")
-            && (lower.contains("user data") || lower.contains("applicationuserdata")))
-}
-
 fn parse_connect_output(target: &str, output: &ShellOutcome) -> Result<String, String> {
     let combined = combined_output(output);
     let lower = combined.to_ascii_lowercase();
@@ -870,11 +842,11 @@ fn is_valid_package_name(package: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        DeviceMetadataCache, ShellOutcome, decode_screenshot_png, format_android_version,
-        is_network_device_serial, package_command_succeeded, parse_component_token,
-        parse_connect_output, parse_devices_output, parse_disconnect_output,
+        DeviceMetadataCache, ShellOutcome, combined_output, decode_screenshot_png,
+        format_android_version, is_network_device_serial, package_command_succeeded,
+        parse_component_token, parse_connect_output, parse_devices_output, parse_disconnect_output,
         parse_foreground_app_from_activity_dump, parse_foreground_app_from_window_dump,
-        parse_installed_packages, parse_logcat_args, should_retry_clear_with_run_as,
+        parse_installed_packages, parse_logcat_args,
     };
     use std::{io::Cursor, path::PathBuf};
 
@@ -1123,25 +1095,18 @@ mCurrentFocus=Window{41dff5a u0 com.android.settings/com.android.settings.Settin
     }
 
     #[test]
-    fn clear_data_run_as_fallback_detects_permission_failure() {
+    fn clear_data_reports_permission_failure_directly() {
+        // The run-as fallback is gone (PRD §9): a SecurityException from
+        // `pm clear` surfaces verbatim instead of being retried under a
+        // false "permission escalation" assumption.
         let output = ShellOutcome {
             success: false,
             stdout: Vec::new(),
             stderr: b"Exception occurred while executing 'clear':\njava.lang.SecurityException: PID 16791 does not have permission android.permission.CLEAR_APP_USER_DATA to clear data of package com.example.app".to_vec(),
         };
 
-        assert!(should_retry_clear_with_run_as(&output));
-    }
-
-    #[test]
-    fn clear_data_run_as_fallback_ignores_unrelated_failures() {
-        let output = ShellOutcome {
-            success: false,
-            stdout: Vec::new(),
-            stderr: b"Failed\nUnknown package: com.example.app".to_vec(),
-        };
-
-        assert!(!should_retry_clear_with_run_as(&output));
+        assert!(!package_command_succeeded(&output));
+        assert!(combined_output(&output).contains("CLEAR_APP_USER_DATA"));
     }
 
     #[test]

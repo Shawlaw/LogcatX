@@ -155,11 +155,35 @@ pub fn cleanup_matching_logs(
     base_dir: &Path,
     filter: &CleanupFilter,
     protected_paths: &[PathBuf],
+    is_active_log: impl Fn(&Path) -> bool,
 ) -> Result<CleanupOutcome, String> {
     let (candidates, _) = collect_cleanup_candidates(base_dir, filter, protected_paths)?;
+    let canonical_base = base_dir
+        .canonicalize()
+        .unwrap_or_else(|_| base_dir.to_path_buf());
     let mut outcome = CleanupOutcome::default();
 
     for candidate in candidates {
+        // Defense in depth (PRD §23): re-validate the boundary immediately
+        // before deleting so a link planted after the scan can never make
+        // the cleanup touch anything outside the configured log root.
+        if !path_stays_within(&canonical_base, &candidate.path) {
+            log::warn!(
+                "Skipping cleanup candidate outside the log root: {}",
+                candidate.path.display()
+            );
+            continue;
+        }
+        // Live registry query (PRD §24): a logcat session started after the
+        // scan must still be protected at delete time — a snapshot taken at
+        // cleanup start is not enough.
+        if is_active_log(&candidate.path) {
+            log::info!(
+                "Skipping active log file during cleanup: {}",
+                candidate.path.display()
+            );
+            continue;
+        }
         match fs::remove_file(&candidate.path) {
             Ok(()) => {
                 outcome.deleted_files += 1;
@@ -194,6 +218,13 @@ pub fn cleanup_matching_logs(
     }
 
     Ok(outcome)
+}
+
+/// True when `path` (after resolving links) remains inside `root`. Deleting
+/// through a link that points outside the root is never allowed (PRD §23).
+fn path_stays_within(root: &Path, path: &Path) -> bool {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    resolved.starts_with(root)
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -305,12 +336,19 @@ fn collect_cleanup_candidates_recursive(
     {
         let entry = entry.map_err(|err| format!("Failed to read directory entry: {err}"))?;
         let entry_path = entry.path();
-        let metadata = entry.metadata().map_err(|err| {
+        // symlink_metadata never follows links (PRD §23): a symlink or
+        // junction inside the log root must not drag the traversal (or the
+        // deletion) outside the configured root. Links are skipped entirely.
+        let metadata = fs::symlink_metadata(&entry_path).map_err(|err| {
             format!(
                 "Failed to read metadata for {}: {err}",
                 entry_path.display()
             )
         })?;
+
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
 
         if metadata.is_dir() {
             collect_cleanup_candidates_recursive(
@@ -390,14 +428,18 @@ fn remove_empty_dirs(path: &Path) -> Result<bool, String> {
     {
         let entry = entry.map_err(|err| format!("Failed to read directory entry: {err}"))?;
         let child_path = entry.path();
-        let metadata = entry.metadata().map_err(|err| {
+        // Never follow links while pruning (PRD §23); a junction is treated
+        // as content, so its parent is never considered empty.
+        let metadata = fs::symlink_metadata(&child_path).map_err(|err| {
             format!(
                 "Failed to read metadata for {}: {err}",
                 child_path.display()
             )
         })?;
 
-        if metadata.is_dir() {
+        if metadata.file_type().is_symlink() {
+            is_empty = false;
+        } else if metadata.is_dir() {
             if !remove_empty_dirs(&child_path)? {
                 is_empty = false;
             }
@@ -737,6 +779,7 @@ mod tests {
             &base_dir,
             &selected_pixel,
             std::slice::from_ref(&tablet_log),
+            |_| false,
         )
         .expect("clean Pixel log");
         assert_eq!(outcome.deleted_files, 1);
@@ -757,6 +800,147 @@ mod tests {
         assert_eq!(protected_preview.protected_bytes, 6);
 
         let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    /// PRD §45 Test 7: a link inside the log root must never drag scanning
+    /// or deletion outside the configured root.
+    #[test]
+    fn cleanup_never_follows_links_out_of_log_root() {
+        let base_dir = unique_temp_dir("cleanup-link");
+        let external_dir = unique_temp_dir("cleanup-link-external");
+        let device_dir = base_dir.join("Pixel_8");
+        fs::create_dir_all(&device_dir).expect("create device dir");
+        fs::create_dir_all(&external_dir).expect("create external dir");
+
+        let old_log = device_dir.join("old.log");
+        fs::write(&old_log, b"old").expect("write old log");
+        let important = external_dir.join("important.log");
+        fs::write(&important, b"important").expect("write external log");
+
+        // Junction on Windows (no privileges needed), symlink elsewhere.
+        let link = device_dir.join("escape");
+        #[cfg(target_os = "windows")]
+        {
+            let output = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&external_dir)
+                .output()
+                .expect("run mklink");
+            assert!(
+                output.status.success(),
+                "mklink /J failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        #[cfg(not(target_os = "windows"))]
+        std::os::unix::fs::symlink(&external_dir, &link).expect("create symlink");
+
+        let filter = CleanupFilter {
+            device_directories: None,
+            older_than: Some(SystemTime::now() + Duration::from_secs(60)),
+        };
+
+        // The external file must not be scanned, previewed, or deleted.
+        let preview =
+            preview_log_cleanup(&base_dir, &filter, &[]).expect("preview with link present");
+        assert_eq!(preview.matching_files, 1, "only old.log matches");
+        assert_eq!(preview.matching_bytes, 3);
+
+        let outcome =
+            cleanup_matching_logs(&base_dir, &filter, &[], |_| false).expect("cleanup runs");
+        assert_eq!(outcome.deleted_files, 1);
+        assert!(!old_log.exists());
+        assert!(
+            important.exists(),
+            "external important.log must never be touched"
+        );
+        assert_eq!(
+            fs::read(&important).unwrap(),
+            b"important",
+            "external file content intact"
+        );
+
+        let _ = fs::remove_dir_all(&base_dir);
+        let _ = fs::remove_dir_all(&external_dir);
+    }
+
+    /// PRD §45 Test 8: a logcat session that starts while a cleanup is
+    /// already running must be protected by the delete-time registry check,
+    /// not only by the snapshot taken when cleanup began.
+    #[test]
+    fn cleanup_rechecks_active_registry_before_each_delete() {
+        let base_dir = unique_temp_dir("cleanup-race");
+        let device_dir = base_dir.join("Pixel_8");
+        fs::create_dir_all(&device_dir).expect("create device dir");
+        let stale_log = device_dir.join("stale.log");
+        let fresh_log = device_dir.join("fresh.log");
+        fs::write(&stale_log, b"stale").expect("write stale log");
+        fs::write(&fresh_log, b"fresh").expect("write fresh log");
+
+        let filter = CleanupFilter {
+            device_directories: None,
+            older_than: Some(SystemTime::now() + Duration::from_secs(60)),
+        };
+        // Both files match the filter; simulate a logcat starting on
+        // fresh.log after the scan by reporting it active at delete time.
+        let outcome = cleanup_matching_logs(&base_dir, &filter, &[], |candidate| {
+            candidate
+                .file_name()
+                .is_some_and(|name| name == "fresh.log")
+        })
+        .expect("cleanup runs");
+
+        assert_eq!(outcome.deleted_files, 1);
+        assert!(!stale_log.exists());
+        assert!(fresh_log.exists(), "mid-cleanup session log survives");
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    /// A link file (e.g. a symlink with a .log name) is itself never a
+    /// deletion candidate, even though it points outside the root.
+    #[test]
+    fn cleanup_skips_log_named_links_as_candidates() {
+        let base_dir = unique_temp_dir("cleanup-link-file");
+        let external_dir = unique_temp_dir("cleanup-link-file-external");
+        let device_dir = base_dir.join("Pixel_8");
+        fs::create_dir_all(&device_dir).expect("create device dir");
+        fs::create_dir_all(&external_dir).expect("create external dir");
+        let target = external_dir.join("important.log");
+        fs::write(&target, b"important").expect("write target");
+
+        let link_log = device_dir.join("pointing.log");
+        #[cfg(target_os = "windows")]
+        {
+            let output = std::process::Command::new("cmd")
+                .args(["/C", "mklink"])
+                .arg(&link_log)
+                .arg(&target)
+                .output()
+                .expect("run mklink");
+            if !output.status.success() {
+                // Plain symlinks need privileges on Windows; the junction
+                // test above already covers the no-privilege path.
+                let _ = fs::remove_dir_all(&base_dir);
+                let _ = fs::remove_dir_all(&external_dir);
+                return;
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        std::os::unix::fs::symlink(&target, &link_log).expect("create symlink");
+
+        let filter = CleanupFilter {
+            device_directories: None,
+            older_than: Some(SystemTime::now() + Duration::from_secs(60)),
+        };
+        let outcome =
+            cleanup_matching_logs(&base_dir, &filter, &[], |_| false).expect("cleanup runs");
+        assert_eq!(outcome.deleted_files, 0, "link itself never deleted");
+        assert!(target.exists());
+
+        let _ = fs::remove_dir_all(&base_dir);
+        let _ = fs::remove_dir_all(&external_dir);
     }
 
     fn unique_temp_dir(label: &str) -> PathBuf {
