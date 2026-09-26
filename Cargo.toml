@@ -34,6 +34,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 
+[dev-dependencies]
+# Direct access for tests/real_device.rs live signed-manifest check only;
+# pinned to the same tag as the runtime dependency.
+desktop-updater = { git = "https://github.com/Shawlaw/DeskFoundry", tag = "v0.1.6", package = "desktop-updater" }
+
 [features]
 default = []
 console = []

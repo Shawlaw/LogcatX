@@ -33,6 +33,7 @@ All notable changes to this project will be documented in this file.
 - Entering a directory now clears the old listing immediately and shows a centered loading indicator instead of stale rows suddenly swapping; a failed listing no longer retries every frame (it previously re-requested about 8 times per second on errors)
 - The Files page now opens /sdcard by default (some devices restrict the root); device command failures without output no longer render a blank error banner
 - Wireless endpoints stuck in handshake states (authorizing/connecting/unknown) that cannot be attributed to a known device no longer render as an operable-dead "unknown state" row; they appear once the handshake completes
+- Fixed listing failures on real devices collapsing into a generic "device command failed" banner: the listing script no longer discards the cd diagnostic device-side, and NotFound/NoPermission stay distinguishable even on transports that merge stderr into stdout
 - Fixed the "unknown state" ghost device caused by adb mDNS service advertisement rows (adb-<serial>-<random>, with the advertisement suffix landing in the state column): advertisements fold into the device whose serial they embed, and unattributable ones are not shown
 - File rows vertically center their elements; Files-page checkboxes reuse the settings-page accent style so the checked state is clearly visible
 - Double-clicking a file now equals selecting it and pressing download

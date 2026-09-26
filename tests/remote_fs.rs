@@ -24,6 +24,8 @@ fn remote_fs() -> RemoteFs {
                 "f\\n中文文件.txt\\n30 3\\nd\\n子目录\\n0 0\\n | exit:0\n",
                 "shell cd '/data/empty' * => out:f\\n*\\n- -\\n | exit:0\n",
                 "shell cd '/data/missing' * => err:sh: cd: /data/missing: No such file or directory | exit:42\n",
+                "shell cd '/data/ptymissing' * => out:sh: cd: /data/ptymissing: No such file or directory | exit:42\n",
+                "shell cd '/data/ptylocked' * => out:sh: cd: /data/ptylocked: Permission denied | exit:42\n",
                 "shell cd '/data/locked' * => err:sh: cd: /data/locked: Permission denied | exit:42\n",
                 "shell mkdir -p '/data/新建 目录' => exit:0\n",
                 "shell mv '/data/a b.txt' '/data/a b2.txt' => exit:0\n",
@@ -73,6 +75,23 @@ fn list_distinguishes_not_found_from_permission() {
     assert!(matches!(missing, RemoteFsError::NotFound), "{missing:?}");
     let locked = fs
         .list(&RemotePath::new("/data/locked").unwrap())
+        .unwrap_err();
+    assert!(matches!(locked, RemoteFsError::NoPermission), "{locked:?}");
+}
+
+/// Regression (found on real hardware 2026-09-27): pty-style transports and
+/// devices that suppress stderr used to collapse every listing failure into
+/// a generic DeviceError. When the diagnostic rides on stdout instead, the
+/// NotFound / NoPermission classification must survive.
+#[test]
+fn list_classifies_from_stdout_when_stderr_is_empty() {
+    let fs = remote_fs();
+    let missing = fs
+        .list(&RemotePath::new("/data/ptymissing").unwrap())
+        .unwrap_err();
+    assert!(matches!(missing, RemoteFsError::NotFound), "{missing:?}");
+    let locked = fs
+        .list(&RemotePath::new("/data/ptylocked").unwrap())
         .unwrap_err();
     assert!(matches!(locked, RemoteFsError::NoPermission), "{locked:?}");
 }

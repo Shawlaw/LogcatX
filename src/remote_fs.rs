@@ -341,6 +341,22 @@ impl RemoteFs {
         }
     }
 
+    /// Classify a failed device command from whichever stream carried the
+    /// diagnostic. Modern shell-v2 adb separates stderr, but pty-style
+    /// transports merge it into stdout — and a device-side `2>/dev/null`
+    /// (used by the listing script historically) suppresses it entirely,
+    /// which used to collapse every failure into a generic DeviceError on
+    /// real hardware. Scanning stdout when stderr is empty keeps the
+    /// NotFound / NoPermission distinction alive on both transports (PRD §8).
+    fn classify_failure(output: &crate::adb_executor::AdbOutput) -> RemoteFsError {
+        let stderr = output.stderr_lossy();
+        if stderr.trim().is_empty() {
+            Self::classify_cd_failure(&output.stdout_lossy())
+        } else {
+            Self::classify_cd_failure(&stderr)
+        }
+    }
+
     /// List one directory. Distinguishes not-found / no-permission / other
     /// failures instead of a blanket "operation failed" (PRD §8).
     ///
@@ -353,8 +369,13 @@ impl RemoteFs {
     /// (`- -` when stat fails). The parser tolerates the `\r\n` line endings
     /// a real `adb shell` pty produces.
     pub fn list(&self, path: &RemotePath) -> Result<Vec<RemoteEntry>, RemoteFsError> {
+        // No `2>/dev/null` on the cd: the diagnostic line is what
+        // `classify_failure` reads to tell NotFound from NoPermission, and
+        // suppressing it device-side erased that distinction on real
+        // hardware. A failed cd produces no listing output, so the error
+        // text can never pollute the parse of a successful listing.
         let script = format!(
-            "cd {dir} 2>/dev/null || exit 42; for entry in *; do \
+            "cd {dir} || exit 42; for entry in *; do \
              [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue; \
              if [ -d \"$entry\" ]; then printf 'd\\n'; \
              elif [ -L \"$entry\" ]; then printf 'l\\n'; \
@@ -366,7 +387,7 @@ impl RemoteFs {
         );
         let output = self.shell(&script)?;
         if !output.success() {
-            return Err(Self::classify_cd_failure(&output.stderr_lossy()));
+            return Err(Self::classify_failure(&output));
         }
         let stdout = output.stdout_lossy();
         if stdout.trim().is_empty() {
@@ -383,7 +404,7 @@ impl RemoteFs {
         if output.success() {
             Ok(())
         } else {
-            Err(Self::classify_cd_failure(&output.stderr_lossy()))
+            Err(Self::classify_failure(&output))
         }
     }
 
@@ -398,7 +419,7 @@ impl RemoteFs {
         if output.success() {
             Ok(())
         } else {
-            Err(Self::classify_cd_failure(&output.stderr_lossy()))
+            Err(Self::classify_failure(&output))
         }
     }
 
@@ -410,7 +431,7 @@ impl RemoteFs {
         if output.success() {
             Ok(())
         } else {
-            Err(Self::classify_cd_failure(&output.stderr_lossy()))
+            Err(Self::classify_failure(&output))
         }
     }
 
@@ -427,7 +448,7 @@ impl RemoteFs {
         );
         let output = self.shell(&script)?;
         if !output.success() {
-            return Err(Self::classify_cd_failure(&output.stderr_lossy()));
+            return Err(Self::classify_failure(&output));
         }
         Ok(RemoteEntryKind::parse_marker(output.stdout_lossy().trim()))
     }
