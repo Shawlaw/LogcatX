@@ -39,7 +39,7 @@ All notable changes to this project will be documented in this file.
 - Fixed input hint text rendering in the same color as real text: hints are now a light gray
 - The transfer history no longer shows a speed estimate (unreliable for adb pulls) and instead shows start → end timestamps; running transfers show progress without speed
 - Fixed text fields losing keyboard focus after a context-menu action: paste/select-all now hand focus back (pressing a menu item surrenders focus in egui, and the selection highlight is only painted while focused — which made select-all look like a no-op)
-- Fixed the select-all range being wiped so a following right-click cut did nothing: the focus-transition frame's IME guard collapses ranges to a point; the selection is now re-applied once focus is stable
+- Fixed the select-all range being wiped so a following right-click cut did nothing: the focus-transition frame's IME guard collapses ranges to a point; the selection is now re-applied once focus is stable. The Files-page path box had a second cause: an every-frame "empty → current directory" refill resurrected the cut text instantly — the refill now happens only on navigation
 - Darkened the text-selection highlight (the previous fill was nearly white on the panel background)
 - Fixed the "unknown state" ghost device caused by adb mDNS service advertisement rows (adb-<serial>-<random>, with the advertisement suffix landing in the state column): advertisements fold into the device whose serial they embed, and unattributable ones are not shown
 - File rows vertically center their elements; Files-page checkboxes reuse the settings-page accent style so the checked state is clearly visible

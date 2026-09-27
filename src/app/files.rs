@@ -147,6 +147,12 @@ impl AdbCollectorApp {
             }
             self.files_cwd = path;
         }
+        // Keep the path box in sync with the directory it navigated to.
+        // This is the ONLY refill point: an every-frame "empty → cwd" refill
+        // used to resurrect the text right after a select-all cut emptied
+        // the box, making the cut look like a no-op (field-trial bug 26,
+        // files-page half).
+        self.files_path_input = self.files_cwd.as_str().to_owned();
         self.files_request_listing();
     }
 
@@ -157,6 +163,7 @@ impl AdbCollectorApp {
     pub(crate) fn files_navigate_back(&mut self) {
         if let Some(previous) = self.files_history.pop() {
             self.files_cwd = previous;
+            self.files_path_input = self.files_cwd.as_str().to_owned();
             self.files_request_listing();
         }
     }
@@ -443,18 +450,12 @@ impl AdbCollectorApp {
                 match RemotePath::new(self.files_path_input.trim()) {
                     Ok(path) => {
                         let path = path.clone();
-                        self.files_path_input = path.as_str().to_owned();
                         self.files_navigate(path);
                     }
                     Err(err) => self.set_error(err.to_string()),
                 }
             }
         });
-        if self.files_path_input.trim().is_empty()
-            || self.files_path_input.trim() == self.files_cwd.as_str()
-        {
-            self.files_path_input = self.files_cwd.as_str().to_owned();
-        }
     }
 
     fn files_cwd_favorite(&self) -> Option<usize> {

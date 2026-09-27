@@ -433,7 +433,7 @@ impl AdbCollectorApp {
             files_error: None,
             files_selected: HashSet::new(),
             files_sort: files::FilesSort::default(),
-            files_path_input: String::new(),
+            files_path_input: "/".to_owned(),
             files_run_as_input: String::new(),
             files_mkdir_input: String::new(),
             files_show_mkdir: false,
