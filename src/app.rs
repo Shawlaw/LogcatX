@@ -2580,7 +2580,7 @@ impl AdbCollectorApp {
                 ui.label(start_app_label);
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.new_display_start_app_input)
-                        .hint_text("com.example.app")
+                        .hint_text(text_menu::hint("com.example.app"))
                         .desired_width(300.0),
                 );
                 text_menu::text_edit_menu(
@@ -2603,7 +2603,7 @@ impl AdbCollectorApp {
                     ui.label(filter_apps_label);
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.new_display_app_filter_input)
-                            .hint_text(filter_apps_hint)
+                            .hint_text(text_menu::hint(filter_apps_hint))
                             .desired_width(300.0),
                     );
                     text_menu::text_edit_menu(
@@ -3025,7 +3025,7 @@ impl AdbCollectorApp {
                     if self.cleanup_time_filter == CleanupTimeFilter::BeforeDate {
                         let response = ui.add(
                             egui::TextEdit::singleline(&mut self.cleanup_before_date_input)
-                                .hint_text("YYYY-MM-DD"),
+                                .hint_text(text_menu::hint("YYYY-MM-DD")),
                         );
                         text_menu::text_edit_menu(
                             &response,
@@ -5762,7 +5762,7 @@ fn apply_visual_style(ctx: &egui::Context) {
     style.visuals.window_corner_radius = egui::CornerRadius::same(18);
     style.visuals.menu_corner_radius = egui::CornerRadius::same(12);
     style.visuals.override_text_color = Some(Color32::from_rgb(55, 61, 72));
-    style.visuals.selection.bg_fill = Color32::from_rgb(240, 245, 255);
+    style.visuals.selection.bg_fill = Color32::from_rgb(178, 208, 247);
     style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(91, 138, 255));
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(10);
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(10);

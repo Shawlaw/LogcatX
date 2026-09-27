@@ -35,6 +35,12 @@ All notable changes to this project will be documented in this file.
 - Wireless endpoints stuck in handshake states (authorizing/connecting/unknown) that cannot be attributed to a known device no longer render as an operable-dead "unknown state" row; they appear once the handshake completes
 - Fixed listing failures on real devices collapsing into a generic "device command failed" banner: the listing script no longer discards the cd diagnostic device-side, and NotFound/NoPermission stay distinguishable even on transports that merge stderr into stdout
 - Fixed run-as browsing being completely broken on real devices: the whole listing script used to be passed as a bare run-as argument, so devices tried to exec the script's first word as a binary (an Android 16 phone reported "run-as: exec failed for cd: Permission denied"); it now runs via `run-as <package> sh -c '<script>'` with single-quote escaping, verified browsing a debuggable app's data directory on real hardware
+- Fixed right-click on a text field with an existing selection dropping the selection (egui collapses the cursor on any pointer press; the selection is now stashed on press and restored on release)
+- Fixed input hint text rendering in the same color as real text: hints are now a light gray
+- The transfer history no longer shows a speed estimate (unreliable for adb pulls) and instead shows start → end timestamps; running transfers show progress without speed
+- Fixed text fields losing keyboard focus after a context-menu action: paste/select-all now hand focus back (pressing a menu item surrenders focus in egui, and the selection highlight is only painted while focused — which made select-all look like a no-op)
+- Fixed the select-all range being wiped so a following right-click cut did nothing: the focus-transition frame's IME guard collapses ranges to a point; the selection is now re-applied once focus is stable
+- Darkened the text-selection highlight (the previous fill was nearly white on the panel background)
 - Fixed the "unknown state" ghost device caused by adb mDNS service advertisement rows (adb-<serial>-<random>, with the advertisement suffix landing in the state column): advertisements fold into the device whose serial they embed, and unattributable ones are not shown
 - File rows vertically center their elements; Files-page checkboxes reuse the settings-page accent style so the checked state is clearly visible
 - Double-clicking a file now equals selecting it and pressing download

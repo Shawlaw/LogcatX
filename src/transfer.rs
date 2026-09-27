@@ -107,6 +107,9 @@ pub struct TransferTask {
     pub bytes_total: Option<u64>,
     pub speed_bps: Option<u64>,
     pub error: Option<String>,
+    /// Local-time stamp set the moment the worker thread starts running the
+    /// transfer (queue wait excluded); `None` while queued.
+    pub started_at: Option<String>,
     /// Local-time formatted stamp recorded when the task reaches a terminal
     /// state, shown in the transfers list (field-trial bug 10).
     pub finished_at: Option<String>,
@@ -374,6 +377,7 @@ impl Scheduler {
                     bytes_total: None,
                     speed_bps: None,
                     error: None,
+                    started_at: None,
                     finished_at: None,
                 };
                 log::info!(
@@ -423,6 +427,8 @@ impl Scheduler {
         task.error = None;
         task.bytes_transferred = 0;
         task.speed_bps = None;
+        task.started_at = None;
+        task.finished_at = None;
     }
 
     fn cancel_task(&mut self, id: TransferId) {
@@ -595,6 +601,13 @@ fn run_transfer(
         "transfer #{id} {} on {device} starting",
         operation.describe()
     );
+
+    let started_at = chrono::Local::now().format("%m-%d %H:%M:%S").to_string();
+    worker.update(|task| {
+        if task.started_at.is_none() {
+            task.started_at = Some(started_at);
+        }
+    });
 
     if cancel.cancelled() {
         worker.finish(TransferState::Cancelled, None);
@@ -917,6 +930,7 @@ mod tests {
             bytes_total: None,
             speed_bps: None,
             error: None,
+            started_at: None,
             finished_at: None,
         };
         assert_eq!(task.progress_fraction(), None);

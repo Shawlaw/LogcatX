@@ -517,7 +517,7 @@ impl AdbCollectorApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new(self.tr("files.run_as_label")).small().weak());
             let run_as_response = egui::TextEdit::singleline(&mut self.files_run_as_input)
-                .hint_text("com.example.app")
+                .hint_text(super::text_menu::hint("com.example.app"))
                 .desired_width(200.0)
                 .show(ui)
                 .response;
@@ -1162,6 +1162,17 @@ impl AdbCollectorApp {
                 };
                 ui.label(direction);
                 ui.label(Self::files_transfer_source_label(task));
+                // Running rows show live progress without a speed estimate
+                // (unreliable for adb pulls — field-trial bug 22); terminal
+                // rows show start → end stamps instead.
+                let stamp = |started: &Option<String>, finished: &Option<String>| -> String {
+                    match (started, finished) {
+                        (Some(s), Some(f)) => format!("{s} → {f}"),
+                        (None, Some(f)) => f.clone(),
+                        (Some(s), None) => format!("{s} → …"),
+                        (None, None) => String::new(),
+                    }
+                };
                 match task.state {
                     TransferState::Queued => {
                         let _ = ui.label(
@@ -1179,12 +1190,7 @@ impl AdbCollectorApp {
                     }
                     TransferState::Running => {
                         let fraction = task.progress_fraction();
-                        let (bytes, speed) = (
-                            desktop_fs::format_bytes(task.bytes_transferred),
-                            task.speed_bps
-                                .map(desktop_fs::format_bytes)
-                                .unwrap_or_else(|| "-".to_owned()),
-                        );
+                        let bytes = desktop_fs::format_bytes(task.bytes_transferred);
                         match fraction {
                             Some(fraction) => {
                                 let total = task
@@ -1193,7 +1199,7 @@ impl AdbCollectorApp {
                                     .unwrap_or_else(|| "?".to_owned());
                                 let progress = egui::ProgressBar::new(fraction as f32)
                                     .desired_width(ui.available_width() * 0.4)
-                                    .text(format!("{bytes} / {total} · {speed}/s"));
+                                    .text(format!("{bytes} / {total}"));
                                 ui.add(progress);
                             }
                             None => {
@@ -1202,9 +1208,7 @@ impl AdbCollectorApp {
                                         .small()
                                         .weak(),
                                 );
-                                let _ = ui.label(
-                                    RichText::new(format!("{bytes} · {speed}/s")).small().weak(),
-                                );
+                                let _ = ui.label(RichText::new(bytes).small().weak());
                             }
                         }
                     }
@@ -1214,8 +1218,9 @@ impl AdbCollectorApp {
                                 .small()
                                 .color(Color32::from_rgb(46, 125, 50)),
                         );
-                        if let Some(finished_at) = &task.finished_at {
-                            let _ = ui.label(RichText::new(finished_at.clone()).small().weak());
+                        let text = stamp(&task.started_at, &task.finished_at);
+                        if !text.is_empty() {
+                            let _ = ui.label(RichText::new(text).small().weak());
                         }
                     }
                     TransferState::Failed => {
@@ -1228,8 +1233,9 @@ impl AdbCollectorApp {
                             .small()
                             .color(Color32::from_rgb(190, 60, 60)),
                         );
-                        if let Some(finished_at) = &task.finished_at {
-                            let _ = ui.label(RichText::new(finished_at.clone()).small().weak());
+                        let text = stamp(&task.started_at, &task.finished_at);
+                        if !text.is_empty() {
+                            let _ = ui.label(RichText::new(text).small().weak());
                         }
                     }
                     TransferState::Cancelled => {
@@ -1238,8 +1244,9 @@ impl AdbCollectorApp {
                                 .small()
                                 .weak(),
                         );
-                        if let Some(finished_at) = &task.finished_at {
-                            let _ = ui.label(RichText::new(finished_at.clone()).small().weak());
+                        let text = stamp(&task.started_at, &task.finished_at);
+                        if !text.is_empty() {
+                            let _ = ui.label(RichText::new(text).small().weak());
                         }
                     }
                 }

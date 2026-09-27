@@ -831,7 +831,7 @@ fn normalized_edit(
     let mut response = ui.add(
         egui::TextEdit::singleline(text)
             .id(widget_id)
-            .hint_text(hint)
+            .hint_text(super::text_menu::hint(hint))
             .desired_width(if compact { 160.0 } else { f32::INFINITY }),
     );
     if replaced {
