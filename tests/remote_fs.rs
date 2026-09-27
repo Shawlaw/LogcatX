@@ -26,6 +26,7 @@ fn remote_fs() -> RemoteFs {
                 "shell cd '/data/missing' * => err:sh: cd: /data/missing: No such file or directory | exit:42\n",
                 "shell cd '/data/ptymissing' * => out:sh: cd: /data/ptymissing: No such file or directory | exit:42\n",
                 "shell cd '/data/ptylocked' * => out:sh: cd: /data/ptylocked: Permission denied | exit:42\n",
+                "shell run-as com.example sh -c * => out:d\\ncache\\n0 1\\nd\\nfiles\\n0 2\\n | exit:0\n",
                 "shell cd '/data/locked' * => err:sh: cd: /data/locked: Permission denied | exit:42\n",
                 "shell mkdir -p '/data/新建 目录' => exit:0\n",
                 "shell mv '/data/a b.txt' '/data/a b2.txt' => exit:0\n",
@@ -94,6 +95,22 @@ fn list_classifies_from_stdout_when_stderr_is_empty() {
         .list(&RemotePath::new("/data/ptylocked").unwrap())
         .unwrap_err();
     assert!(matches!(locked, RemoteFsError::NoPermission), "{locked:?}");
+}
+
+/// Regression (found on a real Android 16 device): `run-as <pkg> <script>`
+/// makes run-as exec the script's first word as a binary ("exec failed for
+/// cd"). The RemoteFs run-as path must route through `sh -c` with the
+/// script single-quoted, and the fake scenario pins that argv shape.
+#[test]
+fn run_as_listing_routes_through_sh_c() {
+    let fs = RemoteFs::new_run_as(common::exe(), "device-a", "com.example");
+    let entries = fs
+        .list(&RemotePath::new("/data/data/com.example").unwrap())
+        .expect("run-as listing executes");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].name, "cache");
+    assert_eq!(entries[0].kind, RemoteEntryKind::Directory);
+    assert_eq!(entries[1].name, "files");
 }
 
 #[test]

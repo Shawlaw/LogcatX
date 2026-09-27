@@ -287,6 +287,67 @@ fn run_as_capability_probe() {
     assert!(output.success(), "probe script itself must succeed");
 }
 
+/// PRD §46 "run-as 支持" case: browse a debuggable app's own data directory
+/// through the same RemoteFs run-as prefix the Files page uses. Soft-skips
+/// when no attached device has a debuggable package installed.
+#[test]
+#[ignore = "real device: set LOGCATX_REAL_ADB; needs a debuggable package"]
+fn run_as_browsing_lists_app_data_on_real_device() {
+    let adb = adb_path();
+    let probe = "for p in $(pm list packages -3 | cut -d: -f2 | head -30); do \
+                 run-as \"$p\" ls >/dev/null 2>&1 && echo \"$p\" && exit 0; done";
+    let mut found: Option<(String, String)> = None;
+    for device in ready_devices() {
+        let output = logcatx::adb_executor::AdbExecutor::new(&adb)
+            .execute_with_timeout(
+                &["-s", &device.serial, "shell", probe],
+                Duration::from_secs(30),
+            )
+            .expect("run-as probe executes");
+        if let Some(package) = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .lines()
+            .next()
+            && !package.is_empty()
+        {
+            found = Some((device.serial.clone(), package.to_owned()));
+            break;
+        }
+    }
+    let Some((serial, package)) = found else {
+        eprintln!("skipping: no attached device exposes a debuggable package");
+        return;
+    };
+    println!("run-as browse via {serial} / {package}");
+
+    let fs = RemoteFs::new_run_as(&adb, &serial, &package);
+    let own_dir = RemotePath::new(&format!("/data/data/{package}")).unwrap();
+    let entries = fs
+        .list(&own_dir)
+        .unwrap_or_else(|err| panic!("run-as listing of {package} data dir: {err:?}"));
+    println!(
+        "run-as {} -> {} entries: {:?}",
+        own_dir.as_str(),
+        entries.len(),
+        entries.iter().map(|e| e.name.as_str()).collect::<Vec<_>>()
+    );
+    assert!(
+        !entries.is_empty(),
+        "a debuggable app's data dir lists its files/cache/lib entries"
+    );
+    assert!(
+        entries.iter().all(|e| e.kind == RemoteEntryKind::Directory),
+        "top-level app data entries are directories"
+    );
+
+    // Informational: the Files page also navigates to /data/data itself;
+    // traversability varies by device (0711 allows cd but not always glob).
+    match fs.list(&RemotePath::new("/data/data").unwrap()) {
+        Ok(parent) => println!("/data/data under run-as: {} entries", parent.len()),
+        Err(err) => println!("/data/data under run-as not listable: {err:?}"),
+    }
+}
+
 #[test]
 #[ignore = "needs LOGCATX_UPDATE_PUBLIC_KEY at compile time + network"]
 fn live_update_channel_fetches_and_verifies_signed_manifest() {
@@ -380,17 +441,86 @@ fn multi_device_discovery_keeps_identities_distinct() {
             device.serial, device.identity_key, device.manufacturer, device.model
         );
     }
-    let mut identities: Vec<_> = devices.iter().map(|d| d.identity_key.as_str()).collect();
-    identities.sort_unstable();
-    identities.dedup();
-    // Two different physical devices must never share an identity; if the
-    // same hardware is attached over two transports the app merges them into
-    // one entry upstream, which would already have collapsed `devices`.
+
+    // Group entries by identity: distinct physical hardware must never share
+    // an identity. The one legal overlap is the SAME hardware attached over
+    // two transports (USB + wireless debugging) — the app folds those into
+    // one device row upstream, which requires exactly this shared identity.
+    let mut groups: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for device in &devices {
+        groups
+            .entry(device.identity_key.as_str())
+            .or_default()
+            .push(&device.serial);
+    }
+    for (identity, serials) in &groups {
+        if serials.len() == 1 {
+            continue;
+        }
+        let usb: Vec<_> = serials.iter().filter(|s| !s.contains(':')).collect();
+        let network: Vec<_> = serials.iter().filter(|s| s.contains(':')).collect();
+        assert_eq!(
+            usb.len() + network.len(),
+            serials.len(),
+            "transports classify as USB or network"
+        );
+        assert!(
+            !usb.is_empty() && !network.is_empty(),
+            "shared identity {identity} spans USB {usb:?} and network {network:?} — \
+             anything else would be two devices colliding on one identity"
+        );
+    }
+}
+
+/// The USB+wireless merge path (PRD: one row per physical device, USB
+/// preferred) keys off `identity_key`: both transports of the same hardware
+/// must resolve the same identity via getprop metadata. The grouping and
+/// USB-preference selection themselves are unit-tested in app.rs.
+#[test]
+#[ignore = "real device: set LOGCATX_REAL_ADB; needs one device on USB AND wireless"]
+fn same_device_usb_and_wireless_transports_share_identity() {
+    let devices = ready_devices();
+    let mut groups: std::collections::BTreeMap<&str, Vec<&logcatx::models::DeviceInfo>> =
+        Default::default();
+    for device in &devices {
+        groups
+            .entry(device.identity_key.as_str())
+            .or_default()
+            .push(device);
+    }
+    let dual = groups.values().find(|entries| {
+        entries.len() > 1
+            && entries.iter().any(|d| !d.serial.contains(':'))
+            && entries.iter().any(|d| d.serial.contains(':'))
+    });
+    let Some(entries) = dual else {
+        eprintln!(
+            "skipping: no device is attached over both USB and wireless ({})",
+            devices.len()
+        );
+        return;
+    };
     assert_eq!(
-        identities.len(),
-        devices.len(),
-        "distinct hardware keeps distinct identity keys"
+        entries.len(),
+        2,
+        "exactly two transports of the same hardware"
     );
+    let metadata: std::collections::BTreeSet<(Option<&String>, Option<&String>)> = entries
+        .iter()
+        .map(|d| (d.manufacturer.as_ref(), d.model.as_ref()))
+        .collect();
+    assert_eq!(
+        metadata.len(),
+        1,
+        "both transports report identical manufacturer/model: {:?}",
+        entries.iter().map(|d| &d.serial).collect::<Vec<_>>()
+    );
+    for entry in entries {
+        println!(
+            "dual-transport {}: identity {} ({:?} {:?})",
+            entry.serial, entry.identity_key, entry.manufacturer, entry.model
+        );
+    }
 }
 
 #[test]

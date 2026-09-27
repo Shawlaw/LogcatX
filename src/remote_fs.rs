@@ -301,10 +301,20 @@ impl RemoteFs {
     fn shell(&self, script: &str) -> Result<crate::adb_executor::AdbOutput, RemoteFsError> {
         let mut command: Vec<String> = vec!["-s".into(), self.serial.clone(), "shell".into()];
         if let Some(package) = &self.run_as {
+            // `run-as <pkg> <script>` fails on real devices: adb joins its
+            // arguments with plain spaces, so the device shell parses the
+            // script's first word as the binary run-as must exec (observed:
+            // "run-as: exec failed for cd: Permission denied" on an Android
+            // 16 device). Route through an explicit `sh -c` and single-quote
+            // the script so it survives the join as one argument.
             command.push("run-as".into());
             command.push(package.clone());
+            command.push("sh".into());
+            command.push("-c".into());
+            command.push(shell_quote(script));
+        } else {
+            command.push(script.to_owned());
         }
-        command.push(script.to_owned());
         let args: Vec<&str> = command.iter().map(String::as_str).collect();
         self.executor
             .execute_with_options(

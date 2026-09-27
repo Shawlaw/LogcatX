@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 cargo build                              # debug build
 cargo check                              # quick compilation check
-cargo test                               # run all unit tests
+cargo test                               # run all unit + integration tests
 cargo test --lib adb                     # run tests in a specific module
 cargo test parse_logcat_args             # run a single test by name
 cargo clippy -- -D warnings              # lint
@@ -20,6 +20,18 @@ cargo run                                # run (no console on Windows)
 cargo run --features console             # run with console window
 cargo run -- --console                   # same, via CLI flag
 LOGCATX_DEMO_APP_UPDATE=1 cargo run      # demo the in-app update flow locally (debug builds; see docs/update-signing.md)
+```
+
+Real-device smoke (needs a device in `device` state; all cases are `#[ignore]`-gated and skipped otherwise):
+
+```bash
+LOGCATX_REAL_ADB="$(where adb)" cargo test --test real_device -- --ignored --test-threads=1
+```
+
+The `live_update_channel_*` case additionally needs the update public key at compile time:
+
+```bash
+LOGCATX_REAL_ADB="$(where adb)" LOGCATX_UPDATE_PUBLIC_KEY=<key> cargo test --test real_device live_update -- --ignored
 ```
 
 Release build (cross-compile on Linux/macOS targeting Windows):
@@ -38,23 +50,42 @@ LogcatX is a Windows-first Rust/egui desktop app for collecting `adb logcat` fro
 
 ### Source modules (`src/`)
 
-- **`main.rs`** — Entry point. Resolves config paths, initializes logging and i18n, acknowledges applied updates, launches the eframe window. The `console` feature flag and `--console` CLI arg control whether a terminal window appears.
-- **`app.rs`** (~3500 lines) — The main `eframe::App` implementation. All UI rendering (devices page, settings page, dialogs, menus), application state, and background task orchestration via `std::sync::mpsc`. The `LogcatXApp` struct holds all runtime state.
-- **`adb.rs`** — All ADB subprocess interactions: device listing, metadata queries, logcat spawning, shell/foreground-app commands, file push, APK install. Each ADB call spawns a `Command`. Logcat processes are managed as `Child` handles stored per-device.
-- **`config.rs`** — `AppConfig` (serde struct) with persistence. `resolve_app_paths()` determines portable vs AppData mode via `desktop-config`. Config is loaded/saved as JSON.
-- **`models.rs`** — Core data types: `DeviceInfo`, `ForegroundApp`, `LogcatSession`, `DeviceState`, the `AppEvent` mpsc enum, UI dialog state enums.
-- **`fs_utils.rs`** — Log directory management, file sizing, path display helpers, log cleanup.
-- **`i18n.rs`** — Thin wrapper around `desktop-i18n`. Loads translations from `locales/en.json` and `locales/zh-CN.json`.
-- **`updater.rs`** — Signed in-app updates on top of `desktop-updater`: manifest/signature URLs for the stable channel, compile-time public key (`LOGCATX_UPDATE_PUBLIC_KEY`; empty key disables the feature), the persisted once-per-day automatic check gate and status cache, and the release layout allow-list.
-- **`bin/logcatx-updater.rs`** — Tiny helper shipped beside `LogcatX.exe`; performs the post-exit file replacement and restart for updates.
+The crate is a lib plus a thin bin: `lib.rs` exposes everything (core business logic *and* the egui UI) so `tests/` can drive core logic against the fake adb double without a GUI; `main.rs` is only the eframe bootstrap.
+
+Core (UI-free, reusable by a future non-egui frontend):
+
+- **`adb_executor.rs`** — `AdbExecutor`: every adb invocation goes through it. execute/execute_with_timeout/cancel, `spawn_streaming` (logcat), bounded output capture, kill + reap of children.
+- **`adb.rs`** — device discovery: `list_devices` with `DeviceMetadataCache` (getprop metadata cached across polls, pruned on disconnect) and discovery generations (stale replies can't overwrite newer state); logcat spawn; shell/foreground-app commands; APK install.
+- **`task.rs`** — `TaskManager`: per-device, per-kind task lifecycle (replaces global `*_in_progress` bools; one device's operation never blocks another's).
+- **`transfer.rs`** — `TransferManager`: transfer queue with per-device concurrency, progress parsing, cancel (= kill + reap), retry, stall supervision. UI clones a handle and polls `snapshot()`.
+- **`remote_fs.rs`** — Files backend: `RemotePath` validation, `shell_quote` escaping, the machine-parsed listing protocol (POSIX `[ -d ]/[ -L ]/[ -f ]` kind markers + `stat -c '%s %Y'`; tolerates CRLF/pty output), mkdir/rename/move/delete, and run-as browsing (`run-as <pkg> sh -c '<script>'` — never a bare script argument; adb joins args with spaces and devices exec the first word).
+- **`wireless.rs`** (+ `wireless/tests.rs`) — wireless-debugging pair/connect, sharing the same `AdbExecutor` process management.
+- **`managed_child.rs`** — child-process handle with reliable kill + reap.
+- **`models.rs`** — core data types: `DeviceInfo`, `DeviceEntry` (transport merge), `AppEvent` mpsc enum, dialog state.
+- **`config.rs`** — `AppConfig` (serde) with atomic persistence; portable-vs-AppData via `desktop-config`; 0.8→0.9 migration.
+- **`fs_utils.rs`**, **`i18n.rs`**, **`updater.rs`**, **`build_info.rs`** — log-dir management/cleanup safety; `desktop-i18n` wrapper (`locales/*.json`); signed in-app updates (see below); compile-time version/commit identity.
+- **`scrcpy.rs`** — scrcpy version detection and screen mirroring integration.
+
+UI layer (the only modules allowed to import egui/eframe):
+
+- **`app.rs`** + **`app/`** (`connection.rs` wireless UI, `files.rs` Files page, `text_menu.rs` right-click text menus) — the `eframe::App` implementation: all pages, dialogs, menus, and background task orchestration via mpsc.
+- **`ime.rs`** — Windows IME workaround for egui 0.31 single-line text edits.
+- **`e2e.rs`** — `--features e2e` native renderer screenshots for GUI E2E (never in release artifacts).
+
+Binaries:
+
+- **`bin/logcatx-updater.rs`** — update helper shipped beside `LogcatX.exe`; performs the post-exit file replacement and restart for updates.
+- **`bin/fake_adb.rs`** — scriptable adb double (`FAKE_ADB_SCRIPT` scenario files) driving the integration tests.
 
 ### Key patterns
 
+- **Core/UI boundary**: business modules (everything under "Core" above) must not import egui/eframe or `crate::app`; they emit plain Rust data + mpsc events and the egui layer adapts them. This is a standing constraint: 0.10.0 will replace the egui UI with Tauri while reusing this core — do not add UI types to core modules, and do not build speculative GUI abstractions inside 0.9.0 either.
 - **Portable mode**: If `config.json` exists beside the exe and the directory is writable, the app runs in portable mode. Otherwise it falls back to `%APPDATA%/LogcatX`. Handled by `desktop-config::PortableAppPaths`.
 - **Background ADB**: Logcat collection runs in spawned child processes. The UI polls for output via mpsc channels. Device list refresh also happens asynchronously.
-- **Device identity**: USB and Wi-Fi connections to the same physical device are merged using `identity_key` (derived from manufacturer+model). USB is preferred when both are present.
+- **Device identity**: transports merge on `identity_key`, which is the device's `ro.serialno` (fallback `ro.boot.serialno`), NOT manufacturer+model. USB is preferred when both USB and wireless are present; unresolved/rotating wireless endpoints fold by host. All shell scripts must assume POSIX sh with possible CRLF pollution.
 - **i18n**: All user-visible strings go through the `I18n` struct. Translation files are in `locales/`. CJK fonts are loaded on startup.
 - **Application updates**: checks verify a detached Ed25519 signature over the Raw GitHub manifest (`updates/stable.json` on `master`), run at most once per local day after 08:00 on window focus, and only a fresh signature-verified candidate may be downloaded. The layout allow-list must stay in sync across `desktop-update.toml`, `RELEASE_REPLACE_FILES` in `src/updater.rs`, and the packaging script.
+- **Log scope**: the app's logcat feature is capture-to-file + collection status + history management + app diagnostics. Live log rendering / virtualized scrolling / in-app filtering are NOT requirements of 0.9.x or 0.10.x; do not add them speculatively.
 
 ### Dependencies
 
@@ -62,12 +93,23 @@ Shared infrastructure comes from the [DeskFoundry](https://github.com/Shawlaw/De
 
 ### Windows resources
 
-`build.rs` generates a `.rc` file at compile time embedding the icon and version info from `icons/icon.ico`. It needs `llvm-rc` on the PATH for any Windows build (preinstalled on GitHub windows-latest runners; the lookup prefers `where.exe` and tolerates MSYS-style `which` output). Without it the exe still builds but ships without icon/version metadata; the release workflow fails tag builds whose `LogcatX.exe` lacks embedded resources.
+`build.rs` generates a `.rc` file at compile time embedding the icon and version info from `icons/icon.ico`. The resource compiler lookup is a four-level fallback — `RC` env var, then `llvm-rc` on PATH, then `llvm-rc-20`, then the newest Windows SDK `rc.exe` under `C:\Program Files (x86)\Windows Kits\10\bin\<ver>\<arch>\` — so **llvm-rc is NOT required**: any machine with an MSVC toolchain (which always ships the Windows SDK) embeds resources automatically. The `where`/`which` probes tolerate MSYS-style paths and missing `.exe` suffixes (Git Bash on CI). If every level fails the exe still builds, ships without icon/version metadata, and the release workflow fails tag builds whose `LogcatX.exe` lacks embedded resources.
+
+**Never claim resources are missing from a binary without checking the binary.** Verify with:
+
+```powershell
+[System.Diagnostics.FileVersionInfo]::GetVersionInfo('<path>\LogcatX.exe') | Select FileVersion, ProductName
+```
+
+(The icon and VERSIONINFO are compiled from the same .rc in one step — version info present ⇒ icon present.)
 
 ## Tests
 
-Tests are inline `#[cfg(test)]` modules in each source file. The heaviest test coverage is in `adb.rs` (parsing tests) and `config.rs` (serialization/default tests). Run individual tests with `cargo test <test_name>`.
+- Inline `#[cfg(test)]` unit tests in each source file (heaviest: `adb.rs` parsing, `config.rs`, `updater.rs`, device-merge logic in `app.rs`).
+- `tests/` integration suites against the fake adb double: `fake_adb_harness.rs`, `adb_executor.rs`, `remote_fs.rs`, `transfer.rs`, and `update_helper.rs` (drives the real `logcatx-updater` binary through apply/ack/rollback).
+- `tests/real_device.rs`: `#[ignore]`-gated smoke against real hardware — discovery/identity, listing protocol, file-op roundtrips, logcat capture, multi-device isolation (parallel pushes must not mix), run-as browsing, dual-transport (USB+wireless) identity, and a live signed-manifest check. Requires `LOGCATX_REAL_ADB`; multi-device cases soft-skip below two devices.
+- Run individual tests with `cargo test <test_name>`; the real-device suite as shown in the commands section above.
 
 ## Release process
 
-Pushing a tag matching `v*` triggers `.github/workflows/release.yml`: it validates the tag against `Cargo.toml` version, runs tests, builds the flat portable zip on `windows-latest` (embedding the update public key from the `LOGCATX_UPDATE_PUBLIC_KEY` repo variable), extracts the GitHub Release notes from the matching `## [version]` section of `CHANGELOG.md`, publishes the zip as the single release asset, and — when signing is configured — signs and commits `updates/stable.json(.sig)` to `master` via the DeskFoundry `publish-portable-update` action. Signing key setup lives in `docs/update-signing.md`; bump the version in `Cargo.toml` and both changelogs before tagging.
+Pushing a tag matching `v*` triggers `.github/workflows/release.yml`: it validates the tag against `Cargo.toml` version, runs tests, builds the flat portable zip on `windows-latest` (embedding the update public key from the `LOGCATX_UPDATE_PUBLIC_KEY` repo variable), extracts the GitHub Release notes from the matching `## [version]` section of `CHANGELOG.md`, publishes the zip as the single release asset, and — when signing is configured — signs and commits `updates/stable.json(.sig)` to `master` via the DeskFoundry `publish-portable-update` action. Signing key setup lives in `docs/update-signing.md`; bump the version in `Cargo.toml` and both changelogs before tagging. Commits stay local until the user decides to push.
