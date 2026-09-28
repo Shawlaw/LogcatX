@@ -35,7 +35,7 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "LogcatX"
             VALUE "FileDescription", "LogcatX - multi-device adb logcat GUI"
-            VALUE "FileVersion", "{version}"
+            VALUE "FileVersion", "{v_major}.{v_minor}.{v_patch}.0"
             VALUE "InternalName", "logcatx"
             VALUE "OriginalFilename", "LogcatX.exe"
             VALUE "ProductName", "LogcatX"
