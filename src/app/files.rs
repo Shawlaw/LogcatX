@@ -697,7 +697,7 @@ impl AdbCollectorApp {
         const CELL_HEIGHT: f32 = 18.0;
 
         egui::Frame::new()
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(233, 236, 242)))
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(233, 236, 242)))
             .corner_radius(egui::CornerRadius::same(10))
             .inner_margin(egui::Margin::same(10))
             .show(ui, |ui| {

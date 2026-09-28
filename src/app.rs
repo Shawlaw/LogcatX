@@ -1009,9 +1009,9 @@ impl AdbCollectorApp {
                     Color32::TRANSPARENT
                 };
                 let stroke = if active {
-                    egui::Stroke::new(1.0, Color32::from_rgb(217, 228, 255))
+                    egui::Stroke::new(1.0_f32, Color32::from_rgb(217, 228, 255))
                 } else if response.hovered() {
-                    egui::Stroke::new(1.0, Color32::from_rgb(236, 239, 245))
+                    egui::Stroke::new(1.0_f32, Color32::from_rgb(236, 239, 245))
                 } else {
                     egui::Stroke::NONE
                 };
@@ -1088,7 +1088,7 @@ impl AdbCollectorApp {
                     .color(Color32::from_rgb(88, 95, 110)),
             )
             .fill(Color32::TRANSPARENT)
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(218, 224, 234)))
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(218, 224, 234)))
             .corner_radius(egui::CornerRadius::same(8))
             .min_size(egui::vec2(0.0, 26.0));
             if ui.add(github_button).clicked()
@@ -1189,7 +1189,7 @@ impl AdbCollectorApp {
                                 .color(Color32::from_rgb(67, 73, 86)),
                         )
                         .fill(Color32::from_rgb(255, 255, 255))
-                        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(231, 235, 243)))
+                        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(231, 235, 243)))
                         .corner_radius(egui::CornerRadius::same(10))
                         .min_size(egui::vec2(104.0, 38.0))
                     };
@@ -1305,7 +1305,7 @@ impl AdbCollectorApp {
             card_rect,
             egui::CornerRadius::same(12),
             Color32::from_rgb(255, 255, 255),
-            egui::Stroke::new(1.0, Color32::from_rgb(229, 233, 241)),
+            egui::Stroke::new(1.0_f32, Color32::from_rgb(229, 233, 241)),
             egui::epaint::StrokeKind::Inside,
         );
         let inner_rect = card_rect - egui::Margin::symmetric(16, 12);
@@ -1478,9 +1478,9 @@ impl AdbCollectorApp {
                 egui::Frame::new()
                     .fill(row_fill)
                     .stroke(if selected {
-                        egui::Stroke::new(1.5, Color32::from_rgb(56, 116, 255))
+                        egui::Stroke::new(1.5_f32, Color32::from_rgb(56, 116, 255))
                     } else {
-                        egui::Stroke::new(1.0, Color32::from_rgb(233, 237, 244))
+                        egui::Stroke::new(1.0_f32, Color32::from_rgb(233, 237, 244))
                     })
                     .corner_radius(egui::CornerRadius::same(10))
                     .inner_margin(egui::Margin::symmetric(12, 10))
@@ -2048,7 +2048,7 @@ impl AdbCollectorApp {
             card_rect,
             egui::CornerRadius::same(16),
             Color32::from_rgb(255, 255, 255),
-            egui::Stroke::new(1.0, Color32::from_rgb(229, 233, 241)),
+            egui::Stroke::new(1.0_f32, Color32::from_rgb(229, 233, 241)),
             egui::epaint::StrokeKind::Inside,
         );
 
@@ -2127,7 +2127,7 @@ impl AdbCollectorApp {
     fn ui_status_content(&mut self, ui: &mut egui::Ui, max_height: Option<f32>) {
         egui::Frame::new()
             .fill(Color32::from_rgb(255, 255, 255))
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(229, 233, 241)))
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(229, 233, 241)))
             .corner_radius(egui::CornerRadius::same(12))
             .inner_margin(egui::Margin::symmetric(16, 12))
             .show(ui, |ui| {
@@ -5709,7 +5709,7 @@ impl AdbCollectorApp {
     ) {
         egui::Frame::new()
             .fill(Color32::from_rgb(255, 255, 255))
-            .stroke(egui::Stroke::new(1.0, Color32::from_rgb(231, 235, 243)))
+            .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(231, 235, 243)))
             .corner_radius(egui::CornerRadius::same(12))
             .inner_margin(egui::Margin::symmetric(12, 8))
             .show(ui, |ui| {
@@ -5758,28 +5758,28 @@ fn apply_visual_style(ctx: &egui::Context) {
     style.visuals = egui::Visuals::light();
     style.visuals.panel_fill = Color32::from_rgb(250, 248, 244);
     style.visuals.window_fill = Color32::from_rgb(255, 255, 255);
-    style.visuals.window_stroke = egui::Stroke::new(1.0, Color32::from_rgb(232, 236, 243));
+    style.visuals.window_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(232, 236, 243));
     style.visuals.window_corner_radius = egui::CornerRadius::same(18);
     style.visuals.menu_corner_radius = egui::CornerRadius::same(12);
     style.visuals.override_text_color = Some(Color32::from_rgb(55, 61, 72));
     style.visuals.selection.bg_fill = Color32::from_rgb(178, 208, 247);
-    style.visuals.selection.stroke = egui::Stroke::new(1.0, Color32::from_rgb(91, 138, 255));
+    style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(91, 138, 255));
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(10);
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(10);
     style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(10);
     style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(10);
     style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(255, 255, 255);
     style.visuals.widgets.inactive.bg_stroke =
-        egui::Stroke::new(1.0, Color32::from_rgb(231, 235, 243));
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(231, 235, 243));
     style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(249, 250, 252);
     style.visuals.widgets.hovered.bg_stroke =
-        egui::Stroke::new(1.0, Color32::from_rgb(225, 230, 240));
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(225, 230, 240));
     style.visuals.widgets.active.bg_fill = Color32::from_rgb(240, 245, 255);
     style.visuals.widgets.active.bg_stroke =
-        egui::Stroke::new(1.0, Color32::from_rgb(214, 225, 249));
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(214, 225, 249));
     style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(255, 255, 255);
     style.visuals.widgets.noninteractive.bg_stroke =
-        egui::Stroke::new(1.0, Color32::from_rgb(231, 235, 243));
+        egui::Stroke::new(1.0_f32, Color32::from_rgb(231, 235, 243));
     style.text_styles.insert(
         egui::TextStyle::Heading,
         egui::FontId::new(18.0, egui::FontFamily::Proportional),
@@ -5866,7 +5866,7 @@ fn with_check_mark_colors<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) 
 fn content_card_frame() -> egui::Frame {
     egui::Frame::new()
         .fill(Color32::from_rgb(255, 255, 255))
-        .stroke(egui::Stroke::new(1.0, Color32::from_rgb(229, 233, 241)))
+        .stroke(egui::Stroke::new(1.0_f32, Color32::from_rgb(229, 233, 241)))
         .corner_radius(egui::CornerRadius::same(16))
         .inner_margin(egui::Margin::symmetric(18, 18))
 }
@@ -6090,7 +6090,7 @@ fn draw_state_badge_centered(ui: &mut egui::Ui, cell_rect: egui::Rect, text: &st
         badge_rect,
         egui::CornerRadius::same(8),
         color.gamma_multiply(0.18),
-        egui::Stroke::new(1.0, color.gamma_multiply(0.45)),
+        egui::Stroke::new(1.0_f32, color.gamma_multiply(0.45)),
         egui::epaint::StrokeKind::Middle,
     );
     painter.galley(badge_rect.min + egui::vec2(8.0, 4.0), galley, color);
