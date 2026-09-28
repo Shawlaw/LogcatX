@@ -170,7 +170,9 @@ jobs:
             echo "No release notes changes to commit"
           else
             git commit -m "chore(update): publish release notes for ${version}"
-            git push
+            # Tag checkouts are detached HEADs; a bare push fails with
+            # "You are not currently on a branch".
+            git push origin HEAD:master
           fi
 
       - name: Upload workflow artifact
