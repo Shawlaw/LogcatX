@@ -4,62 +4,23 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
-## [0.9.0] - 2026-09-22
+## [0.9.0] - 2026-09-28
 
 ### Added
-- Device files page: browse device directories with breadcrumbs, path jumping, name/size/time sorting, multi-select, quick paths (/sdcard, Download, DCIM, Pictures, Documents, /data/local/tmp) and persistent directory favorites
-- Unified transfer queue for upload/download with percentage, transferred bytes and live speed; per-task cancel, cancel-all, failed retry and clear-finished; identical behavior over USB and wireless
-- New folder, rename, move and delete (one confirmation for batch deletes showing the item count, with an extra warning when directories are included)
-- Drop files onto the Files page to upload into the current directory; dropped APKs offer install-or-upload choice
-- run-as browsing of debuggable app data (/data/data), clearly labeled as app data (run-as) instead of regular filesystem access
+- Device file browser (Device Files page): browse device directories with breadcrumbs and path jumping, name/size/modified-time sorting, multi-select, quick paths (/sdcard, Download, DCIM, Pictures, Documents, /data/local/tmp) and persistent favorites; new folder, rename, move and delete (one confirmation for batch deletes with the item count); drop files to upload into the current directory, dropped APKs offer install-or-upload; double-click downloads a file; run-as browsing of debuggable app data (/data/data), clearly labeled as app data (run-as)
+- Unified transfer queue: uploads and downloads run through one queue showing progress and transferred bytes, with per-task cancel, cancel-all, failed retry and clear-finished; finished entries show start → end timestamps and offer open-file / open-folder / jump-to-destination shortcuts (targets verified first); identical behavior over USB and wireless, and multiple dropped batches no longer block each other
+- Right-click context menus on every text input (cut/copy/paste/select-all with precise multi-byte text handling and Windows-like selection/focus behavior); file names offer copy-name / copy-full-path
 
 ### Enhanced
-- Unified ADB execution core: every adb call now has timeouts, cancellation, bounded output capture and child reaping, so a hanging command can no longer freeze the UI; wireless pair/connect share the same process management
-- Static device metadata (manufacturer/model/OS/serial) is cached across polls, ending the per-poll getprop storm; stale discovery replies can no longer overwrite newer state
-- Update experience: signature-verified update candidates persist across restarts (download-ready without another network check); the update dialog shows release notes inline (fetch failure never blocks download/install, with retry and view-release fallback); automatic checks back off 3-6h on network failure and 24h on invalid manifests; the applied-update ACK is sent only after a healthy start (first rendered frame), keeping rollback material when bootstrap fails
-- Diagnostics carry the build commit: settings and the update dialog show v0.9.0 (commit), and `LogcatX.exe --version` works from the command line; the main UI stays version-only
-- Plain file drops no longer block: they enqueue immediately and multiple batches can be in flight
+- ADB robustness: every adb call has timeouts, cancellation, bounded output capture and child reaping, so a hanging command can no longer freeze the UI; wireless pair/connect share the same process management; operations on different devices never block each other
+- Steadier device list: static metadata (manufacturer/model/OS/serial) is cached across polls; discovery carries a generation guard so stale replies cannot overwrite newer state; USB and wireless transports of the same device merge into one row (USB preferred), rotating wireless ports fold by host, and handshake-state endpoints no longer render as "unknown" ghost rows
+- Update experience: signature-verified candidates persist across restarts (download-ready without another network check); the update dialog shows release notes inline (fetch failure never blocks download/install, with retry and view-release fallback); automatic checks back off by outcome (24h after success, 3-6h on network failure, 24h on invalid manifests); the applied-update ACK is sent only after a healthy start (first rendered frame), with automatic rollback when bootstrap fails
+- Diagnostics carry the build commit: settings and the update dialog show v0.9.0 (commit), `LogcatX.exe --version` works from the command line; the main UI stays version-only
 
-- Every text field now has a Windows-style right-click menu (cut/copy/paste/select all, with exact character-boundary handling for CJK text); right-clicking a file name offers copying the name or its full remote path
 ### Fixed
 - Log cleanup never follows symlinks/junctions and can never delete outside the configured log root; logcat sessions started mid-cleanup are protected by a live registry check
-- Configuration and update state are written atomically, so an interrupted write no longer corrupts files; 0.8 configs migrate seamlessly and missing new fields never block startup
+- Configuration and update state are written atomically, so an interrupted write no longer corrupts files; 0.8 configs migrate seamlessly to 0.9.0
 - Windows numeric FILEVERSION now mirrors the semantic version (0.9.0.0) instead of the build date
-- Removed the incorrect `run-as <pkg> pm clear` fallback; clear-data failures now surface their real reason
-- Fixed "copy latest log path" graying out and the latest-log column going empty after a session ended (the path now survives session end)
-- Fixed double-click failing to enter directories on the Files page: the double-click window widened from 0.3s to 0.5s (matching the Windows system default), and the listing protocol switched to POSIX file tests ([ -d ]/[ -f ]/[ -L ]) with space-separated metadata — no longer depending on per-device stat support for %F and tab escapes, which misclassified directories on real devices and broke double-click navigation
-- Fixed hidden carriage returns leaking into file names from real adb shell CR/LF output
-- Unified the file listing columns between header and rows (checkbox, name, size, modified, kind aligned one-to-one); the modified column is now sortable
-- Entering a directory now clears the old listing immediately and shows a centered loading indicator instead of stale rows suddenly swapping; a failed listing no longer retries every frame (it previously re-requested about 8 times per second on errors)
-- The Files page now opens /sdcard by default (some devices restrict the root); device command failures without output no longer render a blank error banner
-- Wireless endpoints stuck in handshake states (authorizing/connecting/unknown) that cannot be attributed to a known device no longer render as an operable-dead "unknown state" row; they appear once the handshake completes
-- Fixed listing failures on real devices collapsing into a generic "device command failed" banner: the listing script no longer discards the cd diagnostic device-side, and NotFound/NoPermission stay distinguishable even on transports that merge stderr into stdout
-- Fixed run-as browsing being completely broken on real devices: the whole listing script used to be passed as a bare run-as argument, so devices tried to exec the script's first word as a binary (an Android 16 phone reported "run-as: exec failed for cd: Permission denied"); it now runs via `run-as <package> sh -c '<script>'` with single-quote escaping, verified browsing a debuggable app's data directory on real hardware
-- Fixed right-click on a text field with an existing selection dropping the selection (egui collapses the cursor on any pointer press; the selection is now stashed on press and restored on release)
-- Fixed input hint text rendering in the same color as real text: hints are now a light gray
-- The transfer history no longer shows a speed estimate (unreliable for adb pulls) and instead shows start → end timestamps; running transfers show progress without speed
-- Fixed text fields losing keyboard focus after a context-menu action: paste/select-all now hand focus back (pressing a menu item surrenders focus in egui, and the selection highlight is only painted while focused — which made select-all look like a no-op)
-- Fixed the select-all range being wiped so a following right-click cut did nothing: the focus-transition frame's IME guard collapses ranges to a point; the selection is now re-applied once focus is stable. The Files-page path box had a second cause: an every-frame "empty → current directory" refill resurrected the cut text instantly — the refill now happens only on navigation
-- Darkened the text-selection highlight (the previous fill was nearly white on the panel background)
-- Fixed the "unknown state" ghost device caused by adb mDNS service advertisement rows (adb-<serial>-<random>, with the advertisement suffix landing in the state column): advertisements fold into the device whose serial they embed, and unattributable ones are not shown
-- File rows vertically center their elements; Files-page checkboxes reuse the settings-page accent style so the checked state is clearly visible
-- Double-clicking a file now equals selecting it and pressing download
-- The "app data (run-as)" input moved to its own row instead of sharing the quick-paths line
-- Transfers list: completed downloads to the PC offer "open file" and "open folder"; uploads to a device offer "show in Files"; every finished entry shows a readable completion timestamp
-- Definitively fixed the file-list header swallowing the whole page: header and rows previously used a vertically-centered horizontal layout, which adopts the entire remaining height inside the page scroll area and parks its content mid-panel; rows are now fixed-height, the header sits flush at the top, and the list reclaims its full visible area
-- File names now render in a fixed-width truncated cell: overlong names stay on one line with an ellipsis (hover shows the full name), no name can stretch its row, checkbox/icon/text share one center line, and the size/modified/kind columns stay pinned across all rows
-- Double-clicking a file to download no longer clears the current multi-selection
-- "Open file / open folder" verify the local target exists first and raise a confirmation dialog when missing instead of invoking Explorer
-- The three transfer shortcut buttons gained padding so their labels are no longer flush against the borders
-- The file list gains a pinned leading "../" row for going up one directory (hidden at the root), available even in empty directories
- output
-- Wireless device aggregation now folds non-ready (authorizing/offline) transports with rotated ports into the device known by host IP — one row per physical device; disconnecting a device now clears all of its wireless endpoints so stale dead ports can be removed
-- File-list header elements (checkbox, name/size/modified sort buttons, kind label) now share one exact cell height and a common center line
-- The name column is left-aligned; short names no longer center inside the wide column, and truncated names show the full name on hover
-- Fixed a blank tail at the bottom of the file-list scroll area: the virtual-scroll row-height hint exceeded the real row height, so the scrollbar covered content that did not exist
-- Fixed the empty-directory "*" entry: the POSIX listing script now skips the shell's unexpanded glob leftover (surfaced as an "other kind" entry on some devices); empty directories show an explicit empty-dir hint with the ../ parent row retained
-- Fixed the same physical device appearing as a separate, hard-to-remove row when its wireless transport is in a non-ready state (authorizing/offline/...); added display text for authorizing/connecting/recovery and similar states
-- Fixed unconfigured-update builds issuing an update check on every window focus
 
 ## [0.8.0] - 2026-09-17
 
