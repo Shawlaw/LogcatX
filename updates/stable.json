@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "appId": "com.logcatx.app",
   "channel": "stable",
-  "version": "0.8.0",
-  "publishedAt": "2026-09-17T12:02:44.3147146Z",
+  "version": "0.9.0",
+  "publishedAt": "2026-09-28T11:13:47.2301191Z",
   "target": "windows-x64",
   "asset": {
-    "url": "https://github.com/Shawlaw/LogcatX/releases/download/v0.8.0/LogcatX_0.8.0_windows_x64_portable_e1e538c.zip",
-    "sha256": "9d932b67be10be2cf49bc8eb89a612b667eb693a32499f62094809299f363909",
-    "size": 4136587
+    "url": "https://github.com/Shawlaw/LogcatX/releases/download/v0.9.0/LogcatX_0.9.0_windows_x64_portable_1762f15.zip",
+    "sha256": "bee3ae048192cece587b85b0d671c515c889aafba0ea0008e8badb17d8fa1abb",
+    "size": 4297679
   },
-  "notesUrl": "https://github.com/Shawlaw/LogcatX/releases/tag/v0.8.0"
+  "notesUrl": "https://raw.githubusercontent.com/Shawlaw/LogcatX/master/updates/notes/0.9.0.md"
 }
