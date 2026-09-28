@@ -16,7 +16,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 
 - platform: **Windows**
 - distribution: **portable zip** (ships the app plus an update helper; in-app updates included)
-- current milestone: **v0.7.0**
+- current milestone: **v0.9.0**
 
 ## Screenshots
 
@@ -52,6 +52,8 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - restart the ADB Server from the UI as a recovery action
 - drag APK files into the window to install them on a device
 - drag regular files into the window to copy them to `/sdcard/Download`
+- device file browser (Device Files page): browse device directories (breadcrumbs, sorting, multi-select, quick paths, favorites), new folder, rename, move and delete, with uploads and downloads on a unified transfer queue (progress, cancel, failed retry), plus run-as browsing of debuggable app data
+- right-click context menus (cut/copy/paste/select-all with precise multi-byte text handling) on every text input
 - generate both log directories and log file prefixes from the saved alias when available
 - configure the `adb` executable path and the device-log output directory
 - refresh device list and historical log size
@@ -116,7 +118,7 @@ This produces:
 
 ## GitHub Release CI
 
-This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.7.0`, it will:
+This repository includes a GitHub Actions release workflow. When you push a tag such as `v0.9.0`, it will:
 
 1. verify that the tag matches the version in `Cargo.toml`
 2. build the Windows release artifacts
