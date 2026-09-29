@@ -201,6 +201,54 @@ fn empty_directory_lists_empty_without_glob_leftovers() {
     fs.delete(&root).expect("cleanup smoke root");
 }
 
+/// 0.9.0 field regression: listings of large directories timed out because
+/// the protocol forked one `stat` per entry (~3-10 ms each on-device; ~2k
+/// entries already blew the 10 s budget). The batched protocol must list
+/// 3000 entries with full metadata well inside its 30 s budget — this case
+/// doubles as the on-hardware check that the device's toybox `stat`
+/// supports the `%s %Y %n` batch format.
+#[test]
+#[ignore = "real device: set LOGCATX_REAL_ADB"]
+fn large_directory_lists_within_budget() {
+    let serial = target_serial();
+    let adb = adb_path();
+    let fs = RemoteFs::new(&adb, &serial);
+    let root = smoke_root();
+    fs.mkdir(&root).expect("mkdir smoke root");
+
+    // Populate 3000 empty files in one round-trip (builtin loop, no forks).
+    let executor = logcatx::adb_executor::AdbExecutor::new(&adb);
+    let populate = format!(
+        "cd {} || exit 1; i=0; while [ \"$i\" -lt 3000 ]; do : > \"stress_$i\"; i=$((i+1)); done",
+        logcatx::remote_fs::shell_quote(root.as_str())
+    );
+    let output = executor
+        .execute_with_timeout(&["-s", &serial, "shell", &populate], Duration::from_secs(60))
+        .expect("populate stress directory");
+    assert!(
+        output.success(),
+        "populate failed: {}{}",
+        output.stdout_lossy(),
+        output.stderr_lossy()
+    );
+
+    let started = Instant::now();
+    let entries = fs.list(&root).expect("3000-entry listing succeeds");
+    let elapsed = started.elapsed();
+    println!("listed {} entries in {elapsed:?}", entries.len());
+    assert_eq!(entries.len(), 3000, "every entry listed: got {}", entries.len());
+    assert!(
+        entries
+            .iter()
+            .all(|e| e.name.starts_with("stress_") && e.modified_unix_secs.is_some()),
+        "no foreign entries and every mtime parsed (stat %s %Y %n understood)"
+    );
+    // The per-entry-fork protocol needed >10 s around 2k entries; the batched
+    // protocol should land far inside its own 30 s budget.
+    assert!(elapsed < Duration::from_secs(15), "listing took {elapsed:?}");
+    fs.delete(&root).expect("cleanup smoke root");
+}
+
 #[test]
 #[ignore = "real device: set LOGCATX_REAL_ADB"]
 fn file_operations_roundtrip_with_special_names() {

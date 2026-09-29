@@ -10,6 +10,28 @@ use std::sync::{Mutex, OnceLock};
 static SCRIPT_READY: OnceLock<()> = OnceLock::new();
 static SCRIPT_GUARD: Mutex<()> = Mutex::new(());
 
+/// The listing wire separator, embedded as literal tab bytes in the
+/// scenario payloads (the fake's `unescape` passes non-escape bytes through
+/// verbatim, so no fake_adb change is needed).
+const SEP: &str = "\t--META--\t";
+
+/// Listing payload for a 3000-entry directory: kind/name pairs, the
+/// separator, then one `size mtime name` stat line per entry. Regression
+/// target for the 0.9.0 timeout — the protocol must carry thousands of
+/// entries in one round-trip and parse them all.
+fn big_listing_payload() -> String {
+    let mut payload = String::new();
+    for i in 0..3000 {
+        payload.push_str(&format!("f\\nfile_{i:04}.txt\\n"));
+    }
+    payload.push_str(SEP);
+    payload.push_str("\\n");
+    for i in 0..3000 {
+        payload.push_str(&format!("{} 1700000000 file_{i:04}.txt\\n", i * 7));
+    }
+    payload
+}
+
 fn remote_fs() -> RemoteFs {
     SCRIPT_READY.get_or_init(|| {
         let _guard = SCRIPT_GUARD
@@ -19,19 +41,20 @@ fn remote_fs() -> RemoteFs {
         let script_path = dir.join("scenario.txt");
         std::fs::write(
             &script_path,
-            concat!(
-                "shell cd '/data/files' * => out:f\\nhello world.txt\\n10 1\\n",
-                "f\\n中文文件.txt\\n30 3\\nd\\n子目录\\n0 0\\n | exit:0\n",
-                "shell cd '/data/empty' * => out:f\\n*\\n- -\\n | exit:0\n",
-                "shell cd '/data/missing' * => err:sh: cd: /data/missing: No such file or directory | exit:42\n",
-                "shell cd '/data/ptymissing' * => out:sh: cd: /data/ptymissing: No such file or directory | exit:42\n",
-                "shell cd '/data/ptylocked' * => out:sh: cd: /data/ptylocked: Permission denied | exit:42\n",
-                "shell run-as com.example sh -c * => out:d\\ncache\\n0 1\\nd\\nfiles\\n0 2\\n | exit:0\n",
-                "shell cd '/data/locked' * => err:sh: cd: /data/locked: Permission denied | exit:42\n",
-                "shell mkdir -p '/data/新建 目录' => exit:0\n",
-                "shell mv '/data/a b.txt' '/data/a b2.txt' => exit:0\n",
-                "shell rm -rf '/data/删除 我' => exit:0\n",
-                "shell if [ -d '/data/a$b.txt' ]* => out:f\\n | exit:0\n",
+            format!(
+                "shell cd '/data/files' * => out:f\\nhello world.txt\\nf\\n中文文件.txt\\nd\\n子目录\\n{SEP}\\n10 1 hello world.txt\\n30 3 中文文件.txt\\n0 0 子目录\\n | exit:0\n\
+                 shell cd '/data/empty' * => out:{SEP}\\n | exit:0\n\
+                 shell cd '/data/missing' * => err:sh: cd: /data/missing: No such file or directory | exit:42\n\
+                 shell cd '/data/ptymissing' * => out:sh: cd: /data/ptymissing: No such file or directory | exit:42\n\
+                 shell cd '/data/ptylocked' * => out:sh: cd: /data/ptylocked: Permission denied | exit:42\n\
+                 shell run-as com.example sh -c * => out:d\\ncache\\nd\\nfiles\\n{SEP}\\n0 1 cache\\n0 2 files\\n | exit:0\n\
+                 shell cd '/data/locked' * => err:sh: cd: /data/locked: Permission denied | exit:42\n\
+                 shell mkdir -p '/data/新建 目录' => exit:0\n\
+                 shell mv '/data/a b.txt' '/data/a b2.txt' => exit:0\n\
+                 shell rm -rf '/data/删除 我' => exit:0\n\
+                 shell if [ -d '/data/a$b.txt' ]* => out:f\\n | exit:0\n\
+                 shell cd '/data/big' * => out:{big} | exit:0\n",
+                big = big_listing_payload(),
             ),
         )
         .expect("write script");
@@ -65,6 +88,25 @@ fn list_reports_empty_directory() {
         .list(&RemotePath::new("/data/empty").unwrap())
         .expect("empty directory lists");
     assert!(entries.is_empty());
+}
+
+/// 0.9.0 regression: large listings timed out (per-entry stat fork) or, when
+/// they finished past the 1 MiB capture cap, silently dropped the truncated
+/// tail. The batched protocol must return every entry with its metadata.
+#[test]
+fn list_parses_large_directory_listing() {
+    let fs = remote_fs();
+    let entries = fs
+        .list(&RemotePath::new("/data/big").unwrap())
+        .expect("3000-entry listing succeeds");
+    assert_eq!(entries.len(), 3000);
+    assert_eq!(entries[0].name, "file_0000.txt");
+    assert_eq!(entries[0].kind, RemoteEntryKind::File);
+    assert_eq!(entries[0].size, 0);
+    assert_eq!(entries[42].size, 42 * 7);
+    assert_eq!(entries[42].modified_unix_secs, Some(1700000000));
+    assert_eq!(entries[2999].name, "file_2999.txt");
+    assert_eq!(entries[2999].size, 2999 * 7);
 }
 
 #[test]
