@@ -78,6 +78,45 @@ fn wait_terminal(
     }
 }
 
+/// Regression (fixed for 0.9.1): the adb client behind `list_devices` may be
+/// the one that (re)starts the shared adb daemon, and a kill-on-close job
+/// around that client used to kill the daemon the moment the command
+/// finished — wireless connections vanished and "connect succeeded but the
+/// device never appeared". The raw probe client below runs outside any job,
+/// so its stderr stays clean exactly as long as the daemon survives the
+/// executor's child reaping. Needs no attached device, only the real adb.
+/// A concurrently running pre-0.9.1 LogcatX can muddy a round by racing its
+/// own daemon respawn, so up to three rounds are attempted.
+#[test]
+#[ignore = "real adb: set LOGCATX_REAL_ADB; restarts the shared adb daemon"]
+fn daemon_spawned_by_discovery_survives_command_exit() {
+    let adb = adb_path();
+    for round in 1..=3 {
+        let kill = std::process::Command::new(&adb)
+            .args(["kill-server"])
+            .output()
+            .expect("run adb kill-server");
+        assert!(
+            kill.status.success(),
+            "kill-server failed: {}",
+            String::from_utf8_lossy(&kill.stderr)
+        );
+
+        list_devices(&adb, Default::default(), false).expect("adb devices succeeds");
+
+        let probe = std::process::Command::new(&adb)
+            .args(["devices"])
+            .output()
+            .expect("run raw adb devices probe");
+        let stderr = String::from_utf8_lossy(&probe.stderr);
+        if !stderr.contains("daemon not running") {
+            return;
+        }
+        eprintln!("round {round}: daemon was down again, retrying");
+    }
+    panic!("adb daemon did not survive list_devices (killed by the executor)");
+}
+
 #[test]
 #[ignore = "real device: set LOGCATX_REAL_ADB"]
 fn discovery_resolves_identity_and_metadata() {

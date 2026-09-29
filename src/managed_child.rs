@@ -3,6 +3,18 @@ use std::{
     process::{Child, ExitStatus},
 };
 
+/// Wrapper around a child process with a uniform kill/reap API.
+///
+/// Windows job objects decide which constructor a caller must use:
+///
+/// - [`ManagedChild::new`] assigns a kill-on-close job, so the child (and
+///   anything it spawns) dies when this handle is dropped. Use it only for
+///   children we own for their whole life, such as logcat or push/pull.
+/// - [`ManagedChild::new_detached`] assigns no job. Any adb client may be
+///   the one to (re)spawn the shared adb daemon, and a daemon spawned by a
+///   job member inherits that job — a kill-on-close job would then kill the
+///   daemon (and every wireless connection with it) the moment the client
+///   is reaped. Short-lived commands therefore must stay job-free.
 pub struct ManagedChild {
     child: Child,
     #[cfg(target_os = "windows")]
@@ -27,6 +39,16 @@ impl ManagedChild {
         #[cfg(not(target_os = "windows"))]
         {
             Self { child }
+        }
+    }
+
+    /// Job-free variant for short-lived commands that may spawn the shared
+    /// adb daemon (see the type-level docs).
+    pub fn new_detached(child: Child) -> Self {
+        Self {
+            child,
+            #[cfg(target_os = "windows")]
+            _job: None,
         }
     }
 

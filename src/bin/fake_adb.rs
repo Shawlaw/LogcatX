@@ -22,7 +22,8 @@
 //! - `exit:<code>`     final exit status (default 0)
 //!
 //! Unmatched commands fail loudly (exit 64) so tests notice missing
-//! scenarios instead of silently passing.
+//! scenarios instead of silently passing. The one exception is a bare
+//! `start-server`, which exits 0 like real adb with the daemon already up.
 
 use std::{io::Write, process::exit, thread::sleep, time::Duration};
 
@@ -50,6 +51,13 @@ fn main() {
     let actions = match find_scenario(&script, &canonical) {
         Some(actions) => actions,
         None => {
+            // `start-server` is a silent no-op when no scenario scripts it,
+            // mirroring the real adb fast path with the daemon already up:
+            // the product fires it as a best-effort pre-flight before
+            // job-wrapped children, and tests should not have to script it.
+            if canonical == "start-server" {
+                exit(0);
+            }
             eprintln!("fake_adb: no scenario for '{canonical}'");
             exit(EXIT_NO_SCENARIO);
         }

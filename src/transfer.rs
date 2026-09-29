@@ -621,6 +621,10 @@ fn run_transfer(
         worker.update(|task| task.bytes_total = Some(meta.len()));
     }
 
+    // The push/pull child below is job-wrapped (a panicked worker must not
+    // orphan adb), so make sure it cannot become the adb daemon's parent —
+    // a daemon spawned inside that job would die with it.
+    executor.ensure_daemon_started();
     let mut command = executor.command();
     command.arg("-s").arg(device);
     match operation {

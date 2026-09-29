@@ -239,9 +239,12 @@ impl AdbExecutor {
             });
         }
 
-        // ManagedChild attaches a kill-on-drop Windows job object so an
-        // abandoned child cannot outlive a panicked executor thread.
-        let mut child = ManagedChild::new(child);
+        // Job-free on purpose: this short-lived client may be the one that
+        // (re)spawns the shared adb daemon, and a daemon spawned by a
+        // kill-on-close job member inherits the job and dies the moment we
+        // reap the client — taking every wireless connection with it.
+        // Timeout/cancel paths still kill and reap explicitly below.
+        let mut child = ManagedChild::new_detached(child);
 
         let status = loop {
             if options.cancel.as_ref().is_some_and(CancelToken::cancelled)
@@ -288,6 +291,17 @@ impl AdbExecutor {
         })
     }
 
+    /// Best-effort `adb start-server` through the job-free execution path,
+    /// so the shared adb daemon is never parented by one of our kill-on-close
+    /// jobs. Callers that wrap long-lived adb clients (logcat, push/pull) in
+    /// such a job must run this first; failures are ignored because the
+    /// actual command will surface them anyway.
+    pub fn ensure_daemon_started(&self) {
+        if let Err(err) = self.execute_with_timeout(&["start-server"], DEFAULT_TIMEOUT) {
+            log::debug!("adb start-server pre-flight failed (continuing): {err}");
+        }
+    }
+
     /// Spawn a long-running streaming command (logcat). No timeout applies —
     /// streaming sessions are supervised by their owner (cancel/kill on stop).
     /// No capture limit either (PRD §16 exempts streaming commands).
@@ -297,6 +311,9 @@ impl AdbExecutor {
         stdout: Stdio,
         stderr: Stdio,
     ) -> Result<ManagedChild, AdbError> {
+        // The streaming child below IS job-wrapped (it must die with its
+        // owner), so make sure it cannot become the daemon's parent.
+        self.ensure_daemon_started();
         let command_desc = self.describe(args);
         let mut command = self.command();
         command
