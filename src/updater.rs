@@ -1005,6 +1005,11 @@ mod tests {
         cache.dismiss_available();
         assert!(cache.is_dismissed());
 
+        // Re-checking the SAME version keeps the skip: automatic checks
+        // must stay quiet until a genuinely newer release appears.
+        cache.record_check("0.6.0", Some(&candidate("0.7.0")), true);
+        assert!(cache.is_dismissed(), "same-version skip must survive");
+
         cache.record_check("0.6.0", Some(&candidate("0.8.0")), false);
         assert!(!cache.is_dismissed());
         assert_eq!(cache.version.as_deref(), Some("0.8.0"));

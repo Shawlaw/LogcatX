@@ -305,19 +305,27 @@ impl AdbCollectorApp {
         let update_cache = updater::load_status_cache(&updater::status_cache_path(
             &bootstrap.app_paths.config_dir,
         ));
-        let restored_update = update_cache
-            .is_available_for(bootstrap.version)
-            .then(|| UpdateInfo {
-                version: update_cache.version.clone().unwrap_or_default(),
-                notes_url: update_cache.notes_url.clone(),
+        // A user who turned automatic updates off opted out of prompting
+        // entirely: no badge, no restored candidate at startup. Manual
+        // checks from settings still surface everything on demand.
+        let auto_updates_enabled = config.auto_check_updates;
+        let restored_update = auto_updates_enabled
+            .then(|| {
+                update_cache
+                    .is_available_for(bootstrap.version)
+                    .then(|| UpdateInfo {
+                        version: update_cache.version.clone().unwrap_or_default(),
+                        notes_url: update_cache.notes_url.clone(),
+                    })
+                    .filter(|info| !info.version.is_empty())
             })
-            .filter(|info| !info.version.is_empty());
+            .flatten();
         let update_dismissed = update_cache.is_dismissed();
         // Offline restore of a previously signature-verified candidate
         // (PRD §26): "update known" must survive a restart without another
         // network check. The restore re-verifies the persisted signature and
         // yields None unless the candidate is still newer.
-        let restored_candidate = updater::updates_configured()
+        let restored_candidate = (auto_updates_enabled && updater::updates_configured())
             .then(|| {
                 updater::update_config(bootstrap.version, &config.update_proxy)
                     .ok()
@@ -2309,6 +2317,12 @@ impl AdbCollectorApp {
         let auto_check_label = self.tr("update.auto_check");
         styled_checkbox(ui, true, &mut self.auto_update_input, auto_check_label);
         ui.small(self.tr("update.auto_check_hint"));
+        if ui.button(self.tr("update.check_now")).clicked() {
+            // Works with automatic checks off: the dialog surfaces the
+            // result, and nothing about it is scheduled or repeated.
+            self.show_update_dialog = true;
+            self.request_update_check(false);
+        }
 
         self.ui_update_proxy_settings(ui, inline_page);
     }
@@ -2683,6 +2697,7 @@ impl AdbCollectorApp {
         let mut open = true;
         let mut check_clicked = false;
         let mut later_clicked = false;
+        let mut skip_clicked = false;
         let mut download_clicked = false;
         let mut apply_clicked = false;
         let mut open_notes_url: Option<String> = None;
@@ -2854,6 +2869,9 @@ impl AdbCollectorApp {
                 ui.add_space(10.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     later_clicked = ui.button(self.tr("update.later")).clicked();
+                    if self.update_info.is_some() {
+                        skip_clicked = ui.button(self.tr("update.skip_version")).clicked();
+                    }
                     let checking = matches!(self.update_phase, UpdatePhase::Checking);
                     check_clicked = ui
                         .add_enabled(!checking, egui::Button::new(self.tr("update.check")))
@@ -2884,9 +2902,16 @@ impl AdbCollectorApp {
             self.scroll_to_update_proxy_settings = true;
             return;
         }
-        if later_clicked || !open {
-            self.show_update_dialog = false;
+        if skip_clicked {
+            // Persistent per-version skip: the pill loses its dot and
+            // automatic checks stay quiet until a NEWER version appears.
             self.dismiss_update_notice();
+            self.show_update_dialog = false;
+        }
+        if later_clicked || !open {
+            // Snooze only: closing the dialog (button or window X) keeps
+            // the pill indicator; only "skip this version" dismisses.
+            self.show_update_dialog = false;
         }
     }
 
@@ -3956,10 +3981,12 @@ impl AdbCollectorApp {
                             notes_url: candidate.notes_url().map(str::to_owned),
                         });
                         self.update_candidate = Some(candidate);
-                        self.update_dismissed = false;
+                        // record_check above preserved a per-version skip;
+                        // honor it instead of resetting the dismissal.
+                        self.update_dismissed = self.update_cache.is_dismissed();
                         self.update_phase = UpdatePhase::Idle;
                         self.start_update_notes_fetch();
-                        if automatic {
+                        if automatic && !self.update_dismissed {
                             self.show_update_dialog = true;
                         }
                     }
