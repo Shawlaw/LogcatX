@@ -117,6 +117,30 @@ fn daemon_spawned_by_discovery_survives_command_exit() {
     panic!("adb daemon did not survive list_devices (killed by the executor)");
 }
 
+/// The in-app "restart ADB server" flow must leave a daemon that answers
+/// cleanly: a freshly started one often faults its first query. The restart
+/// helper probes for readiness internally, so a raw query right after must
+/// find the daemon up with no fault on stderr. Needs no attached device.
+#[test]
+#[ignore = "real adb: set LOGCATX_REAL_ADB; restarts the shared adb daemon"]
+fn restart_server_leaves_a_responding_daemon() {
+    let adb = adb_path();
+    logcatx::adb::restart_server(&adb).expect("restart_server succeeds against the real adb");
+    let probe = std::process::Command::new(&adb)
+        .args(["devices"])
+        .output()
+        .expect("run raw adb devices probe");
+    let stderr = String::from_utf8_lossy(&probe.stderr);
+    assert!(
+        probe.status.success(),
+        "adb devices failed after restart: {stderr}"
+    );
+    assert!(
+        !stderr.contains("daemon not running") && !stderr.contains("protocol fault"),
+        "daemon not ready after restart: {stderr}"
+    );
+}
+
 #[test]
 #[ignore = "real device: set LOGCATX_REAL_ADB"]
 fn discovery_resolves_identity_and_metadata() {

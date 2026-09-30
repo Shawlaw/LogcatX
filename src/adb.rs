@@ -9,6 +9,7 @@ use std::{
     fs::File,
     path::{Path, PathBuf},
     process::Stdio,
+    thread,
     time::Duration,
 };
 
@@ -21,6 +22,12 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(12);
 const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVER_RESTART_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+/// How long to wait before retrying a transient `adb devices` failure.
+const TRANSIENT_RETRY_DELAY: Duration = Duration::from_millis(600);
+/// Post-restart readiness probes: a freshly started daemon often faults its
+/// very first client query or answers before USB enumeration completes.
+const SERVER_RESTART_PROBES: u32 = 3;
+const SERVER_RESTART_PROBE_DELAY: Duration = Duration::from_millis(750);
 /// dumpsys activity/window dumps can be large; give them a raised cap.
 const DUMPSYS_STDOUT_LIMIT: usize = 4 * 1024 * 1024;
 /// Screen captures are PNG payloads; keep generous headroom for tall screens.
@@ -110,9 +117,16 @@ pub fn list_devices(
     mut metadata_cache: DeviceMetadataCache,
     force_metadata_refresh: bool,
 ) -> Result<DiscoveryOutcome, String> {
-    let output = AdbExecutor::new(adb_path)
-        .execute_with_timeout(&["devices"], DEVICES_TIMEOUT)
-        .map_err(|err| format!("Failed to run `{adb_path} devices`: {err}"))?;
+    let mut output = run_devices(adb_path)?;
+    // The daemon's smart socket can reset the first query after it (re)starts
+    // ("protocol fault … connection reset"); one quick retry keeps that
+    // transient fault from surfacing as a user-visible error.
+    if !output.success()
+        && is_transient_adb_failure(&String::from_utf8_lossy(&output.stderr))
+    {
+        thread::sleep(TRANSIENT_RETRY_DELAY);
+        output = run_devices(adb_path)?;
+    }
 
     if !output.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -355,6 +369,26 @@ pub fn disconnect_device(adb_path: &str, target: &str) -> Result<String, String>
     parse_disconnect_output(target, &ShellOutcome::from(output))
 }
 
+fn run_devices(adb_path: &str) -> Result<AdbOutput, String> {
+    AdbExecutor::new(adb_path)
+        .execute_with_timeout(&["devices"], DEVICES_TIMEOUT)
+        .map_err(|err| format!("Failed to run `{adb_path} devices`: {err}"))
+}
+
+/// Client-side errors that mean "the daemon was mid-(re)start", not "adb is
+/// broken": the smart-socket handshake reset, a version check against a
+/// just-spawned daemon, or a connect attempt while the old one is dying.
+fn is_transient_adb_failure(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    [
+        "protocol fault",
+        "failed to check server version",
+        "cannot connect to daemon",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+}
+
 pub fn restart_server(adb_path: &str) -> Result<String, String> {
     let kill_output = AdbExecutor::new(adb_path)
         .execute_with_timeout(&["kill-server"], SERVER_RESTART_TIMEOUT)
@@ -378,6 +412,11 @@ pub fn restart_server(adb_path: &str) -> Result<String, String> {
         ));
     }
 
+    // Wait briefly until the fresh daemon answers `adb devices` cleanly, so
+    // the refresh that follows a "restarted" message does not hit the
+    // first-query fault or a pre-enumeration empty list.
+    wait_until_devices_respond(adb_path);
+
     let message = [
         combined_output(&kill_output),
         combined_output(&start_output),
@@ -390,6 +429,22 @@ pub fn restart_server(adb_path: &str) -> Result<String, String> {
         Ok("ADB server restarted.".to_owned())
     } else {
         Ok(message)
+    }
+}
+
+/// Best-effort readiness check after `start-server`: probe `adb devices`
+/// until it exits cleanly (or the probes run out) — a fresh daemon commonly
+/// faults its first query and succeeds on the second.
+fn wait_until_devices_respond(adb_path: &str) {
+    for attempt in 0..SERVER_RESTART_PROBES {
+        let responded = AdbExecutor::new(adb_path)
+            .execute_with_timeout(&["devices"], DEVICES_TIMEOUT)
+            .map(|output| output.success())
+            .unwrap_or(false);
+        if responded || attempt + 1 == SERVER_RESTART_PROBES {
+            return;
+        }
+        thread::sleep(SERVER_RESTART_PROBE_DELAY);
     }
 }
 
@@ -843,12 +898,33 @@ fn is_valid_package_name(package: &str) -> bool {
 mod tests {
     use super::{
         DeviceMetadataCache, ShellOutcome, combined_output, decode_screenshot_png,
-        format_android_version, is_network_device_serial, package_command_succeeded,
-        parse_component_token, parse_connect_output, parse_devices_output, parse_disconnect_output,
-        parse_foreground_app_from_activity_dump, parse_foreground_app_from_window_dump,
-        parse_installed_packages, parse_logcat_args,
+        format_android_version, is_network_device_serial, is_transient_adb_failure,
+        package_command_succeeded, parse_component_token, parse_connect_output,
+        parse_devices_output, parse_disconnect_output, parse_foreground_app_from_activity_dump,
+        parse_foreground_app_from_window_dump, parse_installed_packages, parse_logcat_args,
     };
     use std::{io::Cursor, path::PathBuf};
+
+    #[test]
+    fn transient_adb_failures_are_recognized_by_marker() {
+        for stderr in [
+            "adb.exe: failed to check server version: protocol fault (couldn't read status): connection reset",
+            "adb.exe: protocol fault (couldn't read status)",
+            "cannot connect to daemon at tcp:5037: cannot connect to 127.0.0.1:5037",
+        ] {
+            assert!(is_transient_adb_failure(stderr), "should be transient: {stderr}");
+        }
+        for stderr in [
+            "adb: unrecognized arguments",
+            "adb.exe: device or emulator not found",
+            "",
+        ] {
+            assert!(
+                !is_transient_adb_failure(stderr),
+                "should not be transient: {stderr}"
+            );
+        }
+    }
 
     #[test]
     fn metadata_cache_suppresses_getprop_storm_on_polls() {

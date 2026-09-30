@@ -523,11 +523,14 @@ impl AdbCollectorApp {
                     }
                 }
                 AppEvent::DevicesPolled { generation, result } => {
+                    // The in-flight flag must clear even for a discarded
+                    // result: that poll still finished, and a stale discard
+                    // leaving it set would stop periodic polling forever.
+                    self.device_poll_in_flight = false;
                     if generation != self.device_discovery_generation {
                         log::debug!("Discarding stale device poll #{generation}");
                         continue;
                     }
-                    self.device_poll_in_flight = false;
                     match result {
                         Ok(outcome) => {
                             let devices = outcome.devices;
@@ -3718,7 +3721,7 @@ impl AdbCollectorApp {
     }
 
     fn poll_devices_if_due(&mut self) {
-        if self.require_initial_setup || self.show_settings {
+        if self.require_initial_setup || self.show_settings || self.restarting_adb_server {
             return;
         }
 
@@ -4335,6 +4338,10 @@ impl AdbCollectorApp {
 
         self.restarting_adb_server = true;
         self.set_info(self.tr("status.adb_server_restarting"));
+        // Invalidate discovery results already in flight and stop new polls:
+        // anything answered against the daemon mid-kill would surface as a
+        // confusing "protocol fault" error instead of being dropped.
+        self.device_discovery_generation += 1;
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
         thread::spawn(move || {

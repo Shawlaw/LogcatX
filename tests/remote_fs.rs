@@ -140,6 +140,9 @@ fn list_classifies_from_stdout_when_stderr_is_empty() {
 /// script single-quoted, and the fake scenario pins that argv shape.
 #[test]
 fn run_as_listing_routes_through_sh_c() {
+    // This test constructs the run-as RemoteFs directly, so the shared
+    // scenario setup (process-wide FAKE_ADB_SCRIPT) must fire first.
+    drop(remote_fs());
     let fs = RemoteFs::new_run_as(common::exe(), "device-a", "com.example");
     let entries = fs
         .list(&RemotePath::new("/data/data/com.example").unwrap())

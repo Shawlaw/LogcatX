@@ -231,7 +231,11 @@ pub fn discover(adb_path: &str, cancel: &CancelToken) -> Result<Vec<Service>, Fa
         .execute_with_options(
             &["mdns", "services"],
             ExecOptions {
-                timeout: Some(Duration::from_secs(5)),
+                // Aligned with the other adb command budgets: `adb mdns
+                // services` can take several seconds when the daemon was
+                // just (re)started, and cutting it short surfaced as a
+                // spurious discovery failure.
+                timeout: Some(Duration::from_secs(10)),
                 cancel: Some(cancel.clone()),
                 ..Default::default()
             },
