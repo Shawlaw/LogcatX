@@ -201,12 +201,15 @@ fn empty_directory_lists_empty_without_glob_leftovers() {
     fs.delete(&root).expect("cleanup smoke root");
 }
 
-/// 0.9.0 field regression: listings of large directories timed out because
-/// the protocol forked one `stat` per entry (~3-10 ms each on-device; ~2k
-/// entries already blew the 10 s budget). The batched protocol must list
-/// 3000 entries with full metadata well inside its 30 s budget — this case
-/// doubles as the on-hardware check that the device's toybox `stat`
-/// supports the `%s %Y %n` batch format.
+/// 0.9.0 field regression: listings of large directories timed out. The
+/// measured causes: one `stat` fork per entry (~3-10 ms each), and on
+/// OEM-throttled adb shells 5-15 ms per shell loop iteration — 2k entries
+/// meant 30-90 s either way. The loop-free batched protocol measured
+/// 0.36-0.6 s for 2k entries over wireless adb on the same hardware; it
+/// must list 3000 entries with full metadata well inside its 30 s budget.
+/// This case doubles as the on-hardware check that the device's stat
+/// supports the `'%F|%s|%Y|%n'` batch format (kind word prefix matching
+/// included).
 #[test]
 #[ignore = "real device: set LOGCATX_REAL_ADB"]
 fn large_directory_lists_within_budget() {
@@ -216,10 +219,12 @@ fn large_directory_lists_within_budget() {
     let root = smoke_root();
     fs.mkdir(&root).expect("mkdir smoke root");
 
-    // Populate 3000 empty files in one round-trip (builtin loop, no forks).
+    // Populate 3000 empty files in one loop-free round-trip: a shell loop
+    // costs 5-15 ms per iteration on OEM-throttled devices, so the setup
+    // uses the same seq | tr | xargs batching as the listing protocol.
     let executor = logcatx::adb_executor::AdbExecutor::new(&adb);
     let populate = format!(
-        "cd {} || exit 1; i=0; while [ \"$i\" -lt 3000 ]; do : > \"stress_$i\"; i=$((i+1)); done",
+        "cd {} || exit 1; seq 0 2999 | sed 's/^/stress_/' | tr '\\n' '\\000' | xargs -0 touch",
         logcatx::remote_fs::shell_quote(root.as_str())
     );
     let output = executor
@@ -238,13 +243,16 @@ fn large_directory_lists_within_budget() {
     println!("listed {} entries in {elapsed:?}", entries.len());
     assert_eq!(entries.len(), 3000, "every entry listed: got {}", entries.len());
     assert!(
-        entries
-            .iter()
-            .all(|e| e.name.starts_with("stress_") && e.modified_unix_secs.is_some()),
-        "no foreign entries and every mtime parsed (stat %s %Y %n understood)"
+        entries.iter().all(|e| {
+            e.name.starts_with("stress_")
+                && e.kind == RemoteEntryKind::File
+                && e.modified_unix_secs.is_some()
+        }),
+        "no foreign entries, every kind File, every mtime parsed (stat '%F|%s|%Y|%n' understood)"
     );
-    // The per-entry-fork protocol needed >10 s around 2k entries; the batched
-    // protocol should land far inside its own 30 s budget.
+    // The loop-based 0.9.0 protocol needed 30-90 s at ~2k entries on
+    // throttled devices; the loop-free protocol should land far inside
+    // its own 30 s budget.
     assert!(elapsed < Duration::from_secs(15), "listing took {elapsed:?}");
     fs.delete(&root).expect("cleanup smoke root");
 }

@@ -10,24 +10,17 @@ use std::sync::{Mutex, OnceLock};
 static SCRIPT_READY: OnceLock<()> = OnceLock::new();
 static SCRIPT_GUARD: Mutex<()> = Mutex::new(());
 
-/// The listing wire separator, embedded as literal tab bytes in the
-/// scenario payloads (the fake's `unescape` passes non-escape bytes through
-/// verbatim, so no fake_adb change is needed).
-const SEP: &str = "\t--META--\t";
-
-/// Listing payload for a 3000-entry directory: kind/name pairs, the
-/// separator, then one `size mtime name` stat line per entry. Regression
-/// target for the 0.9.0 timeout — the protocol must carry thousands of
-/// entries in one round-trip and parse them all.
+/// Listing payload for a 3000-entry directory: one
+/// `kind|size|mtime|name` line per entry, as `stat -c '%F|%s|%Y|%n'`
+/// emits. Regression target for the 0.9.0 timeout — the protocol must
+/// carry thousands of entries in one round-trip and parse them all.
 fn big_listing_payload() -> String {
     let mut payload = String::new();
     for i in 0..3000 {
-        payload.push_str(&format!("f\\nfile_{i:04}.txt\\n"));
-    }
-    payload.push_str(SEP);
-    payload.push_str("\\n");
-    for i in 0..3000 {
-        payload.push_str(&format!("{} 1700000000 file_{i:04}.txt\\n", i * 7));
+        payload.push_str(&format!(
+            "regular empty file\\|{}\\|1700000000\\|file_{i:04}.txt\\n",
+            i * 7
+        ));
     }
     payload
 }
@@ -42,12 +35,12 @@ fn remote_fs() -> RemoteFs {
         std::fs::write(
             &script_path,
             format!(
-                "shell cd '/data/files' * => out:f\\nhello world.txt\\nf\\n中文文件.txt\\nd\\n子目录\\n{SEP}\\n10 1 hello world.txt\\n30 3 中文文件.txt\\n0 0 子目录\\n | exit:0\n\
-                 shell cd '/data/empty' * => out:{SEP}\\n | exit:0\n\
+                "shell cd '/data/files' * => out:regular file\\|10\\|1\\|hello world.txt\\nregular empty file\\|30\\|3\\|中文文件.txt\\ndirectory\\|0\\|0\\|子目录\\n | exit:0\n\
+                 shell cd '/data/empty' * => exit:0\n\
                  shell cd '/data/missing' * => err:sh: cd: /data/missing: No such file or directory | exit:42\n\
                  shell cd '/data/ptymissing' * => out:sh: cd: /data/ptymissing: No such file or directory | exit:42\n\
                  shell cd '/data/ptylocked' * => out:sh: cd: /data/ptylocked: Permission denied | exit:42\n\
-                 shell run-as com.example sh -c * => out:d\\ncache\\nd\\nfiles\\n{SEP}\\n0 1 cache\\n0 2 files\\n | exit:0\n\
+                 shell run-as com.example sh -c * => out:directory\\|0\\|1\\|cache\\ndirectory\\|0\\|2\\|files\\n | exit:0\n\
                  shell cd '/data/locked' * => err:sh: cd: /data/locked: Permission denied | exit:42\n\
                  shell mkdir -p '/data/新建 目录' => exit:0\n\
                  shell mv '/data/a b.txt' '/data/a b2.txt' => exit:0\n\
@@ -90,9 +83,11 @@ fn list_reports_empty_directory() {
     assert!(entries.is_empty());
 }
 
-/// 0.9.0 regression: large listings timed out (per-entry stat fork) or, when
-/// they finished past the 1 MiB capture cap, silently dropped the truncated
-/// tail. The batched protocol must return every entry with its metadata.
+/// 0.9.0 regression: large listings timed out (per-entry stat forks, plus
+/// OEM-throttled shell loops at 5-15 ms per iteration) or, when they
+/// finished past the 1 MiB capture cap, silently dropped the truncated
+/// tail. The loop-free batched protocol must return every entry with its
+/// metadata.
 #[test]
 fn list_parses_large_directory_listing() {
     let fs = remote_fs();

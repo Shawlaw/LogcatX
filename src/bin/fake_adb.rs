@@ -13,7 +13,8 @@
 //! any `-s <serial>` pair removed. `*` matches everything and a trailing `*`
 //! makes a prefix match. Actions run in order:
 //!
-//! - `out:<text>`      write text to stdout (`\n` escapes become newlines)
+//! - `out:<text>`      write text to stdout (`\n` escapes become newlines;
+//!   `\|` escapes a literal pipe inside a payload)
 //! - `err:<text>`      write text to stderr
 //! - `flood:<bytes>`   write that many `x` bytes to stdout in chunks
 //! - `sleep:<ms>`      sleep
@@ -108,8 +109,8 @@ fn find_scenario<'a>(script: &'a str, canonical: &str) -> Option<Vec<&'a str>> {
         let pattern = pattern.trim();
         if pattern == "*" || pattern == canonical || pattern_strip_star(pattern, canonical) {
             return Some(
-                actions
-                    .split('|')
+                split_actions(actions)
+                    .into_iter()
                     .map(str::trim)
                     .filter(|action| !action.is_empty())
                     .collect(),
@@ -117,6 +118,30 @@ fn find_scenario<'a>(script: &'a str, canonical: &str) -> Option<Vec<&'a str>> {
         }
     }
     None
+}
+
+/// Split the action list on `|`, honoring backslash escapes so a payload
+/// can carry literal pipes as `\|` (the listing wire format uses `|` as
+/// its field separator). Escaped pairs are skipped as a unit, matching the
+/// escape handling of `unescape`.
+fn split_actions(actions: &str) -> Vec<&str> {
+    let bytes = actions.as_bytes();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'|' {
+            parts.push(&actions[start..i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    parts.push(&actions[start..]);
+    parts
 }
 
 /// A trailing `*` in the pattern makes it a prefix match.
@@ -254,7 +279,7 @@ fn flood_stdout(total: usize) -> Result<(), String> {
         .map_err(|err| format!("flood flush failed: {err}"))
 }
 
-/// Turn `\n` (and `\\`) escapes in scenario text into real characters.
+/// Turn `\n` (and `\\`, `\|`) escapes in scenario text into real characters.
 fn unescape(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars();
@@ -263,6 +288,7 @@ fn unescape(text: &str) -> String {
             match chars.next() {
                 Some('n') => result.push('\n'),
                 Some('t') => result.push('\t'),
+                Some('|') => result.push('|'),
                 Some('\\') => result.push('\\'),
                 Some(other) => {
                     result.push('\\');
@@ -318,10 +344,32 @@ mod tests {
         assert_eq!(find_scenario("devices => out:ok", "connect x"), None);
     }
 
+    /// A payload can carry literal pipes escaped as `\|` — the listing
+    /// wire format (`kind|size|mtime|name`) needs them.
+    #[test]
+    fn split_actions_honors_escaped_pipes() {
+        assert_eq!(
+            find_scenario(
+                "shell cd '/d' * => out:regular file\\|10\\|1\\|a.txt\\n | exit:0",
+                "shell cd '/d' || exit 42"
+            ),
+            Some(vec!["out:regular file\\|10\\|1\\|a.txt\\n", "exit:0"])
+        );
+        // Raw slices are untrimmed — find_scenario trims after splitting.
+        assert_eq!(
+            split_actions("out:a\\|b | exit:0"),
+            vec!["out:a\\|b ", " exit:0"]
+        );
+        assert_eq!(split_actions("exit:0"), vec!["exit:0"]);
+        // A trailing lone backslash must not panic or mis-split.
+        assert_eq!(split_actions("out:tail\\"), vec!["out:tail\\"]);
+    }
+
     #[test]
     fn unescape_handles_newlines() {
         assert_eq!(unescape("a\\nb"), "a\nb");
         assert_eq!(unescape("a\\\\b"), "a\\b");
         assert_eq!(unescape("plain"), "plain");
+        assert_eq!(unescape("a\\|b"), "a|b");
     }
 }

@@ -6,51 +6,45 @@
 //! quotes, `$`, `&`, `|`, `;`, parens and trailing spaces survive verbatim.
 //!
 //! Directory listings never parse human-oriented `ls -l` text (PRD §7).
-//! The listing protocol is machine-oriented, POSIX-portable, and fork-light.
-//! It prints two sections separated by a control-byte marker line:
+//! The listing protocol is machine-oriented, POSIX-portable, and loop-free:
 //!
 //! ```sh
 //! cd '<dir>' || exit 42
-//! for entry in *; do                                  # kind+name, builtins only
-//!     [ -e "$entry" ] || [ -L "$entry" ] || continue  # skip unexpanded glob
-//!     if   [ -d "$entry" ]; then printf 'd\n'
-//!     elif [ -L "$entry" ]; then printf 'l\n'
-//!     elif [ -f "$entry" ]; then printf 'f\n'
-//!     else                      printf 'o\n'
-//!     fi
-//!     printf '%s\n' "$entry"
-//! done
-//! printf '%s\n' '<TAB>--META--<TAB>'                   # section separator
-//! for entry in *; do                                  # names only
-//!     [ -e "$entry" ] || [ -L "$entry" ] || continue
-//!     printf '%s\n' "$entry"
-//! done | tr '\n' '\000' | xargs -0 stat -c '%s %Y %n' -- 2>/dev/null
+//! printf '%s\n' * | tr '\n' '\000' | xargs -0 stat -c '%F|%s|%Y|%n' -- 2>/dev/null
 //! exit 0
 //! ```
 //!
-//! The first section is pure shell builtins (zero process spawns) and pairs
-//! a kind marker with each name. The second section batches every entry
-//! through one `tr | xargs -0 stat` pipeline — `xargs` re-invokes `stat`
-//! only when it would exceed ARG_MAX, so a directory costs one fork per
-//! few hundred entries instead of the per-entry `stat` fork the 0.9.0
-//! script paid (that fork cost ~3-10 ms per entry on-device and blew the
-//! 10 s budget around ~2k entries). Metadata lines are merged by name in
-//! Rust; an entry without a stat line (unreadable, or `tr`/`xargs` absent
-//! on an exotic shell) degrades to zero size / unknown mtime while keeping
-//! its name and kind. The trailing `exit 0` keeps xargs's per-file failure
-//! code (123) from masking an otherwise successful listing; only a failed
-//! `cd` exits non-zero. The separator rides as a `printf '%s\n'` argument,
-//! not as escape syntax in the format string — `\ddd` octal support varies
-//! across device printfs, and a literally-printed `\001` would break the
-//! parse on every directory. A name consisting of the literal separator
-//! bytes (tab-flanked `--META--`), or one containing a newline, would
-//! containing a newline, would corrupt the parse — neither is producible
-//! through the app's path joining and neither parsed under the 0.9.0
-//! three-line protocol either. run-as appends the same shell prefix for
-//! debuggable app data (PRD §9), presented by the UI as "app data
-//! (run-as)", never as normal filesystem access.
+//! `printf '%s\n' *` expands the glob in one builtin call — the format is
+//! reused per argument, so there is no per-entry shell loop. `tr` +
+//! `xargs -0` feed the names to `stat` NUL-separated (spaces, quotes, `$`
+//! and CJK survive verbatim; `--` guards `-`-prefixed names; `xargs`
+//! re-invokes `stat` only at ARG_MAX boundaries), and one line per entry
+//! comes back as `kind|size|mtime|name`. The name is everything after the
+//! third `|`, so names containing pipes, spaces (leading/trailing
+//! included) and quotes survive verbatim. The kind word is matched by
+//! prefix: `directory`, `symbolic link`, and `regular` covering both
+//! "regular file" and "regular empty file" — wording verified on Android 9
+//! and 13 hardware, and prefix matching absorbs GNU's `symbolic link to
+//! '<target>'` variant. `%F` is lstat-based: a symlink pointing at a
+//! directory lists as a symlink (the 0.9.0 `[ -d ]`-first tests reported
+//! it as a directory).
+//!
+//! Why no shell loops: on several OEM builds (measured: a ColorOS 13
+//! phone and an Android 9 cloud phone) the adb shell's cgroup is
+//! CPU-throttled to 5-15 ms per loop iteration regardless of body — 2k
+//! entries meant 30-90 s of pure shell mechanics, dwarfing the per-entry
+//! `stat` fork cost the 0.9.0 protocol paid. Loop-free, the same 2k-entry
+//! directories measured 0.36-0.6 s end-to-end over wireless adb (the
+//! batched stat itself: ~0.3 s for 2k files). `exit 0` keeps xargs's
+//! aggregate failure code (123 when any stat operand failed) from masking
+//! a good listing; only a failed `cd` exits non-zero. An entry whose
+//! individual stat fails is simply absent from the output — acceptable
+//! because the common failure modes (unreadable/unsearchable directory)
+//! fail at `cd` and classify properly. Names containing newlines still
+//! cannot be represented (no line-based protocol can). run-as appends the
+//! same shell prefix for debuggable app data (PRD §9), presented by the
+//! UI as "app data (run-as)", never as normal filesystem access.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 
@@ -59,26 +53,20 @@ use crate::adb_executor::{AdbExecutor, ExecOptions};
 /// Timeout for remote filesystem commands (they are short shell round-trips).
 const REMOTE_FS_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Listings legitimately take seconds on large directories (the 0.9.0
-/// per-entry fork cost alone exceeded 10 s around ~2k entries), so they get
-/// their own budget instead of the short-round-trip default.
+/// Listings get their own budget: even on OEM builds whose adb shell is
+/// cgroup-throttled, the loop-free protocol measured ~0.6 s for 2k entries
+/// over wireless adb; 30 s is generous headroom for very large directories
+/// and slow transports (the 0.9.0 loop-based script needed >10 s at ~2k
+/// entries on the same hardware and timed out).
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Output capture ceiling for listings. One entry costs two kind/name lines
-/// plus one `size mtime name` line (~tens of bytes), so 16 MiB admits on
-/// the order of a few hundred thousand entries — beyond what the timeout
+/// Output capture ceiling for listings. One entry is one
+/// `kind|size|mtime|name` line (~40-90 bytes), so 16 MiB admits on the
+/// order of a few hundred thousand entries — beyond what the timeout
 /// admits anyway. Crossing it fails with [`RemoteFsError::Truncated`]
 /// rather than silently showing a partial listing (the capture layer
 /// truncates at the limit and the parser cannot tell).
 const LIST_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
-
-/// Line separating the kind/name section from the stat metadata section.
-/// Tab-flanked so it cannot be a `stat` output line (those start with a
-/// digit) and could only collide with a file literally named
-/// `\t--META--\t` — not producible through the app's path joining. Emitted
-/// as a `printf '%s\n'` argument (raw bytes), never as printf escape
-/// syntax, because `\ddd` octal handling varies across device printfs.
-const META_SEPARATOR: &str = "\t--META--\t";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteFsError {
@@ -239,8 +227,26 @@ pub enum RemoteEntryKind {
 }
 
 impl RemoteEntryKind {
-    /// Parse a protocol kind marker emitted by the listing script's
-    /// `[ -d ]/[ -L ]/[ -f ]` tests: `d`, `l`, `f`, or anything else.
+    /// Map a `stat -c '%F'` kind word to a kind. Prefix matching absorbs
+    /// the wording spread across stat implementations: toybox prints
+    /// `symbolic link` where GNU appends ` to '<target>'`, and both print
+    /// `regular file` / `regular empty file` for non-empty / empty files.
+    /// Wording verified on Android 9 and 13 hardware.
+    fn parse_file_type(word: &str) -> Self {
+        if word.starts_with("directory") {
+            RemoteEntryKind::Directory
+        } else if word.starts_with("symbolic link") {
+            RemoteEntryKind::Symlink
+        } else if word.starts_with("regular") {
+            RemoteEntryKind::File
+        } else {
+            RemoteEntryKind::Other(word.to_owned())
+        }
+    }
+
+    /// Parse a protocol kind marker emitted by the single-path `stat`
+    /// probe's `[ -d ]/[ -L ]/[ -f ]` tests: `d`, `l`, `f`, or anything
+    /// else.
     fn parse_marker(marker: &str) -> Self {
         match marker.trim() {
             "d" => RemoteEntryKind::Directory,
@@ -259,59 +265,38 @@ pub struct RemoteEntry {
     pub modified_unix_secs: Option<u64>,
 }
 
-/// Parse the two-section listing protocol: kind/name pairs, the separator
-/// line, then one `size mtime name` stat line per entry. The name is
-/// everything after the second space of a stat line, so names containing
-/// spaces (including leading/trailing ones) survive verbatim. Entries
-/// without a stat line still list with zeroed size and `None` mtime so the
-/// UI can show the name (PRD §44 "missing metadata"); stat lines naming
-/// entries absent from the first section (created between the two passes)
-/// are ignored. A truncated pair tail is dropped, output without the
-/// separator yields no entries, and the `\r\n` line endings a real
-/// `adb shell` pty appends are tolerated.
+/// Parse the single-section listing protocol: one `kind|size|mtime|name`
+/// line per entry (kind is the `stat %F` word). The name is everything
+/// after the third `|`, so names containing pipes, spaces (leading and
+/// trailing included), quotes, `$` and CJK survive verbatim. Lines that do
+/// not carry a kind word, two numeric fields and a non-empty name (stat
+/// error text that escaped suppression, protocol noise, a
+/// transport-truncated tail) are skipped rather than garbled into
+/// entries. Tolerates the `\r\n` line endings a real `adb shell` pty
+/// appends.
 pub(crate) fn parse_listing(stdout: &str) -> Vec<RemoteEntry> {
-    // A real adb shell emits \r\n; strip the carriage returns first so names
-    // never carry a hidden trailing \r into display or path joins.
-    let lines: Vec<&str> = stdout
+    stdout
         .lines()
         .map(|line| line.strip_suffix('\r').unwrap_or(line))
-        .filter(|line| !line.is_empty())
-        .collect();
-
-    let Some(separator) = lines.iter().position(|line| *line == META_SEPARATOR) else {
-        return Vec::new();
-    };
-
-    let mut metadata: HashMap<&str, (u64, Option<u64>)> = HashMap::new();
-    for line in &lines[separator + 1..] {
-        if let Some((size, mtime, name)) = parse_stat_line(line) {
-            metadata.insert(name, (size, mtime));
-        }
-    }
-
-    lines[..separator]
-        .chunks_exact(2)
-        .map(|pair| {
-            let (size, mtime) = metadata.get(pair[1]).copied().unwrap_or((0, None));
-            RemoteEntry {
-                name: pair[1].to_owned(),
-                kind: RemoteEntryKind::parse_marker(pair[0]),
-                size,
-                modified_unix_secs: mtime,
-            }
-        })
+        .filter_map(parse_entry_line)
         .collect()
 }
 
-/// Split one `stat -c '%s %Y %n'` line into size, mtime and name. Lines
-/// that do not start with two parseable numeric fields (stat error text
-/// that escaped suppression, protocol noise) are rejected.
-fn parse_stat_line(line: &str) -> Option<(u64, Option<u64>, &str)> {
-    let mut fields = line.splitn(3, ' ');
+/// Parse one `stat -c '%F|%s|%Y|%n'` line into an entry. Returns `None`
+/// for lines that are not entry records (noise, truncated tails, empty
+/// lines). An unparseable mtime still lists the entry with `None` mtime.
+fn parse_entry_line(line: &str) -> Option<RemoteEntry> {
+    let mut fields = line.splitn(4, '|');
+    let kind = RemoteEntryKind::parse_file_type(fields.next()?);
     let size = fields.next()?.parse::<u64>().ok()?;
     let mtime = fields.next().and_then(|value| value.parse::<u64>().ok());
     let name = fields.next()?;
-    (!name.is_empty()).then_some((size, mtime, name))
+    (!name.is_empty()).then(|| RemoteEntry {
+        name: name.to_owned(),
+        kind,
+        size,
+        modified_unix_secs: mtime,
+    })
 }
 
 /// Remote filesystem handle bound to one device (optionally through run-as).
@@ -428,15 +413,15 @@ impl RemoteFs {
     /// List one directory. Distinguishes not-found / no-permission / other
     /// failures instead of a blanket "operation failed" (PRD §8).
     ///
-    /// Protocol notes: two sections in one round-trip. Kind/name pairs come
-    /// from builtin POSIX file tests (not `stat -c '%F'`, whose output and
-    /// escape handling vary across toybox/GNU); size/mtime come from one
-    /// batched `xargs -0 stat -c '%s %Y %n'` pass merged by name. The batch
-    /// replaces the 0.9.0 per-entry `stat` fork, which cost ~3-10 ms per
-    /// entry on-device and timed out on large directories (field report:
-    /// ~2k entries exceeded 10 s). Listings run with a 30 s budget and a
-    /// 16 MiB capture ceiling; crossing the ceiling reports
-    /// [`RemoteFsError::Truncated`] instead of a silent partial listing.
+    /// Protocol notes: one loop-free round-trip. `printf '%s\n' *` emits
+    /// every name in a single builtin call (the format is reused per
+    /// argument — no per-entry shell iteration, which OEM cgroup throttling
+    /// makes cost 5-15 ms each), then `tr | xargs -0 stat -c
+    /// '%F|%s|%Y|%n'` batches all metadata in ~ARG_MAX-sized stat
+    /// invocations. Kind words are prefix-matched (see the module docs).
+    /// Listings run with a 30 s budget and a 16 MiB capture ceiling;
+    /// crossing the ceiling reports [`RemoteFsError::Truncated`] instead
+    /// of a silent partial listing.
     pub fn list(&self, path: &RemotePath) -> Result<Vec<RemoteEntry>, RemoteFsError> {
         // No `2>/dev/null` on the cd: the diagnostic line is what
         // `classify_failure` reads to tell NotFound from NoPermission, and
@@ -446,22 +431,12 @@ impl RemoteFs {
         //
         // `exit 0` at the end keeps xargs's aggregate failure code (123 when
         // any stat invocation failed) from masking a good listing — after a
-        // successful cd every later step is best-effort and degrades to
-        // missing metadata, never to a failed command.
+        // successful cd every later step is best-effort; a per-entry stat
+        // failure just omits that entry.
         let script = format!(
             "cd {dir} || exit 42; \
-             for entry in *; do \
-             [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue; \
-             if [ -d \"$entry\" ]; then printf 'd\\n'; \
-             elif [ -L \"$entry\" ]; then printf 'l\\n'; \
-             elif [ -f \"$entry\" ]; then printf 'f\\n'; \
-             else printf 'o\\n'; fi; \
-             printf '%s\\n' \"$entry\"; done; \
-             printf '%s\\n' '\t--META--\t'; \
-             for entry in *; do \
-             [ -e \"$entry\" ] || [ -L \"$entry\" ] || continue; \
-             printf '%s\\n' \"$entry\"; done \
-             | tr '\\n' '\\000' | xargs -0 stat -c '%s %Y %n' -- 2>/dev/null; \
+             printf '%s\\n' * | tr '\\n' '\\000' \
+             | xargs -0 stat -c '%F|%s|%Y|%n' -- 2>/dev/null; \
              exit 0",
             dir = shell_quote(path.as_str()),
         );
@@ -476,9 +451,9 @@ impl RemoteFs {
         }
         let stdout = output.stdout_lossy();
         if stdout.trim().is_empty() {
-            // Defensive: a successful run always prints at least the
-            // separator line, so empty output means transport weirdness —
-            // report an empty directory rather than a protocol panic.
+            // An empty directory produces no output at all: the unexpanded
+            // `*` glob fails inside stat (suppressed) and xargs's 123 is
+            // masked by the trailing exit 0.
             return Ok(Vec::new());
         }
         Ok(parse_listing(&stdout))
@@ -521,8 +496,9 @@ impl RemoteFs {
         }
     }
 
-    /// Quick existence + kind probe using POSIX file tests (same reasoning
-    /// as `list`: no dependency on stat format/escape support).
+    /// Quick existence + kind probe using POSIX file tests (a single path
+    /// has no loop to throttle, so the builtin tests stay cheapest here
+    /// and keep the probe independent of stat format support).
     pub fn stat(&self, path: &RemotePath) -> Result<RemoteEntryKind, RemoteFsError> {
         let quoted = shell_quote(path.as_str());
         let script = format!(
@@ -543,9 +519,6 @@ impl RemoteFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The separator as it appears on the wire (after \r stripping).
-    const SEP: &str = "\t--META--\t";
 
     #[test]
     fn remote_path_accepts_unusual_but_legal_names() {
@@ -616,11 +589,10 @@ mod tests {
 
     #[test]
     fn parse_listing_reads_files_directories_and_symlinks() {
-        let stdout = format!(
-            "d\nDownload\nf\nlog.zip\nl\nlink\n{SEP}\n\
-             0 1726992000 Download\n1283457780 1726999200 log.zip\n11 1726999300 link\n"
-        );
-        let entries = parse_listing(&stdout);
+        let stdout = "directory|0|1726992000|Download\n\
+                      regular file|1283457780|1726999200|log.zip\n\
+                      symbolic link|11|1726999300|link\n";
+        let entries = parse_listing(stdout);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].kind, RemoteEntryKind::Directory);
         assert_eq!(entries[0].name, "Download");
@@ -628,28 +600,55 @@ mod tests {
         assert_eq!(entries[1].size, 1283457780);
         assert_eq!(entries[1].modified_unix_secs, Some(1726999200));
         assert_eq!(entries[2].kind, RemoteEntryKind::Symlink);
+        assert_eq!(entries[2].name, "link");
+    }
+
+    /// Both stat wording variants must map to File: "regular file" and
+    /// GNU's "regular empty file" for zero-size files (verified on
+    /// Android 9/13 hardware).
+    #[test]
+    fn parse_listing_maps_regular_wording_variants_to_file() {
+        let stdout = "regular file|10|1|full.bin\n\
+                      regular empty file|0|2|empty.bin\n";
+        let entries = parse_listing(stdout);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, RemoteEntryKind::File);
+        assert_eq!(entries[0].size, 10);
+        assert_eq!(entries[1].kind, RemoteEntryKind::File);
+        assert_eq!(entries[1].size, 0);
+    }
+
+    /// GNU stat appends the target to symlink kinds; toybox does not —
+    /// prefix matching must accept both.
+    #[test]
+    fn parse_listing_maps_symbolic_link_wording_variants() {
+        let stdout = "symbolic link|6|1|toybox-link\n\
+                      symbolic link to 'subdir'|6|2|gnu-link\n";
+        let entries = parse_listing(stdout);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, RemoteEntryKind::Symlink);
+        assert_eq!(entries[1].kind, RemoteEntryKind::Symlink);
     }
 
     /// Real `adb shell` output carries \r\n from the device pty; names must
     /// come back clean (0.9.0 field trial carried hidden \r into names).
     #[test]
     fn parse_listing_strips_carriage_returns_from_crlf_output() {
-        let stdout = format!("d\r\n\r\nDownload\r\n{SEP}\r\n0 1726992000 Download\r\n");
-        let entries = parse_listing(&stdout);
-        assert_eq!(entries.len(), 1);
+        let stdout = "directory|0|1726992000|Download\r\n\r\nregular file|5|1|x.txt\r\n";
+        let entries = parse_listing(stdout);
+        assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "Download");
         assert_eq!(entries[0].kind, RemoteEntryKind::Directory);
-        assert_eq!(entries[0].size, 0);
-        assert_eq!(entries[0].modified_unix_secs, Some(1726992000));
+        assert_eq!(entries[1].name, "x.txt");
+        assert_eq!(entries[1].size, 5);
     }
 
     #[test]
     fn parse_listing_survives_names_with_spaces_and_specials() {
-        let stdout = format!(
-            "f\nhello world.txt\nf\na'b$c.txt\nf\n\u{4e2d}\u{6587}\u{6587}\u{4ef6}.txt\n{SEP}\n\
-             10 1 hello world.txt\n20 2 a'b$c.txt\n30 3 中文文件.txt\n"
-        );
-        let entries = parse_listing(&stdout);
+        let stdout = "regular file|10|1|hello world.txt\n\
+                      regular file|20|2|a'b$c.txt\n\
+                      regular file|30|3|中文文件.txt\n";
+        let entries = parse_listing(stdout);
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].name, "hello world.txt");
         assert_eq!(entries[0].size, 10);
@@ -659,57 +658,21 @@ mod tests {
         assert_eq!(entries[2].size, 30);
     }
 
+    /// The name is everything after the third pipe, so names containing
+    /// pipes themselves round-trip verbatim.
     #[test]
-    fn parse_listing_keeps_entries_with_missing_metadata() {
-        // stat failed (permission) — the name still lists with zeroed data.
-        let stdout = format!("f\nlocked.db\nf\nvisible.txt\n{SEP}\n5 9 visible.txt\n");
-        let entries = parse_listing(&stdout);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, "locked.db");
-        assert_eq!(entries[0].modified_unix_secs, None);
-        assert_eq!(entries[0].size, 0);
-        assert_eq!(entries[1].size, 5);
-    }
-
-    /// A stat section with no lines at all is the degraded output of a
-    /// device where `tr`/`xargs`/`stat` is unavailable or every stat call
-    /// failed: names and kinds must still list.
-    #[test]
-    fn parse_listing_tolerates_an_empty_stat_section() {
-        let stdout = format!("f\na.txt\nd\nsub\n{SEP}\n");
-        let entries = parse_listing(&stdout);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, "a.txt");
-        assert_eq!(entries[0].size, 0);
-        assert_eq!(entries[1].kind, RemoteEntryKind::Directory);
-    }
-
-    #[test]
-    fn parse_listing_reports_empty_directory() {
-        // Empty directory: the separator is the only output (the [ -e ]
-        // guard skips the unexpanded glob iteration).
-        assert!(parse_listing(&format!("{SEP}\n")).is_empty());
-        // Whitespace-only output around it changes nothing.
-        assert!(parse_listing(&format!("\r\n{SEP}\r\n\r\n")).is_empty());
-    }
-
-    /// A literal file named `*` lists like any other entry; the 0.9.0
-    /// glob-leftover heuristics are unnecessary because the [ -e ] guard
-    /// already skips the unexpanded glob.
-    #[test]
-    fn parse_listing_lists_literal_star_file() {
-        let stdout = format!("f\n*\nd\nDownload\n{SEP}\n7 9 *\n0 0 Download\n");
-        let entries = parse_listing(&stdout);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, "*");
-        assert_eq!(entries[0].size, 7);
-        assert_eq!(entries[1].name, "Download");
+    fn parse_listing_survives_names_containing_pipes() {
+        let stdout = "regular file|5|9|weird|name.txt\n";
+        let entries = parse_listing(stdout);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "weird|name.txt");
+        assert_eq!(entries[0].size, 5);
     }
 
     #[test]
     fn parse_listing_preserves_leading_and_trailing_spaces_in_names() {
-        let stdout = format!("f\n pad\nf\ntrail \n{SEP}\n5 9  pad\n6 10 trail \n");
-        let entries = parse_listing(&stdout);
+        let stdout = "regular empty file|5|9| pad\nregular empty file|6|10|trail \n";
+        let entries = parse_listing(stdout);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, " pad");
         assert_eq!(entries[0].size, 5);
@@ -717,44 +680,52 @@ mod tests {
         assert_eq!(entries[1].size, 6);
     }
 
+    /// A literal file named `*` lists like any other entry; in an empty
+    /// directory the unexpanded glob dies inside stat (suppressed), so no
+    /// output at all means empty.
     #[test]
-    fn parse_listing_ignores_unknown_stat_names_and_drops_truncated_tail() {
-        // ghost.txt appeared between the two passes (stat section only) —
-        // ignored. The orphan kind marker after the pair is a truncated
-        // tail — dropped, not garbled into a phantom entry.
-        let stdout = format!("f\na.txt\nf\n{SEP}\n1 1 a.txt\n2 2 ghost.txt\n");
-        let entries = parse_listing(&stdout);
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].name, "a.txt");
-        assert_eq!(entries[0].size, 1);
+    fn parse_listing_lists_literal_star_file() {
+        let entries = parse_listing("regular empty file|7|9|*\ndirectory|0|0|Download\n");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "*");
+        assert_eq!(entries[0].size, 7);
+        assert_eq!(entries[1].name, "Download");
     }
 
     #[test]
-    fn parse_listing_skips_unparseable_stat_lines() {
-        // stat error text that escaped the device-side suppression, or a
-        // missing mtime field, must not corrupt neighboring entries.
-        let stdout = format!(
-            "f\na.txt\nf\nb.txt\n{SEP}\n1 1 a.txt\nstat: cannot read 'x'\n2 2 b.txt\n"
-        );
-        let entries = parse_listing(&stdout);
-        assert_eq!(entries.len(), 2);
+    fn parse_listing_reports_empty_directory() {
+        assert!(parse_listing("").is_empty());
+        assert!(parse_listing("\r\n\r\n").is_empty());
+    }
+
+    /// Lines without the four-field shape (stat error text that escaped
+    /// device-side suppression, protocol noise, truncated tails) are
+    /// skipped rather than garbled into phantom entries. An unparseable
+    /// mtime still lists the entry with `None` mtime.
+    #[test]
+    fn parse_listing_skips_unparseable_lines() {
+        let stdout = "regular file|1|1|a.txt\n\
+                      stat: cannot read 'x': Permission denied\n\
+                      truncated tail without fields\n\
+                      regular file|2|notanumber|b.txt\n\
+                      regular file|3|3|c.txt\n";
+        let entries = parse_listing(stdout);
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "a.txt");
         assert_eq!(entries[0].size, 1);
+        assert_eq!(entries[1].name, "b.txt");
         assert_eq!(entries[1].size, 2);
+        assert_eq!(entries[1].modified_unix_secs, None);
+        assert_eq!(entries[2].name, "c.txt");
+        assert_eq!(entries[2].size, 3);
     }
 
     #[test]
     fn parse_listing_handles_unknown_kinds() {
-        let stdout = format!("o\nfifo\no\nsocket\n{SEP}\n0 0 fifo\n0 0 socket\n");
-        let entries = parse_listing(&stdout);
+        let stdout = "fifo|0|0|pipe0\nlocal socket|0|0|sock1\n";
+        let entries = parse_listing(stdout);
         assert!(matches!(entries[0].kind, RemoteEntryKind::Other(_)));
         assert!(matches!(entries[1].kind, RemoteEntryKind::Other(_)));
-    }
-
-    /// Output from anything but this protocol (no separator line) yields no
-    /// entries rather than garbage.
-    #[test]
-    fn parse_listing_without_separator_yields_nothing() {
-        assert!(parse_listing("f\nx.txt\n10 1 x.txt\n").is_empty());
-        assert!(parse_listing("").is_empty());
+        assert_eq!(entries[0].name, "pipe0");
     }
 }
