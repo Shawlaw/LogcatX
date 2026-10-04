@@ -566,6 +566,9 @@ impl AdbCollectorApp {
                 AppEvent::FilesOpFinished { generation, result } => {
                     self.files_handle_op_finished(generation, result);
                 }
+                AppEvent::FilesEntryProbed { cwd, path, result } => {
+                    self.files_handle_entry_probed(cwd, path, result);
+                }
                 AppEvent::LogStorageRefreshed(result) => {
                     self.log_storage_loading = false;
                     match result {

@@ -220,6 +220,49 @@ impl AdbCollectorApp {
         });
     }
 
+    /// Probe a symlink's effective kind after a double-click. The loop-free
+    /// listing protocol is lstat-based (`stat %F`), so a symlink pointing
+    /// at a directory lists as a link; the single-path stat probe's
+    /// `[ -d ]` test follows the link and tells navigate from download.
+    fn files_probe_symlink(&mut self, path: RemotePath) {
+        let Some(serial) = self.files_serial.clone() else {
+            return;
+        };
+        let tx = self.tx.clone();
+        let adb_path = self.config.adb_path.clone();
+        let run_as = self.files_run_as_package.clone();
+        let cwd = self.files_cwd.clone();
+        thread::spawn(move || {
+            let remote = match &run_as {
+                Some(package) => RemoteFs::new_run_as(&adb_path, &serial, package),
+                None => RemoteFs::new(&adb_path, &serial),
+            };
+            let result = remote.stat(&path).map_err(|err| err.to_string());
+            let _ = tx.send(AppEvent::FilesEntryProbed { cwd, path, result });
+        });
+    }
+
+    /// Act on the symlink probe: a directory target navigates, anything
+    /// else downloads (adb pull follows links, so a symlink to a file
+    /// transfers its content). The action is dropped when the user has
+    /// navigated away meanwhile — answering the old double-click now
+    /// would yank the view (or a folder picker) out from under them.
+    pub(crate) fn files_handle_entry_probed(
+        &mut self,
+        cwd: RemotePath,
+        path: RemotePath,
+        result: Result<RemoteEntryKind, String>,
+    ) {
+        if cwd != self.files_cwd {
+            return;
+        }
+        match result {
+            Ok(RemoteEntryKind::Directory) => self.files_navigate(path),
+            Ok(_) => self.files_pick_download_for(vec![path]),
+            Err(err) => self.files_error = Some(err),
+        }
+    }
+
     pub(crate) fn files_handle_listed(
         &mut self,
         generation: u64,
@@ -808,6 +851,7 @@ impl AdbCollectorApp {
                                 !is_parent_entry && self.files_selected.contains(&name);
                             let mut open = false;
                             let mut download_file = false;
+                            let mut probe_link = false;
                             // Plain horizontal (not centered): see the header
                             // comment above — centered rows adopt the full
                             // remaining height inside this scroll context.
@@ -892,6 +936,13 @@ impl AdbCollectorApp {
                                 if !is_parent_entry && name_response.double_clicked() {
                                     if is_dir {
                                         open = true;
+                                    } else if matches!(kind, RemoteEntryKind::Symlink) {
+                                        // The listing is lstat-based, so a
+                                        // symlink to a directory shows as a
+                                        // link: probe the target first, then
+                                        // navigate or download from the
+                                        // answer (files_handle_entry_probed).
+                                        probe_link = true;
                                     } else {
                                         // Double-clicking a file downloads it
                                         // while leaving the current
@@ -981,6 +1032,9 @@ impl AdbCollectorApp {
                                 // Download just this file; the selection stays
                                 // exactly as the user left it (bug 13).
                                 self.files_pick_download_for(vec![path]);
+                            }
+                            if probe_link && let Ok(path) = self.files_cwd.join(&name) {
+                                self.files_probe_symlink(path);
                             }
                         }
                     });

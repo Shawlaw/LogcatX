@@ -154,6 +154,16 @@ pub enum AppEvent {
         generation: u64,
         result: Result<(), String>,
     },
+    /// Files page answer to a symlink double-click probe: the listing is
+    /// lstat-based, so a symlink to a directory lists as a link and the
+    /// single-path stat probe (whose `[ -d ]` follows links) decides
+    /// navigate-vs-download. `cwd` guards against the user having
+    /// navigated away while the probe was in flight.
+    FilesEntryProbed {
+        cwd: crate::remote_fs::RemotePath,
+        path: crate::remote_fs::RemotePath,
+        result: Result<crate::remote_fs::RemoteEntryKind, String>,
+    },
     /// Release-notes fetch finished; stale generations are discarded
     /// (PRD §30: notes never block the update flow).
     UpdateNotesFetched {
