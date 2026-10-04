@@ -70,6 +70,13 @@ const REMOTE_FS_TIMEOUT: Duration = Duration::from_secs(10);
 /// entries on the same hardware and timed out).
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Recursive deletes pay one unlink per entry, and on OEM builds whose
+/// adb shell is cgroup-throttled (5-15 ms per syscall, see the module
+/// docs) removing a few thousand entries takes far longer than the 10 s
+/// short-round-trip budget — measured on a vivo V2339FA: `rm -rf` of
+/// 3000 entries ≈ 60 s, while listing the same directory took 0.3 s.
+const DELETE_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Output capture ceiling for listings. One entry is one
 /// `kind|size|mtime|name` line (~40-90 bytes), so 16 MiB admits on the
 /// order of a few hundred thousand entries — beyond what the timeout
@@ -519,9 +526,13 @@ impl RemoteFs {
 
     /// Delete a file or directory tree. The caller must confirm destructive
     /// intent in the UI (PRD §6.6); this layer performs no prompting.
+    /// Runs with [`DELETE_TIMEOUT`] rather than the short-round-trip
+    /// budget: `rm -rf` costs one throttled unlink per entry on
+    /// OEM-limited shells (~60 s for 3000 entries measured on a vivo
+    /// V2339FA), so large directory trees always timed out at 10 s.
     pub fn delete(&self, path: &RemotePath) -> Result<(), RemoteFsError> {
         let script = format!("rm -rf {}", shell_quote(path.as_str()));
-        let output = self.shell(&script)?;
+        let output = self.shell_with(&script, DELETE_TIMEOUT, None)?;
         if output.success() {
             Ok(())
         } else {
