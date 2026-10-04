@@ -11,6 +11,7 @@
 //! ```sh
 //! cd '<dir>' || exit 42
 //! printf '%s\n' * | tr '\n' '\000' | xargs -0 stat -c '%F|%s|%Y|%n' -- 2>/dev/null
+//! printf '%s\n' 'logcatx-list-end'
 //! exit 0
 //! ```
 //!
@@ -40,10 +41,19 @@
 //! a good listing; only a failed `cd` exits non-zero. An entry whose
 //! individual stat fails is simply absent from the output — acceptable
 //! because the common failure modes (unreadable/unsearchable directory)
-//! fail at `cd` and classify properly. Names containing newlines still
-//! cannot be represented (no line-based protocol can). run-as appends the
-//! same shell prefix for debuggable app data (PRD §9), presented by the
-//! UI as "app data (run-as)", never as normal filesystem access.
+//! fail at `cd` and classify properly. The trailing
+//! `logcatx-list-end` sentinel is what separates a genuinely empty
+//! directory (sentinel present, no entries) from a broken pipeline: on a
+//! device missing `tr`/`xargs` or whose `stat` lacks `%F` support the
+//! whole pipeline dies silently (stderr is suppressed) and `exit 0`
+//! would otherwise present that as a phantom empty listing — [`list`]
+//! fails such output as [`RemoteFsError::Protocol`] instead. A stat line
+//! always carries the format's three literal pipes, so the pipe-free
+//! sentinel can never collide with an entry record. Names containing
+//! newlines still cannot be represented (no line-based protocol can).
+//! run-as appends the same shell prefix for debuggable app data
+//! (PRD §9), presented by the UI as "app data (run-as)", never as normal
+//! filesystem access.
 
 use std::fmt;
 use std::time::Duration;
@@ -67,6 +77,16 @@ const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// rather than silently showing a partial listing (the capture layer
 /// truncates at the limit and the parser cannot tell).
 const LIST_STDOUT_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Bare line printed after the stat pipeline in the listing script. Its
+/// presence proves the pipeline actually ran: an empty directory emits
+/// just this sentinel, while a device missing `tr`/`xargs` or a `stat`
+/// without `%F` support produces no output at all (stderr is suppressed
+/// and `exit 0` masks the failure) — [`RemoteFs::list`] must report that
+/// as [`RemoteFsError::Protocol`], not show a phantom empty directory.
+/// Pipe-free, so it can never collide with a `kind|size|mtime|name`
+/// record (the format emits three literal pipes per entry).
+const LIST_END_SENTINEL: &str = "logcatx-list-end";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RemoteFsError {
@@ -421,7 +441,9 @@ impl RemoteFs {
     /// invocations. Kind words are prefix-matched (see the module docs).
     /// Listings run with a 30 s budget and a 16 MiB capture ceiling;
     /// crossing the ceiling reports [`RemoteFsError::Truncated`] instead
-    /// of a silent partial listing.
+    /// of a silent partial listing. The output must end with the
+    /// `logcatx-list-end` sentinel — its absence means the stat pipeline
+    /// never ran (see the module docs) and yields a Protocol error.
     pub fn list(&self, path: &RemotePath) -> Result<Vec<RemoteEntry>, RemoteFsError> {
         // No `2>/dev/null` on the cd: the diagnostic line is what
         // `classify_failure` reads to tell NotFound from NoPermission, and
@@ -437,6 +459,7 @@ impl RemoteFs {
             "cd {dir} || exit 42; \
              printf '%s\\n' * | tr '\\n' '\\000' \
              | xargs -0 stat -c '%F|%s|%Y|%n' -- 2>/dev/null; \
+             printf '%s\\n' '{LIST_END_SENTINEL}'; \
              exit 0",
             dir = shell_quote(path.as_str()),
         );
@@ -450,11 +473,21 @@ impl RemoteFs {
             });
         }
         let stdout = output.stdout_lossy();
-        if stdout.trim().is_empty() {
-            // An empty directory produces no output at all: the unexpanded
-            // `*` glob fails inside stat (suppressed) and xargs's 123 is
-            // masked by the trailing exit 0.
-            return Ok(Vec::new());
+        // The sentinel separates a genuinely empty directory (sentinel, no
+        // entries) from a pipeline that never ran — a device without
+        // tr/xargs, or a stat that rejects the %F format, prints nothing at
+        // all and exit 0 masks it. That must be an error, not a phantom
+        // empty listing.
+        let completed = stdout
+            .lines()
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .any(|line| line == LIST_END_SENTINEL);
+        if !completed {
+            return Err(RemoteFsError::Protocol(format!(
+                "listing of {} ended without the {LIST_END_SENTINEL} marker \
+                 (tr/xargs/stat unavailable or %F unsupported?)",
+                path.as_str()
+            )));
         }
         Ok(parse_listing(&stdout))
     }
@@ -696,6 +729,18 @@ mod tests {
     fn parse_listing_reports_empty_directory() {
         assert!(parse_listing("").is_empty());
         assert!(parse_listing("\r\n\r\n").is_empty());
+    }
+
+    /// The protocol's end sentinel is pipe-free, so it never parses as an
+    /// entry record and simply drops out of the listing — including the
+    /// sentinel-only output of a genuinely empty directory.
+    #[test]
+    fn parse_listing_ignores_the_end_sentinel() {
+        let entries =
+            parse_listing(&format!("regular empty file|7|9|a.txt\n{LIST_END_SENTINEL}\n"));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "a.txt");
+        assert!(parse_listing(&format!("{LIST_END_SENTINEL}\r\n")).is_empty());
     }
 
     /// Lines without the four-field shape (stat error text that escaped

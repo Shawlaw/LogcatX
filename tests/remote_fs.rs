@@ -12,8 +12,9 @@ static SCRIPT_GUARD: Mutex<()> = Mutex::new(());
 
 /// Listing payload for a 3000-entry directory: one
 /// `kind|size|mtime|name` line per entry, as `stat -c '%F|%s|%Y|%n'`
-/// emits. Regression target for the 0.9.0 timeout — the protocol must
-/// carry thousands of entries in one round-trip and parse them all.
+/// emits, then the protocol's end sentinel. Regression target for the
+/// 0.9.0 timeout — the protocol must carry thousands of entries in one
+/// round-trip and parse them all.
 fn big_listing_payload() -> String {
     let mut payload = String::new();
     for i in 0..3000 {
@@ -22,6 +23,7 @@ fn big_listing_payload() -> String {
             i * 7
         ));
     }
+    payload.push_str("logcatx-list-end\\n");
     payload
 }
 
@@ -35,12 +37,13 @@ fn remote_fs() -> RemoteFs {
         std::fs::write(
             &script_path,
             format!(
-                "shell cd '/data/files' * => out:regular file\\|10\\|1\\|hello world.txt\\nregular empty file\\|30\\|3\\|中文文件.txt\\ndirectory\\|0\\|0\\|子目录\\n | exit:0\n\
-                 shell cd '/data/empty' * => exit:0\n\
+                "shell cd '/data/files' * => out:regular file\\|10\\|1\\|hello world.txt\\nregular empty file\\|30\\|3\\|中文文件.txt\\ndirectory\\|0\\|0\\|子目录\\nlogcatx-list-end\\n | exit:0\n\
+                 shell cd '/data/empty' * => out:logcatx-list-end\\n | exit:0\n\
                  shell cd '/data/missing' * => err:sh: cd: /data/missing: No such file or directory | exit:42\n\
                  shell cd '/data/ptymissing' * => out:sh: cd: /data/ptymissing: No such file or directory | exit:42\n\
                  shell cd '/data/ptylocked' * => out:sh: cd: /data/ptylocked: Permission denied | exit:42\n\
-                 shell run-as com.example sh -c * => out:directory\\|0\\|1\\|cache\\ndirectory\\|0\\|2\\|files\\n | exit:0\n\
+                 shell cd '/data/brokenproto' * => out:regular file\\|1\\|1\\|a.txt\\n | exit:0\n\
+                 shell run-as com.example sh -c * => out:directory\\|0\\|1\\|cache\\ndirectory\\|0\\|2\\|files\\nlogcatx-list-end\\n | exit:0\n\
                  shell cd '/data/locked' * => err:sh: cd: /data/locked: Permission denied | exit:42\n\
                  shell mkdir -p '/data/新建 目录' => exit:0\n\
                  shell mv '/data/a b.txt' '/data/a b2.txt' => exit:0\n\
@@ -81,6 +84,20 @@ fn list_reports_empty_directory() {
         .list(&RemotePath::new("/data/empty").unwrap())
         .expect("empty directory lists");
     assert!(entries.is_empty());
+}
+
+/// The trailing `logcatx-list-end` sentinel separates a genuinely empty
+/// directory from a pipeline that never ran (device without tr/xargs, or
+/// a stat that rejects the %F format — stderr is suppressed and exit 0
+/// masks it). Output without the sentinel must be a Protocol error, not
+/// a phantom empty/partial listing.
+#[test]
+fn list_without_end_sentinel_is_a_protocol_error() {
+    let fs = remote_fs();
+    let error = fs
+        .list(&RemotePath::new("/data/brokenproto").unwrap())
+        .unwrap_err();
+    assert!(matches!(error, RemoteFsError::Protocol(_)), "{error:?}");
 }
 
 /// 0.9.0 regression: large listings timed out (per-entry stat forks, plus
