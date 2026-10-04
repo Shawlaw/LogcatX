@@ -3708,6 +3708,13 @@ impl AdbCollectorApp {
     }
 
     fn refresh_devices(&mut self) {
+        // A "restart ADB server" is in flight: a query now would race the
+        // daemon mid-kill and its transient fault would surface here as a
+        // user-visible error. The restart-finished handler clears the flag
+        // and issues the authoritative refresh, so nothing is lost.
+        if self.restarting_adb_server {
+            return;
+        }
         self.device_discovery_generation += 1;
         let generation = self.device_discovery_generation;
         self.last_device_poll_at = Some(Instant::now());
