@@ -35,21 +35,13 @@ jobs:
           WHICH_OUT=$(which -a llvm-rc 2>/dev/null | tr '\n' ';' || true)
           echo "::notice title=rc-probe::where=[$WHERE_OUT] which=[$WHICH_OUT]"
 
+      # Shared with local pre-tag checks (scripts/pre_release_check.sh):
+      # tag ↔ Cargo.toml version, both changelogs carry the section the
+      # notes extraction below reads. Edit the script, never a copy of it.
       - name: Verify tag matches Cargo version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)"
-          TAG="${GITHUB_REF_NAME#v}"
-          if [[ -z "$VERSION" ]]; then
-            echo "Failed to detect version from Cargo.toml" >&2
-            exit 1
-          fi
-          if [[ "$VERSION" != "$TAG" ]]; then
-            echo "Tag v$TAG does not match Cargo.toml version $VERSION" >&2
-            exit 1
-          fi
+        run: ./scripts/pre_release_check.sh "${GITHUB_REF_NAME}"
 
       - name: Test
         if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.run_tests)

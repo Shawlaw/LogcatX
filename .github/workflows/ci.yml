@@ -25,11 +25,8 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
-      - name: Format check
-        run: cargo fmt --check
-
-      - name: Clippy (all targets, all features, deny warnings)
-        run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Tests
-        run: cargo test --quiet
+      # The gate lives in scripts/ci_gate.sh so local pre-push checks and
+      # CI run the identical steps — edit the script, never a copy of it.
+      - name: Gate (fmt / clippy / test)
+        shell: bash
+        run: ./scripts/ci_gate.sh

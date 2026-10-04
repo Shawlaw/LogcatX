@@ -15,12 +15,23 @@ cargo check                              # quick compilation check
 cargo test                               # run all unit + integration tests
 cargo test --lib adb                     # run tests in a specific module
 cargo test parse_logcat_args             # run a single test by name
-cargo clippy -- -D warnings              # lint
+cargo clippy -- -D warnings              # quick lint (the authoritative gate is scripts/ci_gate.sh)
+./scripts/ci_gate.sh                     # THE push gate — run before every push (see below)
 cargo run                                # run (no console on Windows)
 cargo run --features console             # run with console window
 cargo run -- --console                   # same, via CLI flag
 LOGCATX_DEMO_APP_UPDATE=1 cargo run      # demo the in-app update flow locally (debug builds; see docs/update-signing.md)
 ```
+
+## Pre-push checklist (mirrors CI)
+
+The push gate has exactly one source of truth — `scripts/ci_gate.sh` (fmt → clippy with CI's flags → tests). `.github/workflows/ci.yml` invokes this same script, so local and CI can never drift apart; if the gate ever changes, edit the script and both sides follow. Run it **before every push**:
+
+```bash
+./scripts/ci_gate.sh
+```
+
+(0.9.1 taught this the hard way: the fmt gate was undocumented anywhere an agent would look, so local commits went red only after reaching GitHub.)
 
 Real-device smoke (needs a device in `device` state; all cases are `#[ignore]`-gated and skipped otherwise):
 
@@ -113,3 +124,12 @@ Shared infrastructure comes from the [DeskFoundry](https://github.com/Shawlaw/De
 ## Release process
 
 Pushing a tag matching `v*` triggers `.github/workflows/release.yml`: it validates the tag against `Cargo.toml` version, runs tests, builds the flat portable zip on `windows-latest` (embedding the update public key from the `LOGCATX_UPDATE_PUBLIC_KEY` repo variable), extracts the GitHub Release notes from the matching `## [version]` section of `CHANGELOG.md`, publishes the zip as the single release asset, and — when signing is configured — signs and commits `updates/stable.json(.sig)` to `master` via the DeskFoundry `publish-portable-update` action. Signing key setup lives in `docs/update-signing.md`; bump the version in `Cargo.toml` and both changelogs before tagging. Commits stay local until the user decides to push.
+
+### Pre-tag checklist (mirrors release.yml)
+
+`release.yml` is the source of truth for the release flow, and its hard validations are packaged as `scripts/pre_release_check.sh` — which the workflow itself also runs, so local and CI check the same thing. Before tagging:
+
+1. **Gate green**: `./scripts/ci_gate.sh` passes on the commit to be tagged (release.yml runs the tests again regardless).
+2. **Release preconditions**: `./scripts/pre_release_check.sh vX.Y.Z` — tag ↔ `Cargo.toml` version match, and both changelogs carry the `## [X.Y.Z] - <date>` section the notes extraction reads. Sync the README milestone lines and `plans/todo.md` in the same bump commit.
+3. **Packaging dry run** (when `build.rs`, resources or packaging changed): `./scripts/package_windows_release.sh` on Windows, then confirm `dist/LogcatX.exe` reports `FileVersion == X.Y.Z.0` (the workflow also smoke-tests the zipped artifact's `--version`).
+4. **Tag annotated, then watch**: `git tag -a vX.Y.Z -m "Release vX.Y.Z" && git push origin vX.Y.Z`, then `gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId') --exit-status` — confirm the run instead of assuming, and `git pull --ff-only` afterwards to pick up the bot's `updates/` publish commits.
