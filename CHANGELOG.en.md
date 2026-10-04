@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.9.1] - 2026-10-05
+
+### Enhanced
+- Update checks are under user control: Settings gains a "Check now" button that works even with automatic checks disabled; the update dialog separates "Later" from "Skip this version" — closing the dialog no longer silently skips a version, it only keeps the version badge, and a skipped version stays quiet until a newer release; with automatic checks off, startup no longer restores the cached candidate or badge and never prompts
+
+### Fixed
+- ADB daemon survival: every short adb command ran inside a kill-on-close job object, so the shared adb daemon was killed the moment the command was reaped — wireless devices "connected but never listed", and the in-app "restart ADB server" looped on daemon-gone errors. Long-lived children (logcat capture, file transfers) keep crash-time cleanup and pre-flight a start-server so they can never become the daemon's parent
+- ADB restart transients: fixed a discarded stale device poll leaving periodic discovery stopped forever; "restart ADB server" now pauses polls and manual refreshes while it runs, waits for the fresh daemon to answer before refreshing, retries the device list query once on transient faults, and aligns the wireless mDNS discovery timeout with other commands
+- Large directory listings: the Files page listing protocol is now a single loop-free round-trip — 2000 entries measured 0.4-0.6 s on OEM-throttled devices, down from ~91 s; output past 16 MiB fails explicitly instead of truncating silently; a new end marker reports devices missing tr/xargs or a capable stat as an error instead of showing a phantom empty directory
+- Symlink navigation: double-clicking a symlink that points to a directory (such as sdcard under /) enters it again — 0.9.0 listed it as a link, so a double-click recursively downloaded the entire target
+- Large deletes: deleting a directory tree gets a dedicated 120 s budget — removing 3000 files takes ~60 s on throttled devices and always hit the shared 10 s short-command timeout
+
 ## [0.9.0] - 2026-09-28
 
 ### Added
