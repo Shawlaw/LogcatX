@@ -121,9 +121,7 @@ pub fn list_devices(
     // The daemon's smart socket can reset the first query after it (re)starts
     // ("protocol fault … connection reset"); one quick retry keeps that
     // transient fault from surfacing as a user-visible error.
-    if !output.success()
-        && is_transient_adb_failure(&String::from_utf8_lossy(&output.stderr))
-    {
+    if !output.success() && is_transient_adb_failure(&String::from_utf8_lossy(&output.stderr)) {
         thread::sleep(TRANSIENT_RETRY_DELAY);
         output = run_devices(adb_path)?;
     }
@@ -912,7 +910,10 @@ mod tests {
             "adb.exe: protocol fault (couldn't read status)",
             "cannot connect to daemon at tcp:5037: cannot connect to 127.0.0.1:5037",
         ] {
-            assert!(is_transient_adb_failure(stderr), "should be transient: {stderr}");
+            assert!(
+                is_transient_adb_failure(stderr),
+                "should be transient: {stderr}"
+            );
         }
         for stderr in [
             "adb: unrecognized arguments",

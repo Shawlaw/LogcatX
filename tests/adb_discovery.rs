@@ -15,7 +15,9 @@ static ENV_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn with_script<T>(script: &str, body: impl FnOnce() -> T) -> T {
     let guard = ENV_GUARD.get_or_init(|| Mutex::new(()));
-    let _lock = guard.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _lock = guard
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = tempfile::tempdir().expect("tempdir");
     let script_path = dir.path().join("scenario.txt");
     std::fs::write(&script_path, script).expect("write script");
@@ -33,8 +35,8 @@ fn list_devices_parses_devices_output() {
     with_script(
         "devices => out:List of devices attached\\nABC123\tdevice\\n",
         || {
-            let outcome = list_devices(common::exe(), Default::default(), false)
-                .expect("discovery succeeds");
+            let outcome =
+                list_devices(common::exe(), Default::default(), false).expect("discovery succeeds");
             assert_eq!(outcome.devices.len(), 1);
             assert_eq!(outcome.devices[0].serial, "ABC123");
             assert_eq!(outcome.devices[0].state, "device");

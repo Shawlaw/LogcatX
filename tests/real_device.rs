@@ -252,7 +252,10 @@ fn large_directory_lists_within_budget() {
         logcatx::remote_fs::shell_quote(root.as_str())
     );
     let output = executor
-        .execute_with_timeout(&["-s", &serial, "shell", &populate], Duration::from_secs(60))
+        .execute_with_timeout(
+            &["-s", &serial, "shell", &populate],
+            Duration::from_secs(60),
+        )
         .expect("populate stress directory");
     assert!(
         output.success(),
@@ -265,7 +268,12 @@ fn large_directory_lists_within_budget() {
     let entries = fs.list(&root).expect("3000-entry listing succeeds");
     let elapsed = started.elapsed();
     println!("listed {} entries in {elapsed:?}", entries.len());
-    assert_eq!(entries.len(), 3000, "every entry listed: got {}", entries.len());
+    assert_eq!(
+        entries.len(),
+        3000,
+        "every entry listed: got {}",
+        entries.len()
+    );
     assert!(
         entries.iter().all(|e| {
             e.name.starts_with("stress_")
@@ -277,7 +285,10 @@ fn large_directory_lists_within_budget() {
     // The loop-based 0.9.0 protocol needed 30-90 s at ~2k entries on
     // throttled devices; the loop-free protocol should land far inside
     // its own 30 s budget.
-    assert!(elapsed < Duration::from_secs(15), "listing took {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(15),
+        "listing took {elapsed:?}"
+    );
     // Cleanup is not what this test asserts: `rm -rf` of 3000 entries pays
     // the same OEM per-syscall throttling as a shell loop and can exceed
     // RemoteFs's 10 s short-command budget (observed on a vivo V2339FA,
@@ -288,7 +299,10 @@ fn large_directory_lists_within_budget() {
         &["-s", &serial, "shell", &cleanup],
         Duration::from_secs(120),
     ) {
-        eprintln!("cleanup of {} failed (leaked on device): {err}", root.as_str());
+        eprintln!(
+            "cleanup of {} failed (leaked on device): {err}",
+            root.as_str()
+        );
     }
 }
 

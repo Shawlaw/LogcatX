@@ -747,8 +747,9 @@ mod tests {
     /// sentinel-only output of a genuinely empty directory.
     #[test]
     fn parse_listing_ignores_the_end_sentinel() {
-        let entries =
-            parse_listing(&format!("regular empty file|7|9|a.txt\n{LIST_END_SENTINEL}\n"));
+        let entries = parse_listing(&format!(
+            "regular empty file|7|9|a.txt\n{LIST_END_SENTINEL}\n"
+        ));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "a.txt");
         assert!(parse_listing(&format!("{LIST_END_SENTINEL}\r\n")).is_empty());
