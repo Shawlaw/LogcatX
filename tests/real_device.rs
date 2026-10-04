@@ -278,7 +278,18 @@ fn large_directory_lists_within_budget() {
     // throttled devices; the loop-free protocol should land far inside
     // its own 30 s budget.
     assert!(elapsed < Duration::from_secs(15), "listing took {elapsed:?}");
-    fs.delete(&root).expect("cleanup smoke root");
+    // Cleanup is not what this test asserts: `rm -rf` of 3000 entries pays
+    // the same OEM per-syscall throttling as a shell loop and can exceed
+    // RemoteFs's 10 s short-command budget (observed on a vivo V2339FA,
+    // where the listing itself took 0.3 s). Give it the populate step's
+    // direct-executor budget; a warning beats a red test plus leaked files.
+    let cleanup = format!("rm -rf {}", logcatx::remote_fs::shell_quote(root.as_str()));
+    if let Err(err) = executor.execute_with_timeout(
+        &["-s", &serial, "shell", &cleanup],
+        Duration::from_secs(120),
+    ) {
+        eprintln!("cleanup of {} failed (leaked on device): {err}", root.as_str());
+    }
 }
 
 #[test]
