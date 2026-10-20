@@ -172,6 +172,7 @@ jobs:
         with:
           name: ${{ steps.release_meta.outputs.artifact_name }}
           path: dist/${{ steps.release_meta.outputs.zip_name }}
+          retention-days: 1
 
       - name: Upload GitHub Release asset
         if: startsWith(github.ref, 'refs/tags/v')
