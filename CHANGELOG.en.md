@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.9.2] - 2026-10-28
+
+### Fixed
+- Missing network devices: each `IP:port` connection is shown independently, even when endpoints share an IP or report the same device serial. Removed host-based identity inference that could combine separate forwarded devices, cloud phones, or cloned Android systems
+- USB and network connections merge only when their device serials match, with at most one network endpoint per USB row. Existing pairings take priority; additional endpoints remain separate
+- Device row and capture isolation: retained existing row identities across USB changes, prevented key collisions and replacement endpoints from taking over active sessions, and kept separately running sessions apart. Session callbacks and stop actions resolve exact row identities first
+- Disconnect targets only the selected actual network endpoint, preventing an address that also names another row's retained identity from disconnecting the wrong connection
+- mDNS handling hides discovery metadata advertisements while retaining real ready or offline service-name connections, preventing ghost rows and missing service-name devices
+
 ## [0.9.1] - 2026-10-05
 
 ### Enhanced

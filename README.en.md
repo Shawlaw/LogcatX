@@ -16,7 +16,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 
 - platform: **Windows**
 - distribution: **portable zip** (ships the app plus an update helper; in-app updates included)
-- current milestone: **v0.9.1**
+- current milestone: **v0.9.2**
 
 ## Screenshots
 
@@ -35,7 +35,8 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - collect from multiple devices in parallel
 - save device aliases, pins, and recent connection history
 - resolve the default device title as **alias > manufacturer + model > serial**
-- merge USB and Wi-Fi ADB transports for the same physical device and prefer USB when both are available
+- show each `IP:port` connection independently, even when endpoints share an IP or report the same device serial
+- merge USB with at most one network connection whose device serial matches, preserve existing pairings, and prefer USB when both transports are ready
 - connect directly with an `IP:port` endpoint
 - refresh the device list automatically after USB changes
 - show the Android version for each device in the device list
@@ -48,7 +49,7 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - mirror a device with scrcpy or create an independent virtual display from the device-row menu
 - let a virtual display follow the primary display or use a portrait `720×1600` / `320 DPI` configuration, with a package-name field and filter for the launch target
 - inspect the current foreground app and run force-stop, clear-data, or uninstall shortcuts from the device-row menu
-- disconnect network devices directly from the list
+- disconnect the selected network endpoint directly from the list without affecting other endpoints
 - restart the ADB Server from the UI as a recovery action
 - drag APK files into the window to install them on a device
 - drag regular files into the window to copy them to `/sdcard/Download`
