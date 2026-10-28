@@ -663,7 +663,7 @@ impl AdbCollectorApp {
                             self.set_info(self.tr_args(
                                 "status.device_disconnected",
                                 &[
-                                    ("serial", self.device_identity_label(&serial)),
+                                    ("serial", self.transport_identity_label(&serial)),
                                     ("message", message),
                                 ],
                             ));
@@ -4318,47 +4318,16 @@ impl AdbCollectorApp {
             return;
         }
 
-        let device_name = self.device_identity_label(&serial);
+        let device_name = self.transport_identity_label(&serial);
         self.disconnecting_serial = Some(serial.clone());
         self.set_info(self.tr_args("status.device_disconnecting", &[("serial", device_name)]));
 
-        // Wireless debugging rotates ports; one device may expose several
-        // endpoints of which only some are alive. Disconnect every network
-        // endpoint of the device so a dead ghost port cannot survive because
-        // only the first serial was disconnected (trial bug 3).
-        let all_serials = self
-            .find_device(&serial)
-            .map(|device| {
-                device
-                    .transport_serials
-                    .iter()
-                    .filter(|candidate| adb::is_network_device_serial(candidate))
-                    .cloned()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_else(|| vec![serial.clone()]);
-
+        // The UI supplies the actual endpoint. Each network endpoint is
+        // independent, even if its address is another row's retained key.
         let tx = self.tx.clone();
         let adb_path = self.config.adb_path.clone();
         thread::spawn(move || {
-            let mut first_ok: Option<String> = None;
-            let mut first_err: Option<String> = None;
-            for endpoint in &all_serials {
-                match adb::disconnect_device(&adb_path, endpoint) {
-                    Ok(message) => {
-                        first_ok.get_or_insert(message);
-                    }
-                    Err(err) => {
-                        first_err.get_or_insert(err);
-                    }
-                }
-            }
-            let result = match (first_ok, first_err) {
-                (Some(message), None) => Ok(message),
-                (None, Some(err)) => Err(err),
-                (Some(message), Some(err)) => Err(format!("{message}\nPartially failed: {err}")),
-                (None, None) => Ok(String::new()),
-            };
+            let result = adb::disconnect_device(&adb_path, &serial);
             let _ = tx.send(AppEvent::DeviceDisconnectFinished { serial, result });
         });
     }
@@ -5062,11 +5031,7 @@ impl AdbCollectorApp {
     }
 
     fn stop_collection(&mut self, device_id: &str) {
-        let Some(index) = self
-            .devices
-            .iter()
-            .position(|device| device.matches_serial(device_id))
-        else {
+        let Some(index) = device_index(&self.devices, device_id) else {
             return;
         };
 
@@ -5156,71 +5121,22 @@ impl AdbCollectorApp {
             .map(|device| (device.info.identity_key.clone(), device))
             .collect();
 
-        // Identity resolution only happens for ready transports; a wireless
-        // endpoint in offline/authorizing/... states (or whose getprop timed
-        // out) falls back to identity = serial and used to spawn a duplicate
-        // row for a device we already know. Fold those transports into the
-        // known device before grouping.
-        let known_transport_identities: HashMap<String, String> = existing
-            .values()
-            .flat_map(|device| {
-                let identity = device.info.identity_key.clone();
-                device
-                    .transport_serials
-                    .iter()
-                    .map(move |serial| (serial.clone(), identity.clone()))
+        let known_identities: HashSet<String> = devices
+            .iter()
+            .filter(|info| {
+                !adb::is_network_device_serial(&info.serial) && !is_mdns_advertisement(info)
             })
-            .collect();
-        let mut devices = devices;
-        route_transports_to_known_identities(&mut devices, &known_transport_identities);
-
-        // adb also prints mDNS service advertisements (`adb-<serial>-<rand>`
-        // with the `._adb-tls-connect._tcp` suffix landing in the state
-        // column). Fold them into the device whose serial is embedded in the
-        // instance name; drop advertisements for absent devices (trial bug 3,
-        // final round — the ghost was `adb-320246822505-i1RtIB`).
-        let known_identities: HashSet<String> = existing
-            .keys()
-            .cloned()
-            .chain(
-                devices
-                    .iter()
-                    .filter(|info| info.identity_key != info.serial)
-                    .map(|info| info.identity_key.clone()),
-            )
+            .map(|info| info.identity_key.clone())
             .collect();
         let devices = fold_mdns_advertisements(devices, &known_identities);
-        let mut devices = devices;
-
-        // Wireless debugging rotates ports, so a non-ready endpoint on a host
-        // we already track belongs to that device even when the exact
-        // serial:port was never seen before. Fold by host, both against
-        // existing entries and within this scan (trial bug 3: the ghost row
-        // showed "unknown state", was unoperable and hard to remove).
-        let mut known_host_identities: HashMap<String, String> = existing
-            .values()
-            .flat_map(|device| {
-                let identity = device.info.identity_key.clone();
-                device
-                    .transport_serials
-                    .iter()
-                    .filter(|serial| adb::is_network_device_serial(serial))
-                    .filter_map(move |serial| {
-                        network_serial_host(serial).map(|host| (host.to_owned(), identity.clone()))
-                    })
-            })
+        let devices = hide_unattributed_handshake_endpoints(devices);
+        // mDNS advertisements describe discovery services, not operable
+        // transports. Never let them consume a USB/network pairing slot.
+        let mut devices: Vec<_> = devices
+            .into_iter()
+            .filter(|info| !is_mdns_advertisement(info))
             .collect();
-        for info in &devices {
-            if info.identity_key != info.serial
-                && adb::is_network_device_serial(&info.serial)
-                && let Some(host) = network_serial_host(&info.serial)
-            {
-                known_host_identities
-                    .entry(host.to_owned())
-                    .or_insert_with(|| info.identity_key.clone());
-            }
-        }
-        fold_unresolved_wireless_by_host(&mut devices, &known_host_identities);
+        assign_transport_row_identities(&mut devices, &existing);
 
         // Field diagnostics for the recurring "ghost device" reports: log
         // what the scanner saw and what the folds decided, at debug level so
@@ -5700,15 +5616,18 @@ impl AdbCollectorApp {
     }
 
     fn find_device(&self, serial: &str) -> Option<&DeviceEntry> {
-        self.devices
-            .iter()
-            .find(|device| device.matches_serial(serial))
+        device_index(&self.devices, serial).map(|index| &self.devices[index])
     }
 
     fn find_device_mut(&mut self, serial: &str) -> Option<&mut DeviceEntry> {
-        self.devices
-            .iter_mut()
-            .find(|device| device.matches_serial(serial))
+        device_index(&self.devices, serial).map(|index| &mut self.devices[index])
+    }
+
+    fn transport_identity_label(&self, serial: &str) -> String {
+        let identity = transport_device_index(&self.devices, serial)
+            .map(|index| self.devices[index].info.identity_key.as_str())
+            .unwrap_or(serial);
+        self.device_identity_label(identity)
     }
 
     fn set_info(&mut self, text: impl Into<String>) {
@@ -5975,6 +5894,26 @@ fn format_device_model_name(manufacturer: Option<&str>, model: Option<&str>) -> 
     }
 }
 
+/// Row/session keys take precedence over transport aliases. An address may
+/// be a retained row key while also naming a different, independently shown
+/// endpoint after a USB pairing changes.
+fn device_index(devices: &[DeviceEntry], identity_or_serial: &str) -> Option<usize> {
+    devices
+        .iter()
+        .position(|device| device.info.identity_key == identity_or_serial)
+        .or_else(|| transport_device_index(devices, identity_or_serial))
+}
+
+fn transport_device_index(devices: &[DeviceEntry], serial: &str) -> Option<usize> {
+    devices.iter().position(|device| {
+        device.info.serial == serial
+            || device
+                .transport_serials
+                .iter()
+                .any(|transport| transport == serial)
+    })
+}
+
 fn pick_primary_device_info(infos: &[DeviceInfo]) -> DeviceInfo {
     infos
         .iter()
@@ -5983,28 +5922,151 @@ fn pick_primary_device_info(infos: &[DeviceInfo]) -> DeviceInfo {
         .unwrap_or_else(|| infos[0].clone())
 }
 
-/// Fold freshly scanned transports whose identity could not be resolved
-/// (identity fell back to the serial: non-ready state or failed metadata
-/// query) into a device we already track by that serial, so the same
-/// physical device shows one row instead of an orphan duplicate.
-fn route_transports_to_known_identities(
+/// Every network endpoint owns a row. Only one matching endpoint may join
+/// a USB row; preserve a known pairing before choosing by endpoint order.
+fn assign_transport_row_identities(
     infos: &mut [DeviceInfo],
-    known_transport_identities: &HashMap<String, String>,
+    existing: &HashMap<String, DeviceEntry>,
 ) {
-    for info in infos {
-        if info.identity_key != info.serial {
-            continue; // proper identity already resolved
+    let previous = |serial: &str| {
+        existing.values().find(|entry| {
+            entry.transport_serials.iter().any(|known| known == serial)
+                && entry
+                    .transport_serials
+                    .iter()
+                    .filter(|known| adb::is_network_device_serial(known))
+                    .count()
+                    <= 1
+        })
+    };
+    // Disconnected active rows still own their keys until their session ends.
+    let mut used_keys: HashSet<String> = existing
+        .values()
+        .filter(|entry| entry.is_active())
+        .map(|entry| entry.info.identity_key.clone())
+        .collect();
+    let mut assigned_keys = HashSet::new();
+    let mut claimed = HashSet::new();
+    let mut usb_indices: Vec<_> = infos
+        .iter()
+        .enumerate()
+        .filter(|(_, info)| {
+            !adb::is_network_device_serial(&info.serial) && !is_mdns_advertisement(info)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    usb_indices.sort_by_key(|&index| infos[index].serial.clone());
+    for usb_index in usb_indices {
+        let usb = &infos[usb_index];
+        let mut candidates: Vec<_> = infos
+            .iter()
+            .enumerate()
+            .filter(|(index, info)| {
+                adb::is_network_device_serial(&info.serial)
+                    && !is_mdns_advertisement(info)
+                    && !claimed.contains(index)
+                    && ((info.identity_key != info.serial && info.identity_key == usb.identity_key)
+                        || (info.identity_key == info.serial
+                            && previous(&info.serial).is_some_and(|entry| {
+                                entry.transport_serials.contains(&usb.serial)
+                            })))
+            })
+            .map(|(index, _)| index)
+            .collect();
+        candidates.sort_by_key(|&index| {
+            let paired = previous(&infos[index].serial)
+                .is_some_and(|entry| entry.transport_serials.contains(&usb.serial));
+            (!paired, infos[index].serial.clone())
+        });
+        // Do not attach a replacement endpoint to an active session's row.
+        if let Some(entry) = previous(&usb.serial).filter(|entry| entry.is_active()) {
+            candidates.retain(|&index| entry.transport_serials.contains(&infos[index].serial));
         }
-        if let Some(identity) = known_transport_identities.get(&info.serial) {
-            info.identity_key = identity.clone();
+        if let Some(usb_entry) = previous(&usb.serial).filter(|entry| entry.is_active()) {
+            candidates.retain(|&index| {
+                previous(&infos[index].serial).is_none_or(|entry| {
+                    !entry.is_active() || entry.info.identity_key == usb_entry.info.identity_key
+                })
+            });
         }
+        let network_entry = candidates
+            .first()
+            .and_then(|&index| previous(&infos[index].serial));
+        let owner = previous(&usb.serial)
+            .filter(|entry| entry.is_active())
+            .or_else(|| network_entry.filter(|entry| entry.is_active()))
+            .or_else(|| previous(&usb.serial))
+            .or(network_entry);
+        let key = owner
+            .map(|entry| entry.info.identity_key.clone())
+            .unwrap_or_else(|| usb.identity_key.clone());
+        let key = if assigned_keys.contains(&key)
+            || (used_keys.contains(&key)
+                && owner.is_none_or(|entry| entry.info.identity_key != key))
+        {
+            unused_transport_key(&usb.serial, &used_keys)
+        } else {
+            key
+        };
+        assigned_keys.insert(key.clone());
+        used_keys.insert(key.clone());
+        infos[usb_index].identity_key = key.clone();
+        if let Some(&index) = candidates.first() {
+            claimed.insert(index);
+            infos[index].identity_key = key;
+        }
+    }
+    let mut network_indices: Vec<_> = infos
+        .iter()
+        .enumerate()
+        .filter(|(index, info)| {
+            adb::is_network_device_serial(&info.serial)
+                && !is_mdns_advertisement(info)
+                && !claimed.contains(index)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    network_indices.sort_by_key(|&index| infos[index].serial.clone());
+    for index in network_indices {
+        let info = &infos[index];
+        let key = previous(&info.serial)
+            .map(|entry| entry.info.identity_key.clone())
+            .filter(|key| {
+                !used_keys.contains(key)
+                    || existing.get(key).is_some_and(|entry| {
+                        entry.is_active()
+                            && !assigned_keys.contains(key)
+                            && !infos_serial_is_usb_present(entry, infos)
+                    })
+            })
+            .unwrap_or_else(|| unused_transport_key(&info.serial, &used_keys));
+        assigned_keys.insert(key.clone());
+        used_keys.insert(key.clone());
+        infos[index].identity_key = key;
     }
 }
 
-/// Host part of an `IP:port` network serial (mdns instance serials carry no
-/// host and return `None`).
-fn network_serial_host(serial: &str) -> Option<&str> {
-    serial.rsplit_once(':').map(|(host, _)| host)
+/// Address-shaped keys may already belong to a USB row retained from an
+/// earlier pairing. A fallback must not silently join that row.
+fn unused_transport_key(serial: &str, used_keys: &HashSet<String>) -> String {
+    if !used_keys.contains(serial) {
+        return serial.to_owned();
+    }
+    let mut suffix = 0;
+    loop {
+        let key = format!("transport:{serial}#{suffix}");
+        if !used_keys.contains(&key) {
+            return key;
+        }
+        suffix += 1;
+    }
+}
+
+fn infos_serial_is_usb_present(entry: &DeviceEntry, infos: &[DeviceInfo]) -> bool {
+    infos.iter().any(|info| {
+        !adb::is_network_device_serial(&info.serial)
+            && entry.transport_serials.contains(&info.serial)
+    })
 }
 
 /// True when the parsed line is an adb mDNS service advertisement: the
@@ -6012,10 +6074,14 @@ fn network_serial_host(serial: &str) -> Option<&str> {
 /// because the advertisement name contains whitespace (field trial:
 /// serial `adb-320246822505-i1RtIB`, state `(2)._adb-tls-connect._tcp`).
 fn is_mdns_advertisement(info: &DeviceInfo) -> bool {
-    info.serial.contains("._adb-tls-connect._tcp")
-        || info.serial.contains("._adb._tcp")
+    (is_mdns_advertisement_serial(&info.serial)
+        && !matches!(info.state.as_str(), "device" | "offline" | "unauthorized"))
         || info.state.contains("._adb-tls-connect._tcp")
         || info.state.contains("._adb._tcp")
+}
+
+fn is_mdns_advertisement_serial(serial: &str) -> bool {
+    serial.contains("._adb-tls-connect._tcp") || serial.contains("._adb._tcp")
 }
 
 /// Fold adb mDNS advertisements into the device whose serial is embedded in
@@ -6056,28 +6122,6 @@ fn fold_mdns_advertisements(
             }
         })
         .collect()
-}
-
-/// Fold still-unresolved wireless transports into a device known by HOST:
-/// wireless debugging rotates ports, so `authorizing`/`offline` endpoints on
-/// a host we track belong to that device even at a never-seen port.
-fn fold_unresolved_wireless_by_host(
-    infos: &mut [DeviceInfo],
-    known_host_identities: &HashMap<String, String>,
-) {
-    for info in infos {
-        if info.identity_key != info.serial {
-            continue; // already routed or resolved
-        }
-        if !adb::is_network_device_serial(&info.serial) {
-            continue;
-        }
-        if let Some(host) = network_serial_host(&info.serial)
-            && let Some(identity) = known_host_identities.get(host)
-        {
-            info.identity_key = identity.clone();
-        }
-    }
 }
 
 /// Drop network transports that are still in an adb handshake state
@@ -6406,13 +6450,13 @@ fn format_system_time(time: std::time::SystemTime) -> String {
 mod tests {
     use super::{
         DEFAULT_NEW_DISPLAY_DPI, DEFAULT_NEW_DISPLAY_HEIGHT, DEFAULT_NEW_DISPLAY_WIDTH,
-        SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT, build_device_push_destination,
-        classify_dropped_paths, content_view_width, device_transport_rank,
-        filter_installed_packages, fold_mdns_advertisements, fold_unresolved_wireless_by_host,
+        SETTINGS_FOOTER_ERROR_VIEWPORT_HEIGHT, assign_transport_row_identities,
+        build_device_push_destination, classify_dropped_paths, content_view_width, device_index,
+        device_transport_rank, filter_installed_packages, fold_mdns_advertisements,
         format_device_model_name, hide_unattributed_handshake_endpoints, install_dropped_apks,
-        is_current_cleanup_preview_response, pick_primary_device_info,
-        route_transports_to_known_identities, settings_error_scroll_area,
-        settings_path_input_width, should_reveal_proxy_settings_content,
+        is_current_cleanup_preview_response, is_mdns_advertisement, pick_primary_device_info,
+        settings_error_scroll_area, settings_path_input_width,
+        should_reveal_proxy_settings_content, transport_device_index,
     };
     use crate::models::DeviceInfo;
     use eframe::egui;
@@ -6430,73 +6474,121 @@ mod tests {
         }
     }
 
-    /// Wireless endpoints that are not ready (offline/authorizing/...) cannot
-    /// resolve a real identity and must fold into the device we already
-    /// track by serial — one physical device, one row (trial bug 3).
     #[test]
-    fn route_transports_folds_unresolved_wireless_into_known_device() {
-        let mut known: HashMap<String, String> = HashMap::new();
-        known.insert(
-            "192.168.3.7:38421".to_owned(),
-            "3KQYD25310200835".to_owned(),
-        );
+    fn network_rows_keep_duplicate_identities_separate() {
         let mut infos = vec![
-            transport("3KQYD25310200835", "3KQYD25310200835", "device"),
-            transport("192.168.3.7:38421", "192.168.3.7:38421", "authorizing"),
+            transport("10.0.0.1:5555", "CLONED", "device"),
+            transport("10.0.0.1:6666", "CLONED", "device"),
+            transport("10.0.0.2:5555", "CLONED", "device"),
+            transport("10.0.0.1:7777", "10.0.0.1:7777", "offline"),
         ];
-        route_transports_to_known_identities(&mut infos, &known);
+        assign_transport_row_identities(&mut infos, &HashMap::new());
+        for info in infos {
+            assert_eq!(info.identity_key, info.serial);
+        }
+    }
+
+    #[test]
+    fn usb_pairs_with_only_one_endpoint_and_keeps_previous_pairing() {
+        use crate::models::DeviceEntry;
+        let mut entry = DeviceEntry::new(transport("USB", "CLONED", "device"));
+        entry.transport_serials.push("10.0.0.1:6666".to_owned());
+        let existing = HashMap::from([("CLONED".to_owned(), entry)]);
+        let mut infos = vec![
+            transport("USB", "CLONED", "device"),
+            transport("10.0.0.1:6666", "CLONED", "device"),
+            transport("10.0.0.1:5555", "CLONED", "device"),
+        ];
+        assign_transport_row_identities(&mut infos, &existing);
+        assert_eq!(infos[0].identity_key, "CLONED");
+        assert_eq!(infos[1].identity_key, "CLONED");
+        assert_eq!(infos[2].identity_key, "10.0.0.1:5555");
+        infos[1] = transport("10.0.0.1:6666", "10.0.0.1:6666", "offline");
+        infos[2] = transport("10.0.0.1:7777", "10.0.0.1:7777", "offline");
+        assign_transport_row_identities(&mut infos, &existing);
+        assert_eq!(infos[1].identity_key, "CLONED");
+        assert_eq!(infos[2].identity_key, "10.0.0.1:7777");
+        let mut infos = vec![transport("10.0.0.1:6666", "CLONED", "device")];
+        assign_transport_row_identities(&mut infos, &existing);
+        assert_eq!(infos[0].identity_key, "CLONED");
+    }
+
+    #[test]
+    fn usb_joins_existing_network_row_without_changing_key() {
+        use crate::models::DeviceEntry;
+        let entry = DeviceEntry::new(transport("10.0.0.1:5555", "10.0.0.1:5555", "device"));
+        let existing = HashMap::from([("10.0.0.1:5555".to_owned(), entry)]);
+        let mut infos = vec![
+            transport("USB", "REAL", "device"),
+            transport("10.0.0.1:5555", "REAL", "device"),
+        ];
+        assign_transport_row_identities(&mut infos, &existing);
         assert!(
             infos
                 .iter()
-                .all(|info| info.identity_key == "3KQYD25310200835")
+                .all(|info| info.identity_key == "10.0.0.1:5555")
         );
     }
 
     #[test]
-    fn route_transports_leaves_resolved_and_unknown_transports_alone() {
-        let mut known: HashMap<String, String> = HashMap::new();
-        known.insert(
-            "192.168.3.7:38421".to_owned(),
-            "3KQYD25310200835".to_owned(),
-        );
-
-        // Resolved identities are never rewritten.
-        let mut infos = vec![transport("usb-1", "ZY223JQ9K", "device")];
-        route_transports_to_known_identities(&mut infos, &known);
-        assert_eq!(infos[0].identity_key, "ZY223JQ9K");
-
-        // A serial we have never seen keeps its own identity (real new
-        // device), so it still shows as its own row.
-        let mut infos = vec![transport("10.0.0.9:5555", "10.0.0.9:5555", "offline")];
-        route_transports_to_known_identities(&mut infos, &known);
-        assert_eq!(infos[0].identity_key, "10.0.0.9:5555");
-    }
-
-    /// Wireless debugging rotates ports: a non-ready endpoint on a KNOWN
-    /// host folds into that device even at a never-seen port — including
-    /// when both arrive in the same scan (first discovery).
-    #[test]
-    fn fold_unresolved_wireless_by_host_merges_rotated_ports() {
-        let mut hosts: HashMap<String, String> = HashMap::new();
-        hosts.insert("192.168.3.7".to_owned(), "3KQYD25310200835".to_owned());
-
+    fn active_pair_retains_session_key_after_usb_disappears() {
+        use crate::models::{DeviceEntry, DeviceRunState};
+        let mut entry = DeviceEntry::new(transport("USB", "REAL", "device"));
+        entry.transport_serials.push("10.0.0.1:5555".to_owned());
+        entry.run_state = DeviceRunState::Running;
+        let existing = HashMap::from([("REAL".to_owned(), entry)]);
         let mut infos = vec![
-            transport("192.168.3.7:46119", "192.168.3.7:46119", "authorizing"),
-            transport("usb-1", "OTHER-ID", "device"),
+            transport("10.0.0.1:5555", "REAL", "device"),
+            transport("10.0.0.1:6666", "REAL", "device"),
         ];
-        fold_unresolved_wireless_by_host(&mut infos, &hosts);
-        assert_eq!(infos[0].identity_key, "3KQYD25310200835");
-        assert_eq!(infos[1].identity_key, "OTHER-ID");
+        assign_transport_row_identities(&mut infos, &existing);
+        assert_eq!(infos[0].identity_key, "REAL");
+        assert_eq!(infos[1].identity_key, "10.0.0.1:6666");
+    }
 
-        // A different host is a different device and stays its own row.
-        let mut infos = vec![transport("10.0.0.9:5555", "10.0.0.9:5555", "offline")];
-        fold_unresolved_wireless_by_host(&mut infos, &hosts);
-        assert_eq!(infos[0].identity_key, "10.0.0.9:5555");
+    #[test]
+    fn duplicate_usb_identities_cannot_bridge_network_rows() {
+        let mut infos = vec![
+            transport("USB-A", "CLONED", "device"),
+            transport("USB-B", "CLONED", "device"),
+            transport("10.0.0.1:5555", "CLONED", "device"),
+            transport("10.0.0.1:6666", "CLONED", "device"),
+        ];
+        assign_transport_row_identities(&mut infos, &HashMap::new());
+        assert_ne!(infos[0].identity_key, infos[1].identity_key);
+        assert_ne!(infos[2].identity_key, infos[3].identity_key);
+    }
 
-        // USB transports never participate in host folding.
-        let mut infos = vec![transport("usb-2", "usb-2", "offline")];
-        fold_unresolved_wireless_by_host(&mut infos, &hosts);
-        assert_eq!(infos[0].identity_key, "usb-2");
+    #[test]
+    fn separate_active_usb_and_network_sessions_stay_separate() {
+        use crate::models::{DeviceEntry, DeviceRunState};
+        let mut usb = DeviceEntry::new(transport("USB", "REAL", "device"));
+        usb.run_state = DeviceRunState::Running;
+        let mut net = DeviceEntry::new(transport("10.0.0.1:5555", "10.0.0.1:5555", "device"));
+        net.run_state = DeviceRunState::Running;
+        let existing = HashMap::from([("REAL".to_owned(), usb), ("10.0.0.1:5555".to_owned(), net)]);
+        let mut infos = vec![
+            transport("USB", "REAL", "device"),
+            transport("10.0.0.1:5555", "REAL", "device"),
+        ];
+        assign_transport_row_identities(&mut infos, &existing);
+        assert_eq!(infos[0].identity_key, "REAL");
+        assert_eq!(infos[1].identity_key, "10.0.0.1:5555");
+    }
+
+    #[test]
+    fn replacement_endpoint_cannot_take_disconnected_active_row_key() {
+        use crate::models::{DeviceEntry, DeviceRunState};
+        let mut old = DeviceEntry::new(transport("USB-OLD", "CLONED", "device"));
+        old.run_state = DeviceRunState::Running;
+        let existing = HashMap::from([("CLONED".to_owned(), old)]);
+        let mut infos = vec![
+            transport("USB-NEW", "CLONED", "device"),
+            transport("10.0.0.1:5555", "CLONED", "device"),
+        ];
+        assign_transport_row_identities(&mut infos, &existing);
+        assert_eq!(infos[0].identity_key, "USB-NEW");
+        assert_eq!(infos[1].identity_key, "USB-NEW");
     }
 
     /// Trial bug 3 (third round): unattributed network endpoints stuck in
@@ -6555,6 +6647,98 @@ mod tests {
             !folded.iter().any(|info| info.serial == "adb-ABSENT-99"),
             "unmatched advertisement dropped"
         );
+    }
+
+    #[test]
+    fn row_key_lookup_precedes_ambiguous_endpoint_alias_in_either_order() {
+        use crate::models::DeviceEntry;
+        let address = "10.0.0.1:5555";
+        let synthetic = "transport:10.0.0.1:5555#0";
+        let mut owner = DeviceEntry::new(transport("USB", address, "device"));
+        owner.transport_serials.push("10.0.0.1:6666".to_owned());
+        let endpoint = DeviceEntry::new(transport(address, synthetic, "device"));
+        for devices in [vec![owner.clone(), endpoint.clone()], vec![endpoint, owner]] {
+            let owner_index = device_index(&devices, address).unwrap();
+            assert_eq!(devices[owner_index].info.serial, "USB");
+            let endpoint_index = device_index(&devices, synthetic).unwrap();
+            assert_eq!(devices[endpoint_index].info.serial, address);
+            // Disconnect receives a real endpoint, so it uses transport lookup.
+            assert_eq!(
+                transport_device_index(&devices, address),
+                Some(endpoint_index)
+            );
+        }
+    }
+
+    #[test]
+    fn address_key_collision_does_not_merge_replacement_endpoints() {
+        use crate::models::DeviceEntry;
+        let a = "10.0.0.1:5555";
+        let b = "10.0.0.1:6666";
+        let mut old = DeviceEntry::new(transport("USB", a, "device"));
+        old.transport_serials.push(a.to_owned());
+        let existing = HashMap::from([(a.to_owned(), old)]);
+        let mut infos = vec![
+            transport("USB", "REAL", "device"),
+            transport(a, "OTHER", "device"),
+            transport(b, "REAL", "device"),
+        ];
+        assign_transport_row_identities(&mut infos, &existing);
+        assert_eq!(infos[0].identity_key, infos[2].identity_key);
+        assert_ne!(infos[1].identity_key, infos[2].identity_key);
+        let keys = infos
+            .iter()
+            .map(|info| info.identity_key.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(keys.len(), 2);
+    }
+
+    #[test]
+    fn ready_and_offline_mdns_service_transports_are_real_network_rows() {
+        let serial = "adb-REAL-random._adb-tls-connect._tcp";
+        for state in ["device", "offline"] {
+            let scan = vec![transport(serial, "REAL", state)];
+            let folded = fold_mdns_advertisements(scan, &HashSet::new());
+            let mut infos = hide_unattributed_handshake_endpoints(folded);
+            assert_eq!(infos.len(), 1);
+            assert!(!is_mdns_advertisement(&infos[0]));
+            assign_transport_row_identities(&mut infos, &HashMap::new());
+            assert_eq!(infos[0].identity_key, serial);
+        }
+    }
+
+    #[test]
+    fn mdns_pipeline_retains_active_endpoint_key_across_refreshes() {
+        use crate::models::{DeviceEntry, DeviceRunState};
+        let endpoint = "10.0.0.1:5555";
+        let mut existing = HashMap::from([(
+            endpoint.to_owned(),
+            DeviceEntry::new(transport(endpoint, endpoint, "device")),
+        )]);
+        for _ in 0..2 {
+            let scan = vec![
+                transport("USB", "USB", "device"),
+                transport(endpoint, "USB", "device"),
+                transport(
+                    "adb-USB-random._adb-tls-connect._tcp",
+                    "adb-USB-random._adb-tls-connect._tcp",
+                    "(2)._adb-tls-connect._tcp",
+                ),
+            ];
+            let identities = HashSet::from(["USB".to_owned()]);
+            let folded = fold_mdns_advertisements(scan, &identities);
+            let mut infos: Vec<_> = hide_unattributed_handshake_endpoints(folded)
+                .into_iter()
+                .filter(|info| !is_mdns_advertisement(info))
+                .collect();
+            assign_transport_row_identities(&mut infos, &existing);
+            assert_eq!(infos.len(), 2);
+            assert!(infos.iter().all(|info| info.identity_key == endpoint));
+            let mut entry = DeviceEntry::new(pick_primary_device_info(&infos));
+            entry.transport_serials = infos.iter().map(|info| info.serial.clone()).collect();
+            entry.run_state = DeviceRunState::Running;
+            existing = HashMap::from([(endpoint.to_owned(), entry)]);
+        }
     }
 
     #[test]
