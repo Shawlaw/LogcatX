@@ -189,34 +189,48 @@ pub struct Service {
     pub address: SocketAddr,
 }
 
+fn parse_mdns_service(line: &str) -> Option<Service> {
+    let cols: Vec<_> = line.split_whitespace().collect();
+    if cols.len() != 3 {
+        return None;
+    }
+    let kind = match cols[1].trim_end_matches('.') {
+        "_adb._tcp" => ServiceKind::Legacy,
+        "_adb-tls-connect._tcp" => ServiceKind::Connect,
+        "_adb-tls-pairing._tcp" => ServiceKind::Pairing,
+        _ => return None,
+    };
+    let address = cols[2].parse::<SocketAddr>().ok()?;
+    if address.port() == 0 || address.ip().is_unspecified() || address.ip().is_multicast() {
+        return None;
+    }
+    Some(Service {
+        name: cols[0].to_owned(),
+        kind,
+        address,
+    })
+}
+
+fn unrecognized_mdns_lines(output: &str) -> Vec<&str> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "List of discovered mdns services")
+        .filter(|line| parse_mdns_service(line).is_none())
+        .collect()
+}
+
 pub fn parse_mdns(output: &str) -> Vec<Service> {
     let mut result = Vec::new();
     for line in output.lines() {
-        let cols: Vec<_> = line.split_whitespace().collect();
-        if cols.len() != 3 {
-            continue;
-        }
-        let kind = match cols[1].trim_end_matches('.') {
-            "_adb._tcp" => ServiceKind::Legacy,
-            "_adb-tls-connect._tcp" => ServiceKind::Connect,
-            "_adb-tls-pairing._tcp" => ServiceKind::Pairing,
-            _ => continue,
-        };
-        let Ok(address) = cols[2].parse::<SocketAddr>() else {
+        let Some(service) = parse_mdns_service(line) else {
             continue;
         };
-        if address.port() == 0 || address.ip().is_unspecified() || address.ip().is_multicast() {
-            continue;
-        }
         if !result
             .iter()
-            .any(|s: &Service| s.kind == kind && s.address == address)
+            .any(|s: &Service| s.kind == service.kind && s.address == service.address)
         {
-            result.push(Service {
-                name: cols[0].to_owned(),
-                kind,
-                address,
-            });
+            result.push(service);
         }
     }
     result.sort_by_key(|s| (s.address, s.name.clone()));
@@ -247,6 +261,11 @@ pub fn discover(adb_path: &str, cancel: &CancelToken) -> Result<Vec<Service>, Fa
             "connect.error.discovery",
             String::from_utf8_lossy(&output.stderr),
         ));
+    }
+    if log::log_enabled!(log::Level::Debug) {
+        for line in unrecognized_mdns_lines(&stdout) {
+            log::debug!("mDNS skipped unrecognized line: {line:?}");
+        }
     }
     Ok(parse_mdns(&stdout))
 }

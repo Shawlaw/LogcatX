@@ -4275,7 +4275,7 @@ impl AdbCollectorApp {
         });
     }
 
-    fn start_device_connection(&mut self, target: String) {
+    fn start_device_connection(&mut self, target: String, source: &'static str) {
         if self.require_initial_setup {
             self.set_error(self.tr("status.finish_initial_setup"));
             self.show_settings = true;
@@ -4295,6 +4295,12 @@ impl AdbCollectorApp {
 
         self.connect_in_progress = true;
         self.connect_target_input = trimmed.clone();
+        log::info!(
+            "Connect requested: source={} target={} wireless={}",
+            source,
+            trimmed,
+            self.connection.connecting_wireless
+        );
         self.set_info(self.tr_args("status.connecting_device", &[("target", trimmed.clone())]));
 
         let tx = self.tx.clone();
@@ -5201,6 +5207,17 @@ impl AdbCollectorApp {
 
         self.devices = merged;
         self.sort_devices();
+        if log::log_enabled!(log::Level::Debug) {
+            for device in &self.devices {
+                log::debug!(
+                    "Device row: identity={} primary={} state={} transports=[{}]",
+                    device.info.identity_key,
+                    device.info.serial,
+                    device.info.state,
+                    device.transport_serials.join(",")
+                );
+            }
+        }
         let selected_exists = self
             .selected_serial
             .as_deref()

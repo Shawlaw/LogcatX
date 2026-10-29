@@ -122,6 +122,18 @@ fn discovery_keeps_pairing_separate_and_rejects_malformed_services() {
 }
 
 #[test]
+fn discovery_diagnostics_report_only_unrecognized_lines() {
+    let output = "List of discovered mdns services\r\nadb-a _adb-tls-connect._tcp 192.168.3.136:42483\r\nadb-a _adb-tls-connect._tcp not-an-address\r\nweb _http._tcp 192.168.3.136:80\r\n";
+    assert_eq!(
+        unrecognized_mdns_lines(output),
+        vec![
+            "adb-a _adb-tls-connect._tcp not-an-address",
+            "web _http._tcp 192.168.3.136:80"
+        ]
+    );
+}
+
+#[test]
 fn full_scan_covers_all_ports_once_and_prioritizes_history() {
     let ip = "127.0.0.1".parse().unwrap();
     let recent = vec![

@@ -138,6 +138,7 @@ fn ui_e2e_full_width_ime_commit_then_enter_connects_without_losing_input() {
     };
     assert_eq!(request.target, "127.0.0.1:5555");
     assert!(!request.wireless);
+    assert_eq!(request.source, ConnectSource::Manual);
     let fixture = Fixture::new("");
     crate::adb::connect_device(&fixture.adb, &request.target).unwrap();
 }
@@ -188,6 +189,7 @@ fn ui_e2e_pairing_code_stdin_then_fresh_dynamic_port() {
     };
     assert_eq!(request.target, "127.0.0.1:39001");
     assert!(request.wireless);
+    assert_eq!(request.source, ConnectSource::PairAuto);
     crate::adb::connect_device(&fixture.adb, &request.target).unwrap();
 }
 
@@ -241,13 +243,46 @@ fn multiple_connection_services_require_selection() {
     let mut dialog = ConnectionDialog::default();
     dialog.begin();
     dialog.discovery_at = Some(Instant::now());
-    dialog.waiting_host = Some(("127.0.0.1".parse().unwrap(), Instant::now()));
+    dialog.waiting_host = Some((
+        "127.0.0.1".parse().unwrap(),
+        Instant::now(),
+        ConnectSource::PairAuto,
+    ));
     dialog.services = wireless::parse_mdns(
         "a _adb-tls-connect._tcp 127.0.0.1:37002\nb _adb-tls-connect._tcp 127.0.0.1:37003",
     );
     assert!(dialog.poll("unused", &[], &I18n::new("en")).is_none());
     assert!(dialog.waiting_host.is_none());
     assert_eq!(dialog.message, Some("connect.choose_or_manual"));
+}
+
+#[test]
+fn recent_rediscovery_preserves_connection_source() {
+    let mut dialog = ConnectionDialog::default();
+    dialog.begin();
+    dialog.discovery_at = Some(Instant::now());
+    dialog.waiting_host = Some((
+        "127.0.0.1".parse().unwrap(),
+        Instant::now(),
+        ConnectSource::Recent,
+    ));
+    dialog.services = wireless::parse_mdns("adb-a _adb-tls-connect._tcp 127.0.0.1:37002");
+    let request = dialog.poll("unused", &[], &I18n::new("en")).unwrap();
+    assert_eq!(request.target, "127.0.0.1:37002");
+    assert_eq!(request.source, ConnectSource::Recent);
+}
+
+#[test]
+fn mdns_changes_identify_endpoint_replacement() {
+    let previous = wireless::parse_mdns("adb-a _adb-tls-connect._tcp 192.168.3.64:42483");
+    let current = wireless::parse_mdns("adb-a _adb-tls-connect._tcp 192.168.3.136:42483");
+    let (removed, added) = mdns_service_changes(&previous, &current);
+    assert_eq!(removed.len(), 1);
+    assert_eq!(added.len(), 1);
+    assert_eq!(removed[0].address.to_string(), "192.168.3.64:42483");
+    assert_eq!(added[0].address.to_string(), "192.168.3.136:42483");
+    assert!(mdns_service_changes(&current, &current).0.is_empty());
+    assert!(mdns_service_changes(&current, &current).1.is_empty());
 }
 
 #[test]
@@ -351,7 +386,7 @@ fn stopping_automatic_scan_clears_stale_message_and_does_not_auto_connect() {
     let mut h = Harness::new();
     h.dialog.tab = Tab::Scan;
     h.dialog.discovery_at = Some(Instant::now());
-    h.dialog.auto_scan_host = Some("127.0.0.1".parse().unwrap());
+    h.dialog.auto_scan_host = Some(("127.0.0.1".parse().unwrap(), ConnectSource::PairAuto));
     h.dialog.message = Some("connect.paired_scanning");
     h.dialog.scan_progress = Some(ScanProgress {
         total: 100,
@@ -398,7 +433,7 @@ fn cancelled_automatic_scan_callback_updates_message_without_auto_connecting() {
     let mut dialog = ConnectionDialog::default();
     dialog.begin();
     dialog.discovery_at = Some(Instant::now());
-    dialog.auto_scan_host = Some("127.0.0.1".parse().unwrap());
+    dialog.auto_scan_host = Some(("127.0.0.1".parse().unwrap(), ConnectSource::PairAuto));
     dialog.message = Some("connect.paired_scanning");
     dialog
         .tx

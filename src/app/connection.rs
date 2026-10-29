@@ -47,8 +47,9 @@ pub(super) struct ConnectionDialog {
     pair_code: String,
     pairing: bool,
     pair_open: bool,
-    waiting_host: Option<(IpAddr, Instant)>,
-    auto_scan_host: Option<IpAddr>,
+    waiting_host: Option<(IpAddr, Instant, ConnectSource)>,
+    auto_scan_host: Option<(IpAddr, ConnectSource)>,
+    log_next_discovery_snapshot: bool,
     scan_input: String,
     scan_id: u64,
     scan_cancel: CancelToken,
@@ -81,6 +82,7 @@ impl Default for ConnectionDialog {
             pair_open: false,
             waiting_host: None,
             auto_scan_host: None,
+            log_next_discovery_snapshot: false,
             scan_input: String::new(),
             scan_id: 0,
             scan_cancel: CancelToken::default(),
@@ -94,9 +96,31 @@ impl Default for ConnectionDialog {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectSource {
+    Mdns,
+    Scan,
+    Manual,
+    Recent,
+    PairAuto,
+}
+
+impl ConnectSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mdns => "mdns",
+            Self::Scan => "scan",
+            Self::Manual => "manual",
+            Self::Recent => "recent",
+            Self::PairAuto => "pair-auto",
+        }
+    }
+}
+
 struct ConnectRequest {
     target: String,
     wireless: bool,
+    source: ConnectSource,
 }
 
 struct DrawInputs<'a> {
@@ -116,6 +140,56 @@ enum Action {
     Close,
 }
 
+fn mdns_service_changes<'a>(
+    previous: &'a [Service],
+    current: &'a [Service],
+) -> (Vec<&'a Service>, Vec<&'a Service>) {
+    let removed = previous
+        .iter()
+        .filter(|service| !current.contains(service))
+        .collect();
+    let added = current
+        .iter()
+        .filter(|service| !previous.contains(service))
+        .collect();
+    (removed, added)
+}
+
+fn mdns_service_description(service: &Service) -> String {
+    let kind = match service.kind {
+        ServiceKind::Legacy => "legacy",
+        ServiceKind::Connect => "connect",
+        ServiceKind::Pairing => "pairing",
+    };
+    format!(
+        "name={} kind={} address={}",
+        service.name, kind, service.address
+    )
+}
+
+fn log_mdns_service_changes(previous: &[Service], current: &[Service]) {
+    let (removed, added) = mdns_service_changes(previous, current);
+    for service in removed {
+        log::info!(
+            "mDNS service removed: {}",
+            mdns_service_description(service)
+        );
+    }
+    for service in added {
+        log::info!("mDNS service added: {}", mdns_service_description(service));
+    }
+}
+
+fn log_mdns_snapshot(services: &[Service]) {
+    if services.is_empty() {
+        log::info!("mDNS snapshot: no services");
+    } else {
+        for service in services {
+            log::info!("mDNS snapshot: {}", mdns_service_description(service));
+        }
+    }
+}
+
 impl ConnectionDialog {
     fn begin(&mut self) {
         if self.active {
@@ -127,6 +201,7 @@ impl ConnectionDialog {
         self.discovery_busy = false;
         self.discovery_at = None;
         self.discovery_error = None;
+        self.log_next_discovery_snapshot = false;
         self.services.clear();
         self.scan_results.clear();
         self.scan_progress = None;
@@ -256,6 +331,12 @@ impl ConnectionDialog {
                     self.discovery_busy = false;
                     match result {
                         Ok(services) => {
+                            let log_snapshot =
+                                std::mem::take(&mut self.log_next_discovery_snapshot);
+                            log_mdns_service_changes(&self.services, &services);
+                            if log_snapshot {
+                                log_mdns_snapshot(&services);
+                            }
                             if self.tab == Tab::Scan
                                 && self.scanning()
                                 && let Ok(ip) = wireless::parse_scan_ip(&self.scan_input)
@@ -283,6 +364,8 @@ impl ConnectionDialog {
                             self.discovery_error = None;
                         }
                         Err(err) => {
+                            self.log_next_discovery_snapshot = false;
+                            log::debug!("mDNS discovery failed: {err}");
                             self.services.clear();
                             self.discovery_error = Some(failure_text(i18n, &err));
                         }
@@ -301,7 +384,8 @@ impl ConnectionDialog {
                             if let Ok(endpoint) = wireless::parse_endpoint(&target, true)
                                 && let Ok(ip) = endpoint.host.parse()
                             {
-                                self.waiting_host = Some((ip, Instant::now()));
+                                self.waiting_host =
+                                    Some((ip, Instant::now(), ConnectSource::PairAuto));
                             } else {
                                 self.message = Some("connect.paired_manual");
                             }
@@ -326,7 +410,9 @@ impl ConnectionDialog {
                             }
                         }
                         ScanUpdate::Progress(progress) => {
-                            if progress.done && self.auto_scan_host.take().is_some() {
+                            if progress.done
+                                && let Some((_ip, source)) = self.auto_scan_host.take()
+                            {
                                 if progress.cancelled || self.scan_cancel.cancelled() {
                                     self.message = Some("connect.scan_cancelled");
                                 } else if self.scan_results.len() == 1 {
@@ -334,6 +420,7 @@ impl ConnectionDialog {
                                     request = Some(ConnectRequest {
                                         target: candidate.address.to_string(),
                                         wireless: candidate.kind == AdbKind::Wireless,
+                                        source,
                                     });
                                 } else {
                                     self.message = Some("connect.choose_or_manual");
@@ -346,7 +433,7 @@ impl ConnectionDialog {
                 _ => {} // stale results from closed dialogs / cancelled scans
             }
         }
-        if let Some((ip, since)) = self.waiting_host {
+        if let Some((ip, since, source)) = self.waiting_host {
             let services: Vec<_> = self
                 .services
                 .iter()
@@ -356,6 +443,7 @@ impl ConnectionDialog {
                 request = Some(ConnectRequest {
                     target: services[0].address.to_string(),
                     wireless: true,
+                    source,
                 });
                 self.waiting_host = None;
             } else if services.len() > 1 {
@@ -364,7 +452,7 @@ impl ConnectionDialog {
             } else if since.elapsed() > Duration::from_secs(6) {
                 self.waiting_host = None;
                 self.scan_input = ip.to_string();
-                self.auto_scan_host = Some(ip);
+                self.auto_scan_host = Some((ip, source));
                 self.message = Some("connect.paired_scanning");
                 self.start_scan(false, recent, i18n);
             }
@@ -499,6 +587,7 @@ impl ConnectionDialog {
                                                                         .to_string(),
                                                                     wireless: service.kind
                                                                         == ServiceKind::Connect,
+                                                                    source: ConnectSource::Mdns,
                                                                 },
                                                             ));
                                                         }
@@ -675,6 +764,7 @@ impl ConnectionDialog {
                                             action = Some(Action::Connect(ConnectRequest {
                                                 target: candidate.address.to_string(),
                                                 wireless: candidate.kind == AdbKind::Wireless,
+                                                source: ConnectSource::Scan,
                                             }));
                                         }
                                     });
@@ -717,6 +807,7 @@ impl ConnectionDialog {
                                         action = Some(Action::Connect(ConnectRequest {
                                             target: manual_input.clone(),
                                             wireless: self.manual_wireless,
+                                            source: ConnectSource::Manual,
                                         }));
                                     }
                                 });
@@ -746,6 +837,7 @@ impl ConnectionDialog {
                                             Action::Connect(ConnectRequest {
                                                 target: target.clone(),
                                                 wireless: false,
+                                                source: ConnectSource::Recent,
                                             })
                                         });
                                     }
@@ -910,7 +1002,7 @@ impl AdbCollectorApp {
                 self.connection.connecting_wireless = request.wireless;
                 self.connection.error = None;
                 self.connection.message = None;
-                self.start_device_connection(request.target);
+                self.start_device_connection(request.target, request.source.as_str());
             }
             Some(Action::Pair) => self
                 .connection
@@ -923,11 +1015,16 @@ impl AdbCollectorApp {
                 self.connection
                     .start_scan(full, &self.config.recent_connections, &self.i18n);
             }
-            Some(Action::Refresh) => self.connection.discovering(&self.config.adb_path),
+            Some(Action::Refresh) => {
+                self.connection.log_next_discovery_snapshot = true;
+                self.connection.discovering(&self.config.adb_path);
+            }
             Some(Action::Reconnect(target)) => {
+                log::info!("Reconnect requested: source=recent target={target}");
                 if let Ok(endpoint) = wireless::parse_endpoint(&target, false) {
                     if let Ok(ip) = endpoint.host.parse() {
-                        self.connection.waiting_host = Some((ip, Instant::now()));
+                        self.connection.waiting_host =
+                            Some((ip, Instant::now(), ConnectSource::Recent));
                         self.connection.tab = Tab::Wireless;
                         self.connection.message = Some("connect.rediscovering");
                         self.connection.discovery_at = None;
