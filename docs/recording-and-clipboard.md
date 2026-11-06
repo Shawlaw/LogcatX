@@ -8,7 +8,7 @@
 
 | 方式 | 实现 | 时长 | 依赖 |
 | --- | --- | --- | --- |
-| 快速录制 | `adb shell screenrecord` | 最长 180 秒 | 无 |
+| 快速录制 | `adb shell screenrecord` | Android 14+ 最长 30 分钟；Android 13 及以下 180 秒 | 无 |
 | 长录屏 | `scrcpy --no-playback` | 手动停止，无 3 分钟限制 | 已配置 scrcpy 2.0+ |
 
 两种方式都会在开始前选择本地保存路径；默认目录是设置页的「录屏保存目录」
@@ -19,13 +19,18 @@
 - 记录在设备 `/data/local/tmp/logcatx-rec-*.mp4`，停止后自动 `adb pull` 回电脑，
   然后删除设备临时文件。
 - 停止通过 `pkill -INT screenrecord`（或 `killall` 回退），让 `screenrecord` 正常
-  写完 MP4 尾部的 `moov`；到 180 秒上限时也会自动停止。
+  写完 MP4 尾部的 `moov`；到设定时长时也会自动停止。
+- 打开录屏对话框时会执行 `adb shell screenrecord --help` 探测能力：
+  - Android 13 及以下：帮助文本为 "Default / maximum is 180"，只提供 30/60/120/180 秒。
+  - Android 14+：帮助文本为 "Set to 0 to remove the time limit"，提供 30 秒到
+    30 分钟（1800 秒）的选项。Android Studio 的 30 分钟 Logcat 录屏走的就是
+    这条能力（AOSP 在 Android 14 移除了 180 秒 clamp；`--time-limit 0` 可无限录制）。
+  - 探测失败或输出无法识别时按 180 秒处理，避免向旧设备发送会被拒绝的参数。
+- 本应用把快速录制上限设为 30 分钟；30 分钟视频会占用较大的设备临时空间和回传时间，
+  更长或需要跨 Android 版本一致体验时，使用长录屏（scrcpy 直接写电脑）。
 - **不录制声音**；安全窗口/DRM 画面可能被录成黑色。
 - 停止时向该设备上名为 `screenrecord` 的进程发送 `SIGINT`；请避免在同一设备上同时手动运行
   `screenrecord`，否则也会被一起停止。
-- Android Studio 的 Logcat「Screen Record」同样是 3 分钟上限；它在模拟器
-  Extended Controls 里的 30 分钟录制是模拟器自己的 WebM/GIF 录制，不是
-  `adb shell screenrecord` 的能力。需要 30 分钟时请使用本应用的长录屏。
 
 ### 长录屏
 

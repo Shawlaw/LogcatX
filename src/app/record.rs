@@ -8,6 +8,14 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn duration_label(seconds: u32) -> String {
+    if seconds >= 60 && seconds.is_multiple_of(60) {
+        format!("{} min", seconds / 60)
+    } else {
+        format!("{seconds} s")
+    }
+}
+
 impl AdbCollectorApp {
     pub(super) fn is_device_recording(&self, device_id: &str) -> bool {
         self.recording_serial(device_id).is_some()
@@ -56,10 +64,18 @@ impl AdbCollectorApp {
         if self.is_device_recording(&device_id) {
             return;
         }
+        let Some(serial) = self.device_primary_transport_serial(&device_id) else {
+            return;
+        };
 
         self.record_device_id = Some(device_id.clone());
         self.record_mode = recorder::RecordingMode::Quick;
         self.record_error = None;
+        self.record_quick_max_seconds =
+            recorder::probe_quick_max_seconds(&self.config.adb_path, &serial);
+        if self.record_time_limit_secs > self.record_quick_max_seconds {
+            self.record_time_limit_secs = self.record_quick_max_seconds;
+        }
         let directory = self.record_directory();
         let path = recorder::default_recording_path(
             directory.as_path(),
@@ -172,14 +188,20 @@ impl AdbCollectorApp {
                     if self.record_mode == recorder::RecordingMode::Quick {
                         ui.add_space(18.0);
                         ui.label(self.tr("record.time_limit"));
+                        let max = self.record_quick_max_seconds;
+                        let mut limits = vec![30, 60, 120, 180];
+                        if max > 180 {
+                            limits.extend([300, 600, 900, 1800]);
+                        }
                         egui::ComboBox::from_id_salt("record-time-limit")
-                            .selected_text(format!("{} s", self.record_time_limit_secs))
+                            .selected_text(duration_label(self.record_time_limit_secs))
                             .show_ui(ui, |ui| {
-                                for seconds in [30, 60, 120, 180] {
+                                for seconds in limits.into_iter().filter(|seconds| *seconds <= max)
+                                {
                                     ui.selectable_value(
                                         &mut self.record_time_limit_secs,
                                         seconds,
-                                        format!("{seconds} s"),
+                                        duration_label(seconds),
                                     );
                                 }
                             });
@@ -190,6 +212,12 @@ impl AdbCollectorApp {
                     recorder::RecordingMode::Quick => self.tr("record.hint.quick"),
                     recorder::RecordingMode::Long => self.tr("record.hint.long"),
                 });
+                if self.record_mode == recorder::RecordingMode::Quick {
+                    ui.small(self.tr_args(
+                        "record.quick_limit",
+                        &[("minutes", (self.record_quick_max_seconds / 60).to_string())],
+                    ));
+                }
                 if let Some(error) = &self.record_error {
                     ui.add_space(6.0);
                     ui.label(
@@ -253,13 +281,17 @@ impl AdbCollectorApp {
             return Err("Configure scrcpy in Settings to use long recording.".to_owned());
         }
 
+        let quick_limit = self
+            .record_time_limit_secs
+            .min(self.record_quick_max_seconds)
+            .max(1);
         let task = match self.record_mode {
             recorder::RecordingMode::Quick => recorder::start_quick(
                 &self.config.adb_path,
                 &serial,
                 path,
                 self.record_bitrate_mbps,
-                self.record_time_limit_secs,
+                quick_limit,
             )?,
             recorder::RecordingMode::Long => recorder::start_long(
                 &self.config.scrcpy_path,

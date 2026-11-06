@@ -826,6 +826,56 @@ fn clipboard_helper_round_trips_large_text() {
     assert_eq!(read_back.as_deref(), Some(sentinel.as_str()));
 }
 
+/// The dialog probes `screenrecord --help` before offering a duration; make
+/// sure the probe executes on real adb and returns a sane limit.
+#[test]
+#[ignore = "real adb: set LOGCATX_REAL_ADB; runs screenrecord --help"]
+fn screenrecord_probe_reports_a_supported_limit() {
+    let adb = adb_path();
+    let serial = target_serial();
+    let max = recorder::probe_quick_max_seconds(&adb, &serial);
+    assert!(
+        (recorder::LEGACY_MAX_QUICK_SECONDS..=recorder::MAX_QUICK_SECONDS).contains(&max),
+        "unexpected screenrecord limit: {max}"
+    );
+}
+
+/// Android 14+ accepts the 30-minute limit; start with it, stop early, and
+/// verify the same quick-recording worker still finalizes and pulls the MP4.
+#[test]
+#[ignore = "real adb: set LOGCATX_REAL_ADB; requires Android 14+ screenrecord"]
+fn quick_screenrecord_accepts_extended_limit_when_supported() {
+    let adb = adb_path();
+    let serial = target_serial();
+    let max = recorder::probe_quick_max_seconds(&adb, &serial);
+    if max <= recorder::LEGACY_MAX_QUICK_SECONDS {
+        eprintln!("screenrecord is capped at the legacy 180 s on this device; skipping");
+        return;
+    }
+    assert_eq!(max, recorder::MAX_QUICK_SECONDS);
+    let local = std::env::temp_dir().join(format!(
+        "logcatx-recording-30m-smoke-{}-{}.mp4",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    ));
+    let mut task =
+        recorder::start_quick(&adb, &serial, local.clone(), 4, recorder::MAX_QUICK_SECONDS)
+            .expect("start screenrecord with the extended limit");
+    std::thread::sleep(Duration::from_secs(2));
+    task.request_stop();
+    let outcome = wait_recording(&mut task, Duration::from_secs(60))
+        .expect("extended-limit recording succeeds");
+    assert!(outcome.bytes > 0);
+    assert_eq!(
+        &std::fs::read(&outcome.local_path).expect("read mp4")[4..8],
+        b"ftyp"
+    );
+    let _ = std::fs::remove_file(outcome.local_path);
+}
+
 /// Quick recording through the same worker the UI uses: start, stop early,
 /// pull, and verify a playable MP4 header.
 #[test]

@@ -24,12 +24,21 @@ use std::{
 };
 use tempfile::NamedTempFile;
 
-/// Android's `screenrecord --time-limit` is documented as 180 s maximum.
-pub const MAX_QUICK_SECONDS: u32 = 180;
+/// Android 14+ accepts any `--time-limit` value (0 means unlimited); we cap
+/// quick recordings at 30 minutes so the UI stays predictable.
+pub const MAX_QUICK_SECONDS: u32 = 30 * 60;
+/// Android 13 and older clamp `--time-limit` to 180 s in `screenrecord`.
+pub const LEGACY_MAX_QUICK_SECONDS: u32 = 180;
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
-const PULL_TIMEOUT: Duration = Duration::from_secs(120);
-const PULL_ATTEMPTS: u32 = 3;
+/// Large 30-minute recordings can exceed a fixed short pull budget; size the
+/// timeout from the device file, assuming a conservative 2 MB/s, within
+/// 2-15 minutes.
+const PULL_MIN_TIMEOUT: Duration = Duration::from_secs(120);
+const PULL_MAX_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const PULL_FALLBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const PULL_BYTES_PER_SECOND: u64 = 2_000_000;
+const PULL_ATTEMPTS: u32 = 2;
 const QUICK_GRACE: Duration = Duration::from_secs(30);
 const LONG_MAX: Duration = Duration::from_secs(4 * 60 * 60);
 
@@ -132,6 +141,37 @@ pub fn start_quick(
         events,
         join: Some(handle),
     })
+}
+
+/// Ask the device how long `screenrecord` may run. Android 14+ removed the
+/// 180 s clamp and prints "Set to 0 to remove the time limit"; older versions
+/// print a hard maximum of 180. Unknown/empty output falls back to the legacy
+/// limit so we never send a value the device will reject.
+pub fn probe_quick_max_seconds(adb_path: &str, serial: &str) -> u32 {
+    let output = AdbExecutor::new(adb_path).execute_with_timeout(
+        &["-s", serial, "shell", "screenrecord", "--help"],
+        Duration::from_secs(6),
+    );
+    match output {
+        Ok(output) => {
+            let mut help = String::from_utf8_lossy(&output.stdout).into_owned();
+            help.push('\n');
+            help.push_str(&String::from_utf8_lossy(&output.stderr));
+            quick_max_seconds_from_help(&help)
+        }
+        Err(err) => {
+            log::warn!("Could not probe screenrecord support on {serial}: {err}");
+            LEGACY_MAX_QUICK_SECONDS
+        }
+    }
+}
+
+fn quick_max_seconds_from_help(help: &str) -> u32 {
+    if help.contains("remove the time limit") || help.contains("Set to 0") {
+        MAX_QUICK_SECONDS
+    } else {
+        LEGACY_MAX_QUICK_SECONDS
+    }
 }
 
 pub fn start_long(
@@ -380,6 +420,28 @@ fn stop_screenrecord(executor: &AdbExecutor, serial: &str) -> Result<(), String>
     }
 }
 
+fn pull_timeout(executor: &AdbExecutor, serial: &str, device_path: &str) -> Duration {
+    let quoted = crate::remote_fs::shell_quote(device_path);
+    let Some(bytes) = executor
+        .execute_with_timeout(
+            &["-s", serial, "shell", "stat", "-c", "%s", &quoted],
+            STOP_COMMAND_TIMEOUT,
+        )
+        .ok()
+        .filter(|output| output.success())
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<u64>()
+                .ok()
+        })
+    else {
+        return PULL_FALLBACK_TIMEOUT;
+    };
+    let seconds = bytes.div_ceil(PULL_BYTES_PER_SECOND) + 60;
+    Duration::from_secs(seconds).clamp(PULL_MIN_TIMEOUT, PULL_MAX_TIMEOUT)
+}
+
 fn pull_recording(
     executor: &AdbExecutor,
     serial: &str,
@@ -387,11 +449,10 @@ fn pull_recording(
     local_path: &Path,
 ) -> Result<u64, String> {
     let local = local_path.to_string_lossy().into_owned();
+    let timeout = pull_timeout(executor, serial, device_path);
     let mut last_error = String::new();
     for attempt in 0..PULL_ATTEMPTS {
-        match executor
-            .execute_with_timeout(&["-s", serial, "pull", device_path, &local], PULL_TIMEOUT)
-        {
+        match executor.execute_with_timeout(&["-s", serial, "pull", device_path, &local], timeout) {
             Ok(output) if output.success() => match fs::metadata(local_path) {
                 Ok(metadata) if metadata.len() > 0 => {
                     let bytes = metadata.len();
@@ -531,7 +592,10 @@ impl EmptyStringExt for str {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_QUICK_SECONDS, default_recording_path, quick_command_args};
+    use super::{
+        LEGACY_MAX_QUICK_SECONDS, MAX_QUICK_SECONDS, default_recording_path, quick_command_args,
+        quick_max_seconds_from_help,
+    };
 
     #[test]
     fn quick_command_carries_limit_bitrate_and_device_path() {
@@ -550,7 +614,30 @@ mod tests {
                 "/data/local/tmp/x.mp4",
             ]
         );
-        assert_eq!(MAX_QUICK_SECONDS, 180);
+        assert_eq!(MAX_QUICK_SECONDS, 1800);
+        assert_eq!(LEGACY_MAX_QUICK_SECONDS, 180);
+    }
+
+    #[test]
+    fn screenrecord_help_detects_legacy_and_android_14_limits() {
+        assert_eq!(
+            quick_max_seconds_from_help(
+                "Set the maximum recording time, in seconds.  Default / maximum is 180."
+            ),
+            LEGACY_MAX_QUICK_SECONDS
+        );
+        assert_eq!(
+            quick_max_seconds_from_help(
+                "Set the maximum recording time, in seconds.  Default is 180. Set to 0\n\
+                 to remove the time limit."
+            ),
+            MAX_QUICK_SECONDS
+        );
+        assert_eq!(
+            quick_max_seconds_from_help(""),
+            LEGACY_MAX_QUICK_SECONDS,
+            "unknown output must stay on the safe legacy limit"
+        );
     }
 
     #[test]

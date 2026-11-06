@@ -47,7 +47,7 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - open a device shell directly from the device-row menu
 - edit aliases, pin devices, and open the device log folder or latest log file from the device-row menu
 - capture the current device screen from the device-row menu and copy it to the Windows clipboard as an image
-- record the device screen: quick `screenrecord` clips (up to 180 s, pulled back automatically) or long scrcpy recordings with a hidden window (no three-minute limit), saved to a chosen path
+- record the device screen: quick `screenrecord` clips (up to 30 minutes on Android 14+, 180 s on Android 13 and older; pulled back automatically) or long scrcpy recordings with a hidden window (no three-minute limit), saved to a chosen path
 - send multi-line text to a selected device: ASCII uses `input text`; non-ASCII falls back to the device clipboard plus PASTE when the device rejects it
 - manual two-way text clipboard: write the PC clipboard to the device or read the device clipboard back; a ~6 KB shell helper dex is pushed on demand (no APK install, no background service)
 - mirror a device with scrcpy or create an independent virtual display from the device-row menu
