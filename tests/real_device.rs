@@ -18,6 +18,7 @@
 use logcatx::adb::list_devices;
 use logcatx::remote_fs::{RemoteEntryKind, RemoteFs, RemoteFsError, RemotePath};
 use logcatx::transfer::{TransferManager, TransferState};
+use logcatx::{clipboard, recorder};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 fn adb_path() -> String {
@@ -776,5 +777,132 @@ fn multi_device_parallel_pushes_stay_unmixed() {
         RemoteFs::new(&adb, serial)
             .delete(dir)
             .expect("cleanup per-device smoke dir");
+    }
+}
+
+/// The embedded shell helper must actually round-trip UTF-8 text through the
+/// device clipboard. Opt-in like all real-device tests; it leaves the sentinel
+/// in the device clipboard unless an existing text clip can be restored.
+#[test]
+#[ignore = "real adb: set LOGCATX_REAL_ADB; reads/writes the device clipboard"]
+fn clipboard_helper_round_trips_utf8_text() {
+    let adb = adb_path();
+    let serial = target_serial();
+    let original = clipboard::read_text(&adb, &serial).expect("read original clipboard");
+    let sentinel = format!(
+        "LogcatX 剪贴板 smoke {} {}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    );
+    clipboard::write_text(&adb, &serial, &sentinel).expect("write sentinel");
+    let read_back = clipboard::read_text(&adb, &serial).expect("read sentinel");
+    assert_eq!(read_back.as_deref(), Some(sentinel.as_str()));
+    if let Some(original) = original {
+        clipboard::write_text(&adb, &serial, &original).expect("restore clipboard");
+    }
+}
+
+/// Large clipboard writes go through the helper's `set-stdin` path, bypassing
+/// the Windows command-line limit.
+#[test]
+#[ignore = "real adb: set LOGCATX_REAL_ADB; writes a ~64 KB device clipboard value"]
+fn clipboard_helper_round_trips_large_text() {
+    let adb = adb_path();
+    let serial = target_serial();
+    let sentinel = format!(
+        "LogcatX-large-{}-{}:{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        "x".repeat(64 * 1024)
+    );
+    clipboard::write_text(&adb, &serial, &sentinel).expect("write large sentinel");
+    let read_back = clipboard::read_text(&adb, &serial).expect("read large sentinel");
+    assert_eq!(read_back.as_deref(), Some(sentinel.as_str()));
+}
+
+/// Quick recording through the same worker the UI uses: start, stop early,
+/// pull, and verify a playable MP4 header.
+#[test]
+#[ignore = "real adb: set LOGCATX_REAL_ADB; records the device screen for ~3 s"]
+fn quick_screenrecord_stops_and_pulls_a_playable_mp4() {
+    let adb = adb_path();
+    let serial = target_serial();
+    let local = std::env::temp_dir().join(format!(
+        "logcatx-recording-smoke-{}-{}.mp4",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    ));
+    let mut task =
+        recorder::start_quick(&adb, &serial, local.clone(), 4, 30).expect("start screenrecord");
+    std::thread::sleep(Duration::from_secs(2));
+    task.request_stop();
+
+    let outcome = wait_recording(&mut task, Duration::from_secs(60));
+    let outcome = outcome.expect("quick recording succeeds");
+    assert!(outcome.local_path.exists(), "pulled file exists");
+    assert!(outcome.bytes > 0, "recording is not empty");
+    let header = std::fs::read(&outcome.local_path).expect("read mp4");
+    assert_eq!(&header[4..8], b"ftyp", "file has an MP4 ftyp header");
+    let _ = std::fs::remove_file(outcome.local_path);
+}
+
+/// Long recording through scrcpy: requires `LOGCATX_REAL_SCRCPY` pointing at
+/// a scrcpy executable. It verifies the hidden-window WM_CLOSE stop path.
+#[test]
+#[ignore = "real adb + scrcpy: set LOGCATX_REAL_ADB and LOGCATX_REAL_SCRCPY"]
+fn scrcpy_long_recording_stops_cleanly() {
+    let Ok(scrcpy) = std::env::var("LOGCATX_REAL_SCRCPY") else {
+        eprintln!("LOGCATX_REAL_SCRCPY is not set; skipping");
+        return;
+    };
+    let adb = adb_path();
+    let serial = target_serial();
+    let local = std::env::temp_dir().join(format!(
+        "logcatx-scrcpy-smoke-{}-{}.mp4",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    ));
+    let mut task = recorder::start_long(&scrcpy, &adb, &serial, local.clone(), 4)
+        .expect("start scrcpy recording");
+    std::thread::sleep(Duration::from_secs(3));
+    task.request_stop();
+
+    let outcome = wait_recording(&mut task, Duration::from_secs(60));
+    let outcome = outcome.expect("long recording succeeds");
+    assert!(!outcome.forced_stop, "scrcpy was closed gracefully");
+    assert!(outcome.local_path.exists());
+    assert!(outcome.bytes > 0);
+    let header = std::fs::read(&outcome.local_path).expect("read mp4");
+    assert_eq!(&header[4..8], b"ftyp");
+    let _ = std::fs::remove_file(outcome.local_path);
+}
+
+fn wait_recording(
+    task: &mut recorder::RecordingTask,
+    timeout: Duration,
+) -> Result<recorder::RecordingOutcome, String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(recorder::RecordingEvent::Finished(result)) = task.try_recv() {
+            task.join();
+            return result;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "recording did not finish in time"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
 }

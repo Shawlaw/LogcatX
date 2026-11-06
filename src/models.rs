@@ -180,6 +180,18 @@ pub enum AppEvent {
         serial: String,
         result: Result<Screenshot, String>,
     },
+    TextInputFinished {
+        serial: String,
+        result: Result<crate::text_input::TextInputOutcome, String>,
+    },
+    ClipboardReadFinished {
+        serial: String,
+        result: Result<Option<String>, String>,
+    },
+    ClipboardWriteFinished {
+        serial: String,
+        result: Result<(), String>,
+    },
     ScrcpyAppsLoaded {
         device_id: String,
         result: Result<Vec<String>, String>,

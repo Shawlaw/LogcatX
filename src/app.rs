@@ -8,10 +8,12 @@ use crate::{
         AppEvent, DeviceEntry, DeviceInfo, DeviceRunState, DropOutcome, ForegroundApp,
         ForegroundAppAction, Screenshot, SharedChild, StatusMessage,
     },
-    remote_fs, scrcpy, transfer, updater,
+    recorder, remote_fs, scrcpy, transfer, updater,
 };
 mod connection;
+mod device_tools;
 mod files;
+mod record;
 mod text_menu;
 use chrono::{Local, TimeZone};
 use desktop_updater::{CheckResult, DownloadedUpdate, UpdateCandidate};
@@ -151,6 +153,7 @@ pub struct AdbCollectorApp {
     adb_path_input: String,
     scrcpy_path_input: String,
     log_dir_input: String,
+    record_dir_input: String,
     language_input: String,
     auto_update_input: bool,
     update_proxy_mode_input: UpdateProxyMode,
@@ -185,6 +188,21 @@ pub struct AdbCollectorApp {
     connection: connection::ConnectionDialog,
     restarting_adb_server: bool,
     screenshot_in_progress: bool,
+    // Screen recording and the manual text/clipboard device tools.
+    recordings: HashMap<String, recorder::RecordingTask>,
+    recording_stopping: HashSet<String>,
+    show_record_dialog: bool,
+    record_device_id: Option<String>,
+    record_mode: recorder::RecordingMode,
+    record_path_input: String,
+    record_bitrate_mbps: u32,
+    record_time_limit_secs: u32,
+    record_error: Option<String>,
+    show_text_dialog: bool,
+    text_device_id: Option<String>,
+    text_draft: String,
+    text_error: Option<String>,
+    tool_task_serial: Option<String>,
     disconnecting_serial: Option<String>,
     alias_input_serial: Option<String>,
     alias_input_value: String,
@@ -351,10 +369,12 @@ impl AdbCollectorApp {
         let transfers = transfer::TransferManager::new(&config.adb_path);
         let transfers_adb_path = config.adb_path.clone();
 
+        let record_dir_input = config.record_dir.clone();
         let mut app = Self {
             adb_path_input: config.adb_path.clone(),
             scrcpy_path_input: config.scrcpy_path.clone(),
             log_dir_input: config.log_dir.clone(),
+            record_dir_input,
             app_paths: bootstrap.app_paths,
             config,
             devices: Vec::new(),
@@ -399,6 +419,20 @@ impl AdbCollectorApp {
             connection: connection::ConnectionDialog::default(),
             restarting_adb_server: false,
             screenshot_in_progress: false,
+            recordings: HashMap::new(),
+            recording_stopping: HashSet::new(),
+            show_record_dialog: false,
+            record_device_id: None,
+            record_mode: recorder::RecordingMode::Quick,
+            record_path_input: String::new(),
+            record_bitrate_mbps: 8,
+            record_time_limit_secs: 60,
+            record_error: None,
+            show_text_dialog: false,
+            text_device_id: None,
+            text_draft: String::new(),
+            text_error: None,
+            tool_task_serial: None,
             disconnecting_serial: None,
             alias_input_serial: None,
             alias_input_value: String::new(),
@@ -611,6 +645,15 @@ impl AdbCollectorApp {
                         }
                         Err(err) => self.set_error(err),
                     }
+                }
+                AppEvent::TextInputFinished { serial, result } => {
+                    self.handle_text_input_finished(serial, result);
+                }
+                AppEvent::ClipboardReadFinished { serial, result } => {
+                    self.handle_clipboard_read_finished(serial, result);
+                }
+                AppEvent::ClipboardWriteFinished { serial, result } => {
+                    self.handle_clipboard_write_finished(serial, result);
                 }
                 AppEvent::ScrcpyAppsLoaded { device_id, result } => {
                     if self.new_display_device_id.as_deref() != Some(device_id.as_str()) {
@@ -1383,6 +1426,13 @@ impl AdbCollectorApp {
             let mut copy_serial: Option<String> = None;
             let mut copy_log_path_serial: Option<String> = None;
             let mut screenshot_serial: Option<String> = None;
+            let mut open_record_serial: Option<String> = None;
+            let mut stop_record_serial: Option<String> = None;
+            let mut open_record_dir = false;
+            let mut open_text_serial: Option<String> = None;
+            let mut send_clipboard_text_serial: Option<String> = None;
+            let mut write_clipboard_serial: Option<String> = None;
+            let mut read_clipboard_serial: Option<String> = None;
             let mut open_scrcpy_mirror_serial: Option<String> = None;
             let mut open_new_display_serial: Option<String> = None;
             let mut open_scrcpy_settings = false;
@@ -1408,6 +1458,14 @@ impl AdbCollectorApp {
             let copy_text = self.tr("device.action.copy_serial");
             let copy_log_path_text = self.tr("device.action.copy_latest_log_path");
             let screenshot_text = self.tr("device.action.screenshot");
+            let record_start_text = self.tr("device.action.record_start");
+            let record_stop_text = self.tr("device.action.record_stop");
+            let record_open_dir_text = self.tr("device.action.record_open_dir");
+            let text_input_text = self.tr("device.action.text_input");
+            let clipboard_menu_text = self.tr("device.action.clipboard_menu");
+            let clipboard_send_text = self.tr("device.action.clipboard_send_text");
+            let clipboard_write_text = self.tr("device.action.clipboard_write");
+            let clipboard_read_text = self.tr("device.action.clipboard_read");
             let scrcpy_menu_text = self.tr("device.action.scrcpy_menu");
             let scrcpy_mirror_text = self.tr("device.action.scrcpy_mirror");
             let scrcpy_new_display_text = self.tr("device.action.scrcpy_new_display");
@@ -1483,6 +1541,7 @@ impl AdbCollectorApp {
                 let selected = self.selected_serial.as_deref() == Some(device_id.as_str());
                 let primary_name = self.device_primary_name(&device_id);
                 let is_pinned = self.is_pinned_device(&device_id);
+                let is_recording = self.is_device_recording(&device_id);
                 let row_fill = if selected {
                     Color32::from_rgb(220, 233, 255)
                 } else {
@@ -1501,11 +1560,14 @@ impl AdbCollectorApp {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            let label = if is_pinned {
+                            let mut label = if is_pinned {
                                 format!("{} ({})", primary_name, self.tr("device.pinned_short"))
                             } else {
                                 primary_name.clone()
                             };
+                            if is_recording {
+                                label.push_str("  [REC]");
+                            }
                             let cell_text = if primary_name != serial {
                                 format!("{}\n{}", label, serial)
                             } else {
@@ -1718,6 +1780,103 @@ impl AdbCollectorApp {
                                                         ui.close_menu();
                                                     }
                                                 });
+                                                {
+                                                    let recording =
+                                                        self.is_device_recording(&device_id);
+                                                    let stopping = self
+                                                        .is_device_recording_stopping(&device_id);
+                                                    let record_label = if recording {
+                                                        record_stop_text.clone()
+                                                    } else {
+                                                        record_start_text.clone()
+                                                    };
+                                                    if ui
+                                                        .add_enabled(
+                                                            !stopping
+                                                                && (recording || state == "device"),
+                                                            rounded_secondary(record_label),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        if recording {
+                                                            stop_record_serial =
+                                                                Some(device_id.clone());
+                                                        } else {
+                                                            open_record_serial =
+                                                                Some(device_id.clone());
+                                                        }
+                                                        ui.close_menu();
+                                                    }
+                                                    let record_dir = PathBuf::from(
+                                                        self.config.record_dir.as_str(),
+                                                    );
+                                                    if ui
+                                                        .add_enabled(
+                                                            record_dir.exists(),
+                                                            rounded_secondary(
+                                                                record_open_dir_text.clone(),
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        open_record_dir = true;
+                                                        ui.close_menu();
+                                                    }
+                                                }
+                                                if ui
+                                                    .add_enabled(
+                                                        state == "device"
+                                                            && self.tool_task_serial.is_none(),
+                                                        rounded_secondary(text_input_text.clone()),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    open_text_serial = Some(device_id.clone());
+                                                    ui.close_menu();
+                                                }
+                                                ui.menu_button(clipboard_menu_text.clone(), |ui| {
+                                                    let enabled = state == "device"
+                                                        && self.tool_task_serial.is_none();
+                                                    if ui
+                                                        .add_enabled(
+                                                            enabled,
+                                                            rounded_secondary(
+                                                                clipboard_send_text.clone(),
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        send_clipboard_text_serial =
+                                                            Some(device_id.clone());
+                                                        ui.close_menu();
+                                                    }
+                                                    if ui
+                                                        .add_enabled(
+                                                            enabled,
+                                                            rounded_secondary(
+                                                                clipboard_write_text.clone(),
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        write_clipboard_serial =
+                                                            Some(device_id.clone());
+                                                        ui.close_menu();
+                                                    }
+                                                    if ui
+                                                        .add_enabled(
+                                                            enabled,
+                                                            rounded_secondary(
+                                                                clipboard_read_text.clone(),
+                                                            ),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        read_clipboard_serial =
+                                                            Some(device_id.clone());
+                                                        ui.close_menu();
+                                                    }
+                                                });
                                                 if ui
                                                     .add_enabled(
                                                         state == "device",
@@ -1908,6 +2067,30 @@ impl AdbCollectorApp {
             }
             if let Some(serial) = screenshot_serial {
                 self.start_screenshot(serial);
+            }
+            if let Some(serial) = open_record_serial {
+                self.open_record_dialog(serial);
+            }
+            if let Some(serial) = stop_record_serial {
+                self.stop_recording(&serial);
+            }
+            if open_record_dir {
+                let dir = PathBuf::from(self.config.record_dir.as_str());
+                if let Err(err) = fs_utils::open_path(&dir) {
+                    self.set_error(err);
+                }
+            }
+            if let Some(serial) = open_text_serial {
+                self.open_text_dialog(serial);
+            }
+            if let Some(serial) = send_clipboard_text_serial {
+                self.send_pc_clipboard_text(serial);
+            }
+            if let Some(serial) = write_clipboard_serial {
+                self.write_pc_clipboard(serial);
+            }
+            if let Some(serial) = read_clipboard_serial {
+                self.read_device_clipboard(serial);
             }
             if let Some(serial) = open_scrcpy_mirror_serial {
                 self.start_scrcpy_mirror(serial);
@@ -2294,6 +2477,26 @@ impl AdbCollectorApp {
                 self.log_dir_input = fs_utils::display_path(&self.app_paths.exe_dir.join("logs"));
             }
         });
+        ui.add_space(8.0);
+        ui.label(self.tr("settings.record_dir"));
+        let path_input_width = settings_path_input_width(ui.available_width());
+        ui.horizontal_wrapped(|ui| {
+            let response = ui.add_sized(
+                egui::vec2(path_input_width, 0.0),
+                egui::TextEdit::singleline(&mut self.record_dir_input),
+            );
+            text_menu::text_edit_menu(&response, &mut self.record_dir_input, &self.i18n);
+            if ui.button(self.tr("settings.browse")).clicked()
+                && let Some(path) = FileDialog::new().pick_folder()
+            {
+                self.record_dir_input = fs_utils::display_path(path.as_path());
+            }
+            if ui.button(self.tr("settings.use_default")).clicked() {
+                self.record_dir_input =
+                    fs_utils::display_path(&self.app_paths.exe_dir.join("recordings"));
+            }
+        });
+        ui.small(self.tr("settings.record_dir.hint"));
         ui.add_space(8.0);
         ui.label(self.tr("settings.language"));
         egui::ComboBox::from_id_salt(if inline_page {
@@ -3537,6 +3740,7 @@ impl AdbCollectorApp {
             adb_path: self.adb_path_input.trim().to_owned(),
             scrcpy_path: self.scrcpy_path_input.trim().to_owned(),
             log_dir: self.log_dir_input.trim().to_owned(),
+            record_dir: self.record_dir_input.trim().to_owned(),
             app_log_max_size_mb: self.config.app_log_max_size_mb,
             language: self.language_input.clone(),
             device_aliases: self.config.device_aliases.clone(),
@@ -3579,10 +3783,23 @@ impl AdbCollectorApp {
             }
         };
 
+        let record_dir = if candidate.record_dir.trim().is_empty() {
+            self.app_paths.exe_dir.join("recordings")
+        } else {
+            PathBuf::from(candidate.record_dir.trim())
+        };
+        if let Err(err) = std::fs::create_dir_all(&record_dir) {
+            self.set_settings_save_error(format!(
+                "Failed to create the recording directory {}: {err}",
+                record_dir.display()
+            ));
+            return;
+        }
         let saved = AppConfig {
             adb_path: fs_utils::display_path_string(&candidate.adb_path),
             scrcpy_path: fs_utils::display_path_string(&candidate.scrcpy_path),
             log_dir: fs_utils::display_path(&resolved_log_dir),
+            record_dir: fs_utils::display_path(&record_dir),
             app_log_max_size_mb: candidate.app_log_max_size_mb,
             language: self.language_input.clone(),
             device_aliases: candidate.device_aliases.clone(),
@@ -3605,6 +3822,7 @@ impl AdbCollectorApp {
         self.adb_path_input = saved.adb_path.clone();
         self.scrcpy_path_input = saved.scrcpy_path.clone();
         self.log_dir_input = saved.log_dir.clone();
+        self.record_dir_input = saved.record_dir.clone();
         self.language_input = saved.language.clone();
         self.update_proxy_mode_input = saved.update_proxy.mode;
         self.update_proxy_url_input = saved.update_proxy.url.clone();
@@ -3624,6 +3842,7 @@ impl AdbCollectorApp {
         self.adb_path_input = self.config.adb_path.clone();
         self.scrcpy_path_input = self.config.scrcpy_path.clone();
         self.log_dir_input = self.config.log_dir.clone();
+        self.record_dir_input = self.config.record_dir.clone();
         self.language_input = self.config.language.clone();
         self.auto_update_input = self.config.auto_check_updates;
         self.update_proxy_mode_input = self.config.update_proxy.mode;
@@ -6224,6 +6443,7 @@ impl eframe::App for AdbCollectorApp {
         }
         self.sync_transfer_manager();
         self.handle_events();
+        self.poll_recording_events();
         self.poll_update_download_progress();
         if self.exit_after_update_apply {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -6233,7 +6453,7 @@ impl eframe::App for AdbCollectorApp {
         self.maybe_automatic_update_check(ctx);
         // Keep frames coming while the transfer queue drains so progress
         // stays live without user input (PRD §12).
-        if self.transfers.has_active() {
+        if self.transfers.has_active() || !self.recordings.is_empty() {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
 
@@ -6278,6 +6498,8 @@ impl eframe::App for AdbCollectorApp {
             });
 
         self.ui_settings_dialog(ctx);
+        self.ui_record_dialog(ctx);
+        self.ui_text_dialog(ctx);
         self.ui_new_display_dialog(ctx);
         self.ui_clear_confirm_dialog(ctx);
         self.ui_alias_dialog(ctx);
@@ -6291,12 +6513,14 @@ impl eframe::App for AdbCollectorApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.stop_all_recordings_for_shutdown();
         self.stop_all_collections_for_shutdown();
     }
 }
 
 impl Drop for AdbCollectorApp {
     fn drop(&mut self) {
+        self.stop_all_recordings_for_shutdown();
         self.stop_all_collections_for_shutdown();
     }
 }

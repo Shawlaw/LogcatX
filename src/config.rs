@@ -42,6 +42,10 @@ pub struct AppConfig {
     pub scrcpy_path: String,
     #[serde(default)]
     pub log_dir: String,
+    /// Folder where screen recordings are saved. Configurable per install;
+    /// every recording can still override the path from the start dialog.
+    #[serde(default)]
+    pub record_dir: String,
     #[serde(default = "default_app_log_max_size_mb")]
     pub app_log_max_size_mb: u32,
     #[serde(default)]
@@ -93,6 +97,7 @@ impl AppConfig {
                 .map(|path| fs_utils::display_path_string(&path))
                 .unwrap_or_default(),
             log_dir: fs_utils::display_path(&default_log_dir),
+            record_dir: fs_utils::display_path(&paths.exe_dir.join("recordings")),
             app_log_max_size_mb: default_app_log_max_size_mb(),
             language: i18n::detect_system_language(),
             device_aliases: BTreeMap::new(),
@@ -125,6 +130,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
     let mut normalized = config.clone();
     normalized.language = i18n::normalize_language_code(&normalized.language).to_owned();
     normalized.log_dir = fs_utils::display_path_string(&normalized.log_dir);
+    normalized.record_dir = fs_utils::display_path_string(&normalized.record_dir);
     normalized.adb_path = fs_utils::display_path_string(&normalized.adb_path);
     normalized.scrcpy_path = fs_utils::display_path_string(&normalized.scrcpy_path);
     if normalized.app_log_max_size_mb == 0 {
@@ -219,6 +225,12 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
         config.log_dir = defaults.log_dir;
     } else {
         config.log_dir = fs_utils::display_path_string(&config.log_dir);
+    }
+
+    if config.record_dir.trim().is_empty() {
+        config.record_dir = defaults.record_dir;
+    } else {
+        config.record_dir = fs_utils::display_path_string(&config.record_dir);
     }
 
     if config.app_log_max_size_mb == 0 {
@@ -462,6 +474,10 @@ mod tests {
         assert_eq!(config.adb_path, "C:/platform-tools/adb.exe");
         assert_eq!(config.language, "zh-CN");
         assert!(config.file_favorites.is_empty(), "new field defaults");
+        assert!(
+            config.record_dir.ends_with("recordings"),
+            "record_dir defaults next to the executable"
+        );
         assert!(config.auto_check_updates);
 
         // Saving migrates it in-memory then persists atomically (§38/§33);
@@ -482,6 +498,7 @@ mod tests {
         assert_eq!(config.language, "en");
         assert!(config.file_favorites.is_empty());
         assert!(config.device_aliases.is_empty());
+        assert!(config.record_dir.ends_with("recordings"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -540,6 +557,27 @@ mod tests {
     #[test]
     fn default_app_log_size_is_nonzero() {
         assert_eq!(default_app_log_max_size_mb(), 2);
+    }
+
+    #[test]
+    fn record_dir_round_trips_and_empty_values_fall_back_to_default() {
+        let (dir, paths) = scratch_paths("record-dir");
+        let mut config = AppConfig::with_defaults(&paths);
+        config.record_dir = "D:/Recordings/LogcatX".to_owned();
+        save_config(&paths.config_path, &config).expect("save custom record dir");
+        let loaded = load_config(&paths.config_path, &paths).expect("reload custom record dir");
+        assert!(
+            loaded
+                .record_dir
+                .replace('\\', "/")
+                .ends_with("Recordings/LogcatX")
+        );
+
+        config.record_dir.clear();
+        save_config(&paths.config_path, &config).expect("save empty record dir");
+        let loaded = load_config(&paths.config_path, &paths).expect("reload empty record dir");
+        assert!(loaded.record_dir.ends_with("recordings"));
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

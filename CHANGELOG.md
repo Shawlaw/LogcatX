@@ -4,6 +4,18 @@
 
 - English changelog: [`CHANGELOG.en.md`](./CHANGELOG.en.md)
 
+## [0.9.3] - 2026-11-06
+
+### 新增
+- 设备录屏：设备「更多」菜单支持开始/停止录屏并保存到指定路径。快速录制使用 `adb shell screenrecord`（最长 180 秒，停止后自动拉回电脑并清理设备临时文件）；长录屏使用隐藏窗口的 scrcpy（无 3 分钟限制，停止时正常收尾 MP4）。设置页新增默认录屏保存目录
+- 向指定设备输入文本：支持多行文本，换行/制表符转为按键；ASCII 走 `input text`，设备拒绝非 ASCII 时自动回退为设备剪贴板 + 粘贴键（覆盖设备剪贴板最后一段文本）
+- 双向文本剪贴板：设备「更多」菜单可把电脑剪贴板写入设备剪贴板，或把设备剪贴板读回电脑。内置约 6 KB 的 shell 辅助 dex（自动推送到 `/data/local/tmp`，不安装 APK、不常驻、不修改输入法），方案与 scrcpy 的 shell UID 访问剪贴板一致
+
+### 说明
+- 录屏与剪贴板功能只使用文本/视频文件，不新增后台轮询；剪贴板为手动双向操作
+- Android Studio 的设备 Logcat 录屏同样有 3 分钟限制；其模拟器 Extended Controls 的 30 分钟录制是模拟器专用格式。需要长录屏时请使用本应用的长录屏模式
+- 详细限制与安全说明见 [`docs/recording-and-clipboard.md`](./docs/recording-and-clipboard.md)
+
 ## [0.9.2] - 2026-10-28
 
 ### 修复

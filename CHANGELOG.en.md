@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.9.3] - 2026-11-06
+
+### Added
+- Screen recording: the device More menu can start/stop a recording and save it to a chosen path. Quick mode uses `adb shell screenrecord` (up to 180 s; the MP4 is pulled automatically and the device temp file is removed). Long mode runs scrcpy with a hidden window (no 3-minute limit; the MP4 is finalized on stop). Settings now has a default recordings folder
+- Send text to a selected device: multi-line input, with new lines/tabs sent as key events. ASCII uses `input text`; when the device rejects non-ASCII, LogcatX falls back to writing the segment to the device clipboard and sending PASTE (the last segment remains in the device clipboard)
+- Two-way text clipboard: the device More menu can write the PC clipboard to the device clipboard or read the device clipboard back to the PC. A ~6 KB shell helper dex is pushed to `/data/local/tmp` on demand (no APK install, no background service, no IME changes); the approach matches scrcpy's shell-UID clipboard access
+
+### Notes
+- Recording and clipboard actions do not add background polling; clipboard operations are manual two-way actions
+- Android Studio's device Logcat screen recorder is also limited to three minutes; its emulator Extended Controls 30-minute recording is emulator-specific. Use this app's long recording mode for longer sessions
+- See [`docs/recording-and-clipboard.md`](./docs/recording-and-clipboard.md) for limitations and the security model
+
 ## [0.9.2] - 2026-10-28
 
 ### Fixed

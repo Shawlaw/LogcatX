@@ -10,13 +10,14 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 - [中文 README](./README.md)
 - [中文更新日志](./CHANGELOG.md)
 - [Update signing & release guide](./docs/update-signing.md) (中文)
+- [Recording, text input, and clipboard](./docs/recording-and-clipboard.md) (中文)
 - [MIT License](./LICENSE)
 
 ## Release target
 
 - platform: **Windows**
 - distribution: **portable zip** (ships the app plus an update helper; in-app updates included)
-- current milestone: **v0.9.2**
+- current milestone: **v0.9.3**
 
 ## Screenshots
 
@@ -46,6 +47,9 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - open a device shell directly from the device-row menu
 - edit aliases, pin devices, and open the device log folder or latest log file from the device-row menu
 - capture the current device screen from the device-row menu and copy it to the Windows clipboard as an image
+- record the device screen: quick `screenrecord` clips (up to 180 s, pulled back automatically) or long scrcpy recordings with a hidden window (no three-minute limit), saved to a chosen path
+- send multi-line text to a selected device: ASCII uses `input text`; non-ASCII falls back to the device clipboard plus PASTE when the device rejects it
+- manual two-way text clipboard: write the PC clipboard to the device or read the device clipboard back; a ~6 KB shell helper dex is pushed on demand (no APK install, no background service)
 - mirror a device with scrcpy or create an independent virtual display from the device-row menu
 - let a virtual display follow the primary display or use a portrait `720×1600` / `320 DPI` configuration, with a package-name field and filter for the launch target
 - inspect the current foreground app and run force-stop, clear-data, or uninstall shortcuts from the device-row menu

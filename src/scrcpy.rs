@@ -1,7 +1,10 @@
+use crate::managed_child::ManagedChild;
 use std::{
     cmp::Ordering,
-    process::{Command, Output},
+    path::Path,
+    process::{Command, Output, Stdio},
 };
+use tempfile::NamedTempFile;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScrcpyVersion {
@@ -14,6 +17,15 @@ impl ScrcpyVersion {
     pub fn supports_new_display(self) -> bool {
         self >= Self {
             major: 3,
+            minor: 0,
+            patch: 0,
+        }
+    }
+
+    /// `--no-playback` and `--record` are available from scrcpy 2.x.
+    pub fn supports_recording(self) -> bool {
+        self >= Self {
+            major: 2,
             minor: 0,
             patch: 0,
         }
@@ -134,6 +146,71 @@ pub fn launch(
         .map_err(|err| format!("Failed to start scrcpy for {serial}: {err}"))
 }
 
+/// A headless scrcpy process recording the device screen to a local MP4.
+///
+/// scrcpy still creates its SDL window in `--no-playback` mode; closing that
+/// window is what finalizes the MP4 cleanly. The caller hides it right after
+/// launch and posts `WM_CLOSE` on stop.
+pub struct RecordingProcess {
+    pub child: ManagedChild,
+    pub pid: u32,
+    /// Captured stdout/stderr; read after the child exits for diagnostics.
+    pub log: NamedTempFile,
+}
+
+pub fn spawn_recording(
+    scrcpy_path: &str,
+    adb_path: &str,
+    serial: &str,
+    output_path: &Path,
+    bitrate_mbps: u32,
+) -> Result<RecordingProcess, String> {
+    let log =
+        NamedTempFile::new().map_err(|err| format!("Failed to create a scrcpy log file: {err}"))?;
+    let stdout = log
+        .as_file()
+        .try_clone()
+        .map_err(|err| format!("Failed to prepare the scrcpy log file: {err}"))?;
+    let stderr = log
+        .as_file()
+        .try_clone()
+        .map_err(|err| format!("Failed to prepare the scrcpy log file: {err}"))?;
+
+    let mut command =
+        build_recording_command(scrcpy_path, adb_path, serial, output_path, bitrate_mbps);
+    command
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+    let child = command
+        .spawn()
+        .map_err(|err| format!("Failed to start scrcpy recording for {serial}: {err}"))?;
+    let pid = child.id();
+
+    Ok(RecordingProcess {
+        child: ManagedChild::new(child),
+        pid,
+        log,
+    })
+}
+
+fn build_recording_command(
+    scrcpy_path: &str,
+    adb_path: &str,
+    serial: &str,
+    output_path: &Path,
+    bitrate_mbps: u32,
+) -> Command {
+    let mut command = scrcpy_command(scrcpy_path);
+    command
+        .args(["--serial", serial])
+        .env("ADB", adb_path)
+        .args(["--no-playback", "--no-audio"])
+        .arg(format!("--record={}", output_path.display()))
+        .args(["--record-format=mp4"])
+        .arg(format!("--video-bit-rate={bitrate_mbps}M"));
+    command
+}
+
 fn build_command(scrcpy_path: &str, adb_path: &str, serial: &str, mode: LaunchMode) -> Command {
     let mut command = scrcpy_command(scrcpy_path);
     command.args(["--serial", serial]).env("ADB", adb_path);
@@ -234,7 +311,8 @@ impl EmptyStringExt for str {
 #[cfg(test)]
 mod tests {
     use super::{
-        LaunchMode, NewDisplayOptions, ScrcpyVersion, build_command, parse_scrcpy_version,
+        LaunchMode, NewDisplayOptions, ScrcpyVersion, build_command, build_recording_command,
+        parse_scrcpy_version,
     };
     use std::ffi::OsStr;
 
@@ -255,6 +333,57 @@ mod tests {
                 minor: 0,
                 patch: 0,
             })
+        );
+    }
+
+    #[test]
+    fn recording_requires_scrcpy_two_or_later() {
+        assert!(
+            !ScrcpyVersion {
+                major: 1,
+                minor: 25,
+                patch: 0,
+            }
+            .supports_recording()
+        );
+        assert!(
+            ScrcpyVersion {
+                major: 2,
+                minor: 0,
+                patch: 0,
+            }
+            .supports_recording()
+        );
+    }
+
+    #[test]
+    fn recording_command_is_headless_and_records_to_the_requested_mp4() {
+        let command = build_recording_command(
+            "scrcpy",
+            "C:/Android/platform-tools/adb.exe",
+            "192.168.0.8:5555",
+            std::path::Path::new(r"C:\Recordings\pixel.mp4"),
+            12,
+        );
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            vec![
+                OsStr::new("--serial"),
+                OsStr::new("192.168.0.8:5555"),
+                OsStr::new("--no-playback"),
+                OsStr::new("--no-audio"),
+                OsStr::new(r"--record=C:\Recordings\pixel.mp4"),
+                OsStr::new("--record-format=mp4"),
+                OsStr::new("--video-bit-rate=12M"),
+            ]
+        );
+        assert_eq!(
+            command
+                .get_envs()
+                .find(|(name, _)| *name == OsStr::new("ADB"))
+                .and_then(|(_, value)| value),
+            Some(OsStr::new("C:/Android/platform-tools/adb.exe"))
         );
     }
 

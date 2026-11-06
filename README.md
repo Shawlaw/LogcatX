@@ -12,6 +12,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 - [更新日志](./CHANGELOG.md)
 - [English Changelog](./CHANGELOG.en.md)
 - [应用更新签名与发版说明](./docs/update-signing.md)
+- [录屏、文本输入与剪贴板说明](./docs/recording-and-clipboard.md)
 - [MIT License](./LICENSE)
 - [配置示例](./config.example.json)
 - [Windows 打包脚本](./scripts/package_windows_release.sh)
@@ -20,7 +21,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 
 - 平台：**Windows**
 - 分发方式：**绿色版 zip**（内含主程序与更新助手，支持应用内检查并安装更新）
-- 当前里程碑：**v0.9.2**
+- 当前里程碑：**v0.9.3**
 
 ## 运行截图
 
@@ -50,6 +51,9 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 - 支持从设备列表行菜单直接唤起指定设备的 Shell
 - 支持从设备列表行菜单编辑别名、置顶、打开日志目录和最新日志文件
 - 支持从设备列表行菜单将当前屏幕截图直接复制为电脑剪切板图片
+- 支持设备录屏：快速录制（`screenrecord`，最长 180 秒）或长录屏（隐藏窗口的 scrcpy，无 3 分钟限制），停止后保存到指定路径，快速录制会自动拉回电脑
+- 支持向指定设备输入多行文本：ASCII 走 `input text`，设备拒绝非 ASCII 时自动回退为剪贴板粘贴
+- 支持手动双向文本剪贴板：电脑剪贴板写入设备、设备剪贴板读回电脑；内置约 6 KB 的 shell 辅助 dex，不安装 APK、不常驻
 - 支持从设备列表行菜单通过 scrcpy 镜像设备画面，或创建独立虚拟屏幕
 - 新虚拟屏幕可跟随主屏，或自定义竖屏 `720×1600` / `320 DPI`，并支持填写或筛选启动 App 包名
 - 支持识别当前前台 App，并提供强停、清除数据、卸载等快捷动作

@@ -1,6 +1,6 @@
 [package]
 name = "logcatx"
-version = "0.9.2"
+version = "0.9.3"
 edition = "2024"
 description = "LogcatX - Windows-first desktop GUI tool for collecting adb logcat from multiple devices"
 default-run = "logcatx"
@@ -32,6 +32,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_System_JobObjects",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]
