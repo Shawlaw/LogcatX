@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
-## [0.9.3] - 2026-11-06
+## [0.9.3] - 2026-11-08
 
 ### Added
 - Screen recording: the device More menu can start/stop a recording and save it to a chosen path. Quick mode uses `adb shell screenrecord` (up to 30 minutes on Android 14+, 180 s on Android 13 and older; the dialog probes the device, pulls the MP4 automatically, and removes the device temp file). Long mode runs scrcpy with a hidden window (no 3-minute limit; the MP4 is finalized on stop). Recordings default to a `recordings` subfolder inside the device log directory; Settings can override it. Log management now shows recording storage and supports age-based cleanup (all/7/30/90 days) with active recordings protected; log stats and log cleanup exclude the recordings folder
