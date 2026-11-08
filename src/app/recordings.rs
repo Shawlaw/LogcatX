@@ -175,7 +175,11 @@ impl AdbCollectorApp {
                     ));
                 }
                 self.show_recording_cleanup = false;
-                self.set_info(message);
+                if outcome.failed_paths.is_empty() {
+                    self.set_info(message);
+                } else {
+                    self.set_error(message);
+                }
                 self.refresh_recording_size();
             }
             Err(err) => {
