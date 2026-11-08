@@ -90,17 +90,39 @@ pub fn file_size(path: &Path) -> Result<u64, String> {
     }
 }
 
+/// Default recordings folder under the device-log directory.
+pub fn default_record_dir(log_dir: &Path) -> PathBuf {
+    log_dir.join("recordings")
+}
+
 pub fn scan_log_storage(base_dir: &Path) -> Result<LogStorageReport, String> {
+    scan_log_storage_excluding(base_dir, None)
+}
+
+/// Scan device-log storage while ignoring one directory (normally the
+/// `recordings` folder inside the log directory). Recording files are not
+/// logcat output and must not inflate the device-log usage figures.
+pub fn scan_log_storage_excluding(
+    base_dir: &Path,
+    excluded_dir: Option<&Path>,
+) -> Result<LogStorageReport, String> {
     if !base_dir.exists() {
         return Ok(LogStorageReport::default());
     }
 
+    let excluded_dir = excluded_dir.map(normalize_path);
     let mut report = LogStorageReport::default();
     let mut root_usage = DeviceLogUsage::default();
     for entry in fs::read_dir(base_dir)
         .map_err(|err| format!("Failed to read directory {}: {err}", base_dir.display()))?
     {
         let entry = entry.map_err(|err| format!("Failed to read directory entry: {err}"))?;
+        if excluded_dir
+            .as_ref()
+            .is_some_and(|excluded| normalize_path(&entry.path()) == *excluded)
+        {
+            continue;
+        }
         let metadata = entry.metadata().map_err(|err| {
             format!(
                 "Failed to read metadata for {}: {err}",
@@ -608,7 +630,7 @@ mod tests {
         CleanupFilter, build_powershell_shell_args, build_windows_terminal_shell_args,
         cleanup_matching_logs, device_log_dir, display_path_string, format_bytes,
         preview_log_cleanup, rename_device_log_dir, sanitize_serial, scan_log_storage,
-        session_log_path,
+        scan_log_storage_excluding, session_log_path,
     };
     use std::{
         fs,
@@ -747,6 +769,31 @@ mod tests {
                 .log_file_count,
             1
         );
+
+        let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn scan_log_storage_can_exclude_the_recordings_directory() {
+        let base_dir = unique_temp_dir("storage-recordings");
+        fs::create_dir_all(base_dir.join("Pixel_8")).expect("create Pixel directory");
+        fs::create_dir_all(base_dir.join("recordings")).expect("create recordings directory");
+        fs::write(base_dir.join("Pixel_8").join("first.log"), b"abc").expect("write log");
+        fs::write(base_dir.join("recordings").join("clip.mp4"), b"1234567890")
+            .expect("write recording");
+
+        let all = scan_log_storage(&base_dir).expect("scan all");
+        assert_eq!(all.total_bytes, 13);
+        assert_eq!(all.device_directories.len(), 2);
+
+        let recordings = base_dir.join("recordings");
+        let filtered = scan_log_storage_excluding(&base_dir, Some(&recordings))
+            .expect("scan excluding recordings");
+        assert_eq!(filtered.total_bytes, 3);
+        assert_eq!(filtered.log_bytes, 3);
+        assert_eq!(filtered.log_file_count, 1);
+        assert_eq!(filtered.device_directories.len(), 1);
+        assert_eq!(filtered.device_directories[0].directory_name, "Pixel_8");
 
         let _ = fs::remove_dir_all(&base_dir);
     }

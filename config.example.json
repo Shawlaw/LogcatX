@@ -2,7 +2,7 @@
   "adb_path": "adb",
   "scrcpy_path": "",
   "log_dir": ".\\logs",
-  "record_dir": ".\\recordings",
+  "record_dir": ".\\logs\\recordings",
   "app_log_max_size_mb": 2,
   "language": "en",
   "auto_check_updates": true,

@@ -204,7 +204,7 @@
     "settings.scrcpy.download_link": "Open official scrcpy releases",
     "settings.log_dir": "Device log directory",
     "settings.record_dir": "Screen recording folder",
-    "settings.record_dir.hint": "Default folder for new recordings. Each recording can still choose a different file.",
+    "settings.record_dir.hint": "Defaults to a `recordings` subfolder inside the device log directory. Each recording can still choose a different file.",
     "settings.language": "Interface language",
     "settings.language.help": "On first run the default is chosen from the system language. Later launches follow the saved config.",
     "settings.open_config_dir": "Open config folder",

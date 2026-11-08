@@ -408,7 +408,12 @@ impl AdbCollectorApp {
     fn record_directory(&self) -> PathBuf {
         let configured = self.config.record_dir.trim();
         if configured.is_empty() {
-            self.app_paths.exe_dir.join("recordings")
+            let log_dir = self.config.log_dir.trim();
+            if log_dir.is_empty() {
+                fs_utils::default_record_dir(&self.app_paths.exe_dir.join("logs"))
+            } else {
+                fs_utils::default_record_dir(Path::new(log_dir))
+            }
         } else {
             PathBuf::from(configured)
         }

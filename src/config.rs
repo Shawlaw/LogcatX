@@ -97,7 +97,7 @@ impl AppConfig {
                 .map(|path| fs_utils::display_path_string(&path))
                 .unwrap_or_default(),
             log_dir: fs_utils::display_path(&default_log_dir),
-            record_dir: fs_utils::display_path(&paths.exe_dir.join("recordings")),
+            record_dir: fs_utils::display_path(&fs_utils::default_record_dir(&default_log_dir)),
             app_log_max_size_mb: default_app_log_max_size_mb(),
             language: i18n::detect_system_language(),
             device_aliases: BTreeMap::new(),
@@ -228,7 +228,9 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
     }
 
     if config.record_dir.trim().is_empty() {
-        config.record_dir = defaults.record_dir;
+        config.record_dir = fs_utils::display_path(&fs_utils::default_record_dir(
+            PathBuf::from(&config.log_dir).as_path(),
+        ));
     } else {
         config.record_dir = fs_utils::display_path_string(&config.record_dir);
     }
@@ -475,8 +477,11 @@ mod tests {
         assert_eq!(config.language, "zh-CN");
         assert!(config.file_favorites.is_empty(), "new field defaults");
         assert!(
-            config.record_dir.ends_with("recordings"),
-            "record_dir defaults next to the executable"
+            config
+                .record_dir
+                .replace('\\', "/")
+                .ends_with("logs/recordings"),
+            "record_dir defaults inside the device log directory"
         );
         assert!(config.auto_check_updates);
 
@@ -498,7 +503,12 @@ mod tests {
         assert_eq!(config.language, "en");
         assert!(config.file_favorites.is_empty());
         assert!(config.device_aliases.is_empty());
-        assert!(config.record_dir.ends_with("recordings"));
+        assert!(
+            config
+                .record_dir
+                .replace('\\', "/")
+                .ends_with("logs/recordings")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -576,7 +586,12 @@ mod tests {
         config.record_dir.clear();
         save_config(&paths.config_path, &config).expect("save empty record dir");
         let loaded = load_config(&paths.config_path, &paths).expect("reload empty record dir");
-        assert!(loaded.record_dir.ends_with("recordings"));
+        assert!(
+            loaded
+                .record_dir
+                .replace('\\', "/")
+                .ends_with("logs/recordings")
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

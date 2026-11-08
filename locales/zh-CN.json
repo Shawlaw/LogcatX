@@ -204,7 +204,7 @@
     "settings.scrcpy.download_link": "打开 scrcpy 官方发布页",
     "settings.log_dir": "设备日志目录",
     "settings.record_dir": "录屏保存目录",
-    "settings.record_dir.hint": "新录屏的默认保存目录；每次开始录屏时仍可另选文件。",
+    "settings.record_dir.hint": "默认使用“设备日志目录\\recordings”子目录；每次开始录屏时仍可另选文件。",
     "settings.language": "界面语言",
     "settings.language.help": "首次启动时会按系统语言自动选择默认值，后续启动则跟随已保存配置。",
     "settings.open_config_dir": "打开配置目录",

@@ -2494,8 +2494,13 @@ impl AdbCollectorApp {
                 self.record_dir_input = fs_utils::display_path(path.as_path());
             }
             if ui.button(self.tr("settings.use_default")).clicked() {
+                let log_dir = if self.log_dir_input.trim().is_empty() {
+                    self.app_paths.exe_dir.join("logs")
+                } else {
+                    PathBuf::from(self.log_dir_input.trim())
+                };
                 self.record_dir_input =
-                    fs_utils::display_path(&self.app_paths.exe_dir.join("recordings"));
+                    fs_utils::display_path(&fs_utils::default_record_dir(&log_dir));
             }
         });
         ui.small(self.tr("settings.record_dir.hint"));
@@ -3785,8 +3790,13 @@ impl AdbCollectorApp {
             }
         };
 
-        let record_dir = if candidate.record_dir.trim().is_empty() {
-            self.app_paths.exe_dir.join("recordings")
+        let new_log_dir = PathBuf::from(candidate.log_dir.trim());
+        let previous_default_record_dir =
+            fs_utils::default_record_dir(Path::new(self.config.log_dir.as_str()));
+        let record_dir = if candidate.record_dir.trim().is_empty()
+            || path_matches(&candidate.record_dir, &previous_default_record_dir)
+        {
+            fs_utils::default_record_dir(&new_log_dir)
         } else {
             PathBuf::from(candidate.record_dir.trim())
         };
@@ -3994,9 +4004,12 @@ impl AdbCollectorApp {
         self.log_storage_loading = true;
         let tx = self.tx.clone();
         let log_dir = self.config.log_dir.clone();
+        let record_dir = self.config.record_dir.clone();
 
         thread::spawn(move || {
-            let result = fs_utils::scan_log_storage(PathBuf::from(log_dir).as_path());
+            let log_dir = PathBuf::from(log_dir);
+            let record_dir = (!record_dir.trim().is_empty()).then(|| PathBuf::from(record_dir));
+            let result = fs_utils::scan_log_storage_excluding(&log_dir, record_dir.as_deref());
             let _ = tx.send(AppEvent::LogStorageRefreshed(result));
         });
     }
@@ -6684,6 +6697,22 @@ fn wait_for_process_exit(child: &SharedChild) -> (Option<i32>, Option<String>) {
     }
 }
 
+/// Compare the user-edited recording path with the previous default. Windows
+/// paths are case-insensitive, so a plain `Path` comparison is insufficient.
+fn path_matches(value: &str, path: &Path) -> bool {
+    let value = value.trim();
+    if value.is_empty() {
+        return false;
+    }
+    let normalize = |value: &str| {
+        value
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+    };
+    normalize(&fs_utils::display_path_string(value)) == normalize(&fs_utils::display_path(path))
+}
+
 fn format_system_time(time: std::time::SystemTime) -> String {
     let datetime: chrono::DateTime<chrono::Local> = time.into();
     datetime.format("%H:%M:%S").to_string()
@@ -7010,6 +7039,22 @@ mod tests {
 
         assert_eq!(payload.apk_paths.len(), 5);
         assert_eq!(payload.file_paths.len(), 4);
+    }
+
+    #[test]
+    fn path_matches_handles_case_separators_and_empty_values() {
+        assert!(super::path_matches(
+            r"c:/Logs/recordings/",
+            std::path::Path::new(r"C:\Logs\recordings")
+        ));
+        assert!(!super::path_matches(
+            "",
+            std::path::Path::new(r"C:\Logs\recordings")
+        ));
+        assert!(!super::path_matches(
+            r"C:\Logs\other",
+            std::path::Path::new(r"C:\Logs\recordings")
+        ));
     }
 
     #[test]
