@@ -48,6 +48,10 @@ impl AdbCollectorApp {
             self.show_settings = true;
             return;
         }
+        if self.recording_cleanup_in_progress {
+            self.set_error(self.tr("recordings_cleanup.busy"));
+            return;
+        }
         let Some(device) = self.find_device(&device_id).cloned() else {
             return;
         };
@@ -258,6 +262,9 @@ impl AdbCollectorApp {
     }
 
     fn start_recording(&mut self, device_id: &str) -> Result<(), String> {
+        if self.recording_cleanup_in_progress {
+            return Err(self.tr("recordings_cleanup.busy"));
+        }
         let Some(serial) = self.device_primary_transport_serial(device_id) else {
             return Err("The selected device has no usable ADB transport.".to_owned());
         };
@@ -371,6 +378,7 @@ impl AdbCollectorApp {
                             ));
                         }
                     }
+                    self.refresh_recording_size();
                 }
             }
         }
@@ -405,7 +413,7 @@ impl AdbCollectorApp {
         self.recording_stopping.clear();
     }
 
-    fn record_directory(&self) -> PathBuf {
+    pub(super) fn record_directory(&self) -> PathBuf {
         let configured = self.config.record_dir.trim();
         if configured.is_empty() {
             let log_dir = self.config.log_dir.trim();

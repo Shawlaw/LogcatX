@@ -171,6 +171,12 @@ pub enum AppEvent {
         result: Result<String, String>,
     },
     LogStorageRefreshed(Result<fs_utils::LogStorageReport, String>),
+    RecordingStorageRefreshed(Result<fs_utils::RecordingStorageReport, String>),
+    RecordingCleanupPreviewed {
+        generation: u64,
+        result: Result<fs_utils::CleanupPreview, String>,
+    },
+    RecordingCleanupFinished(Result<fs_utils::CleanupOutcome, String>),
     CleanupPreviewed {
         request_id: u64,
         filter: fs_utils::CleanupFilter,

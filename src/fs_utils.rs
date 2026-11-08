@@ -54,6 +54,16 @@ pub struct CleanupOutcome {
     pub failed_paths: Vec<String>,
 }
 
+/// Recording files directly under the configured recordings folder.
+#[derive(Clone, Debug, Default)]
+pub struct RecordingStorageReport {
+    pub root: PathBuf,
+    pub total_bytes: u64,
+    pub file_count: usize,
+    pub oldest_modified: Option<SystemTime>,
+    pub newest_modified: Option<SystemTime>,
+}
+
 pub fn device_log_dir(base_dir: &Path, serial: &str, alias: Option<&str>) -> PathBuf {
     let directory_name = alias
         .map(str::trim)
@@ -263,6 +273,137 @@ pub fn display_path_string(path: &str) -> String {
 
 pub fn normalize_display_path(path: &Path) -> PathBuf {
     desktop_fs::normalize_display_path(path)
+}
+
+/// List `.mp4` files directly inside the recordings folder. The scanner is
+/// deliberately non-recursive: the app writes a flat folder, and limiting
+/// cleanup to top-level files avoids touching arbitrary user directories.
+struct RecordingFile {
+    path: PathBuf,
+    bytes: u64,
+    modified: SystemTime,
+}
+
+fn recording_files(root: &Path) -> Result<Vec<RecordingFile>, String> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut files = Vec::new();
+    for entry in fs::read_dir(root)
+        .map_err(|err| format!("Failed to read directory {}: {err}", root.display()))?
+    {
+        let entry = entry.map_err(|err| format!("Failed to read directory entry: {err}"))?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|err| format!("Failed to read metadata for {}: {err}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() || !is_mp4_file(&path) {
+            continue;
+        }
+        let modified = metadata
+            .modified()
+            .map_err(|err| format!("Failed to read modified time for {}: {err}", path.display()))?;
+        files.push(RecordingFile {
+            path,
+            bytes: metadata.len(),
+            modified,
+        });
+    }
+    Ok(files)
+}
+
+fn is_mp4_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("mp4"))
+}
+
+pub fn scan_recordings(root: &Path) -> Result<RecordingStorageReport, String> {
+    let files = recording_files(root)?;
+    let mut report = RecordingStorageReport {
+        root: root.to_path_buf(),
+        ..Default::default()
+    };
+    for file in files {
+        report.total_bytes += file.bytes;
+        report.file_count += 1;
+        report.oldest_modified = Some(
+            report
+                .oldest_modified
+                .map(|current| current.min(file.modified))
+                .unwrap_or(file.modified),
+        );
+        report.newest_modified = Some(
+            report
+                .newest_modified
+                .map(|current| current.max(file.modified))
+                .unwrap_or(file.modified),
+        );
+    }
+    Ok(report)
+}
+
+pub fn preview_recording_cleanup(
+    root: &Path,
+    older_than: Option<SystemTime>,
+    protected_paths: &[PathBuf],
+) -> Result<CleanupPreview, String> {
+    let protected: HashSet<PathBuf> = protected_paths
+        .iter()
+        .map(|path| normalize_path(path))
+        .collect();
+    let mut preview = CleanupPreview::default();
+    for file in recording_files(root)? {
+        if older_than.is_some_and(|cutoff| file.modified >= cutoff) {
+            continue;
+        }
+        if protected.contains(&normalize_path(&file.path)) {
+            preview.protected_files += 1;
+            preview.protected_bytes += file.bytes;
+            continue;
+        }
+        preview.matching_files += 1;
+        preview.matching_bytes += file.bytes;
+    }
+    Ok(preview)
+}
+
+pub fn cleanup_recordings(
+    root: &Path,
+    older_than: Option<SystemTime>,
+    protected_paths: &[PathBuf],
+) -> Result<CleanupOutcome, String> {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let protected: HashSet<PathBuf> = protected_paths
+        .iter()
+        .map(|path| normalize_path(path))
+        .collect();
+    let mut outcome = CleanupOutcome::default();
+    for file in recording_files(root)? {
+        if older_than.is_some_and(|cutoff| file.modified >= cutoff) {
+            continue;
+        }
+        if protected.contains(&normalize_path(&file.path)) {
+            continue;
+        }
+        if !path_stays_within(&canonical_root, &file.path) {
+            log::warn!(
+                "Skipping recording cleanup candidate outside the recordings root: {}",
+                file.path.display()
+            );
+            continue;
+        }
+        match fs::remove_file(&file.path) {
+            Ok(()) => {
+                outcome.deleted_files += 1;
+                outcome.freed_bytes += file.bytes;
+            }
+            Err(err) => outcome
+                .failed_paths
+                .push(format!("{}: {err}", file.path.display())),
+        }
+    }
+    Ok(outcome)
 }
 
 fn accumulate_log_usage(path: &Path, usage: &mut DeviceLogUsage) -> Result<(), String> {
@@ -628,9 +769,10 @@ fn quote_powershell_literal(value: &str) -> String {
 mod tests {
     use super::{
         CleanupFilter, build_powershell_shell_args, build_windows_terminal_shell_args,
-        cleanup_matching_logs, device_log_dir, display_path_string, format_bytes,
-        preview_log_cleanup, rename_device_log_dir, sanitize_serial, scan_log_storage,
-        scan_log_storage_excluding, session_log_path,
+        cleanup_matching_logs, cleanup_recordings, device_log_dir, display_path_string,
+        format_bytes, preview_log_cleanup, preview_recording_cleanup, rename_device_log_dir,
+        sanitize_serial, scan_log_storage, scan_log_storage_excluding, scan_recordings,
+        session_log_path,
     };
     use std::{
         fs,
@@ -796,6 +938,46 @@ mod tests {
         assert_eq!(filtered.device_directories[0].directory_name, "Pixel_8");
 
         let _ = fs::remove_dir_all(&base_dir);
+    }
+
+    #[test]
+    fn recording_management_ignores_non_mp4_and_protects_active_files() {
+        let root = unique_temp_dir("recordings-manage");
+        fs::create_dir_all(root.join("nested")).expect("create nested directory");
+        let active = root.join("active.mp4");
+        let stale = root.join("stale.MP4");
+        fs::write(&active, b"12345").expect("write active");
+        fs::write(&stale, b"123456").expect("write stale");
+        fs::write(root.join("notes.txt"), b"ignore").expect("write notes");
+        fs::write(root.join("nested").join("nested.mp4"), b"ignore")
+            .expect("write nested recording");
+
+        let report = scan_recordings(&root).expect("scan recordings");
+        assert_eq!(report.file_count, 2);
+        assert_eq!(report.total_bytes, 11);
+        assert!(report.oldest_modified.is_some());
+        assert!(report.newest_modified.is_some());
+
+        let cutoff = SystemTime::now() + Duration::from_secs(60);
+        let protected = vec![active.clone()];
+        let preview =
+            preview_recording_cleanup(&root, Some(cutoff), &protected).expect("preview recordings");
+        assert_eq!(preview.matching_files, 1);
+        assert_eq!(preview.matching_bytes, 6);
+        assert_eq!(preview.protected_files, 1);
+        assert_eq!(preview.protected_bytes, 5);
+
+        let outcome =
+            cleanup_recordings(&root, Some(cutoff), &protected).expect("cleanup recordings");
+        assert_eq!(outcome.deleted_files, 1);
+        assert_eq!(outcome.freed_bytes, 6);
+        assert!(outcome.failed_paths.is_empty());
+        assert!(active.exists(), "active recording is protected");
+        assert!(!stale.exists(), "stale recording is deleted");
+        assert!(root.join("notes.txt").exists());
+        assert!(root.join("nested").join("nested.mp4").exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

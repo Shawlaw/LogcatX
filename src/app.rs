@@ -14,6 +14,7 @@ mod connection;
 mod device_tools;
 mod files;
 mod record;
+mod recordings;
 mod text_menu;
 use chrono::{Local, TimeZone};
 use desktop_updater::{CheckResult, DownloadedUpdate, UpdateCandidate};
@@ -131,6 +132,14 @@ enum CleanupTimeFilter {
     BeforeDate,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordingCleanupAge {
+    All,
+    OlderThan7Days,
+    OlderThan30Days,
+    OlderThan90Days,
+}
+
 pub struct AppBootstrap {
     pub app_paths: AppPaths,
     pub config: AppConfig,
@@ -145,6 +154,14 @@ pub struct AdbCollectorApp {
     devices: Vec<DeviceEntry>,
     log_storage: fs_utils::LogStorageReport,
     log_storage_loading: bool,
+    recording_storage: fs_utils::RecordingStorageReport,
+    recording_storage_loading: bool,
+    show_recording_cleanup: bool,
+    recording_cleanup_age: RecordingCleanupAge,
+    recording_cleanup_preview: Option<fs_utils::CleanupPreview>,
+    recording_cleanup_preview_generation: u64,
+    recording_cleanup_preview_loading: bool,
+    recording_cleanup_in_progress: bool,
     status: Option<StatusMessage>,
     last_error: Option<StatusMessage>,
     status_log: Vec<StatusMessage>,
@@ -381,6 +398,14 @@ impl AdbCollectorApp {
             devices: Vec::new(),
             log_storage: fs_utils::LogStorageReport::default(),
             log_storage_loading: false,
+            recording_storage: fs_utils::RecordingStorageReport::default(),
+            recording_storage_loading: false,
+            show_recording_cleanup: false,
+            recording_cleanup_age: RecordingCleanupAge::All,
+            recording_cleanup_preview: None,
+            recording_cleanup_preview_generation: 0,
+            recording_cleanup_preview_loading: false,
+            recording_cleanup_in_progress: false,
             status: None,
             last_error: None,
             status_log: Vec::new(),
@@ -530,6 +555,7 @@ impl AdbCollectorApp {
         if !app.require_initial_setup {
             app.refresh_devices();
             app.refresh_log_size();
+            app.refresh_recording_size();
         } else if let Some(err) = bootstrap.startup_error {
             app.set_error(app.tr_args("status.config_load_error", &[("error", err)]));
         } else if !app.adb_path_input.trim().is_empty() {
@@ -613,6 +639,19 @@ impl AdbCollectorApp {
                         }
                         Err(err) => self.set_error(err),
                     }
+                }
+                AppEvent::RecordingStorageRefreshed(result) => {
+                    self.recording_storage_loading = false;
+                    match result {
+                        Ok(report) => self.recording_storage = report,
+                        Err(err) => self.set_error(err),
+                    }
+                }
+                AppEvent::RecordingCleanupPreviewed { generation, result } => {
+                    self.handle_recording_cleanup_previewed(generation, result);
+                }
+                AppEvent::RecordingCleanupFinished(result) => {
+                    self.handle_recording_cleanup_finished(result);
                 }
                 AppEvent::CleanupPreviewed {
                     request_id,
@@ -2158,6 +2197,7 @@ impl AdbCollectorApp {
                 }
                 if ui.button(self.tr("toolbar.refresh_size")).clicked() {
                     self.refresh_log_size();
+                    self.refresh_recording_size();
                 }
                 if ui.button(self.tr("toolbar.clear_history")).clicked() {
                     self.open_cleanup_dialog();
@@ -2230,6 +2270,8 @@ impl AdbCollectorApp {
                         }
                     });
             }
+            ui.add_space(14.0);
+            self.ui_recording_storage_section(ui);
         });
     }
 
@@ -3848,6 +3890,7 @@ impl AdbCollectorApp {
         self.set_info(self.tr("status.settings_saved"));
         self.refresh_devices();
         self.refresh_log_size();
+        self.refresh_recording_size();
     }
 
     fn reset_settings_inputs(&mut self) {
@@ -6515,6 +6558,7 @@ impl eframe::App for AdbCollectorApp {
         self.ui_settings_dialog(ctx);
         self.ui_record_dialog(ctx);
         self.ui_text_dialog(ctx);
+        self.ui_recording_cleanup_dialog(ctx);
         self.ui_new_display_dialog(ctx);
         self.ui_clear_confirm_dialog(ctx);
         self.ui_alias_dialog(ctx);
