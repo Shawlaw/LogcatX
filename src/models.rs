@@ -211,6 +211,9 @@ pub enum AppEvent {
         result: Result<String, String>,
     },
     AdbServerRestartFinished(Result<String, String>),
+    /// Local adb auth key generation finished.
+    /// `Ok(Some(pub))` = freshly generated; `Ok(None)` = key already existed.
+    AdbKeyGenFinished(Result<Option<String>, String>),
     DeviceDropFinished {
         serial: String,
         result: Result<DropOutcome, String>,

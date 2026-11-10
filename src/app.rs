@@ -1,5 +1,5 @@
 use crate::{
-    adb,
+    adb, adb_keys,
     config::{self, AppConfig, AppPaths, UpdateProxyConfig, UpdateProxyMode},
     fs_utils,
     i18n::I18n,
@@ -204,6 +204,12 @@ pub struct AdbCollectorApp {
     connect_in_progress: bool,
     connection: connection::ConnectionDialog,
     restarting_adb_server: bool,
+    // Local adb auth key viewer/generator dialog state.
+    show_adb_key_dialog: bool,
+    adb_key_content: Option<String>,
+    adb_key_view: String,
+    adb_key_error: Option<String>,
+    adb_key_gen_in_progress: bool,
     screenshot_in_progress: bool,
     // Screen recording and the manual text/clipboard device tools.
     recordings: HashMap<String, recorder::RecordingTask>,
@@ -444,6 +450,11 @@ impl AdbCollectorApp {
             connect_in_progress: false,
             connection: connection::ConnectionDialog::default(),
             restarting_adb_server: false,
+            show_adb_key_dialog: false,
+            adb_key_content: None,
+            adb_key_view: String::new(),
+            adb_key_error: None,
+            adb_key_gen_in_progress: false,
             screenshot_in_progress: false,
             recordings: HashMap::new(),
             recording_stopping: HashSet::new(),
@@ -770,6 +781,32 @@ impl AdbCollectorApp {
                             self.refresh_devices();
                         }
                         Err(err) => self.set_error(err),
+                    }
+                }
+                AppEvent::AdbKeyGenFinished(result) => {
+                    self.adb_key_gen_in_progress = false;
+                    match result {
+                        Ok(Some(public_key)) => {
+                            self.adb_key_content = Some(public_key.clone());
+                            self.adb_key_view = public_key;
+                            self.adb_key_error = None;
+                            self.set_info(self.tr("adb_key.generated"));
+                        }
+                        Ok(None) => {
+                            // A key appeared concurrently; re-read it for display.
+                            match adb_keys::read_public_key() {
+                                Ok(content) => {
+                                    self.adb_key_content = content;
+                                    self.adb_key_view =
+                                        self.adb_key_content.clone().unwrap_or_default();
+                                }
+                                Err(err) => self.adb_key_error = Some(err),
+                            }
+                        }
+                        Err(err) => {
+                            self.adb_key_error =
+                                Some(self.tr_args("adb_key.generate_failed", &[("error", err)]));
+                        }
                     }
                 }
                 AppEvent::DeviceDropFinished { serial, result } => {
@@ -2476,6 +2513,11 @@ impl AdbCollectorApp {
             );
         }
 
+        // The adb auth key section is machine-level, not part of initial setup.
+        if inline_page {
+            self.ui_adb_auth_key_section(ui);
+        }
+
         ui.add_space(8.0);
         ui.label(self.tr("settings.scrcpy"));
         let path_input_width = settings_path_input_width(ui.available_width());
@@ -2580,6 +2622,153 @@ impl AdbCollectorApp {
         }
 
         self.ui_update_proxy_settings(ui, inline_page);
+    }
+
+    /// Settings section for the local adb auth key: status probe + view entry.
+    fn ui_adb_auth_key_section(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(8.0);
+        ui.label(self.tr("settings.adb_auth"));
+        ui.horizontal(|ui| {
+            let key_exists = adb_keys::public_key_path().exists();
+            ui.label(
+                RichText::new(if key_exists {
+                    self.tr("settings.adb_auth.status_present")
+                } else {
+                    self.tr("settings.adb_auth.status_missing")
+                })
+                .small(),
+            );
+            if ui.button(self.tr("settings.adb_auth.view")).clicked() {
+                self.open_adb_key_dialog();
+            }
+        });
+        ui.small(self.tr("settings.adb_auth.hint"));
+    }
+
+    /// Read the current key state and open the viewer dialog.
+    fn open_adb_key_dialog(&mut self) {
+        self.adb_key_error = None;
+        match adb_keys::read_public_key() {
+            Ok(content) => {
+                self.adb_key_view = content.clone().unwrap_or_default();
+                self.adb_key_content = content;
+            }
+            Err(err) => {
+                self.adb_key_content = None;
+                self.adb_key_view.clear();
+                self.adb_key_error = Some(err);
+            }
+        }
+        self.show_adb_key_dialog = true;
+    }
+
+    fn ui_adb_key_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_adb_key_dialog {
+            return;
+        }
+        let mut close = false;
+        let mut generate = false;
+        let mut copy = false;
+        let mut open_dir = false;
+
+        egui::Window::new(self.tr("adb_key.title"))
+            .collapsible(false)
+            .resizable(false)
+            .fixed_size([560.0, 360.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_max_width(560.0);
+                ui.label(
+                    RichText::new(fs_utils::display_path(&adb_keys::public_key_path()))
+                        .small()
+                        .weak(),
+                );
+                ui.add_space(8.0);
+                if self.adb_key_content.is_some() {
+                    let response = ui.add_sized(
+                        [ui.available_width(), 150.0],
+                        egui::TextEdit::multiline(&mut self.adb_key_view).desired_rows(6),
+                    );
+                    text_menu::text_edit_menu(&response, &mut self.adb_key_view, &self.i18n);
+                    ui.add_space(4.0);
+                    ui.small(self.tr("adb_key.hint"));
+                } else {
+                    ui.label(self.tr("adb_key.missing"));
+                }
+                if let Some(error) = &self.adb_key_error {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(error.clone()).color(Color32::from_rgb(192, 57, 43)));
+                }
+
+                ui.add_space(12.0);
+                if self.adb_key_content.is_some() {
+                    ui.horizontal(|ui| {
+                        if ui.button(self.tr("adb_key.copy")).clicked() {
+                            copy = true;
+                        }
+                        if ui.button(self.tr("adb_key.open_dir")).clicked() {
+                            open_dir = true;
+                        }
+                    });
+                    ui.add_space(8.0);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button(self.tr("adb_key.close")).clicked() {
+                        close = true;
+                    }
+                    if self.adb_key_content.is_none() {
+                        let generating = self.adb_key_gen_in_progress;
+                        let label = if generating {
+                            self.tr("adb_key.generating")
+                        } else {
+                            self.tr("adb_key.generate")
+                        };
+                        if ui
+                            .add_enabled(!generating, egui::Button::new(label))
+                            .clicked()
+                        {
+                            generate = true;
+                        }
+                    }
+                });
+            });
+
+        if copy {
+            // Copy the canonical file content, not the (editable) view buffer.
+            if let Some(content) = &self.adb_key_content {
+                ctx.copy_text(content.clone());
+                self.set_info(self.tr("adb_key.copied"));
+            }
+        }
+        if open_dir && let Err(err) = fs_utils::open_path(&adb_keys::android_dir()) {
+            self.set_error(err);
+        }
+        if generate {
+            self.start_adb_key_generation();
+        }
+        if close {
+            self.show_adb_key_dialog = false;
+        }
+    }
+
+    fn start_adb_key_generation(&mut self) {
+        if self.require_initial_setup {
+            self.set_error(self.tr("status.finish_initial_setup"));
+            self.show_settings = true;
+            return;
+        }
+        if self.adb_key_gen_in_progress {
+            return;
+        }
+        self.adb_key_gen_in_progress = true;
+        self.adb_key_error = None;
+        self.set_info(self.tr("adb_key.generating"));
+        let tx = self.tx.clone();
+        let adb_path = self.config.adb_path.clone();
+        thread::spawn(move || {
+            let result = adb_keys::generate_key_if_missing(&adb_path);
+            let _ = tx.send(AppEvent::AdbKeyGenFinished(result));
+        });
     }
 
     fn ui_settings_actions(&mut self, ui: &mut egui::Ui, inline_page: bool) {
@@ -6562,6 +6751,7 @@ impl eframe::App for AdbCollectorApp {
         self.ui_new_display_dialog(ctx);
         self.ui_clear_confirm_dialog(ctx);
         self.ui_alias_dialog(ctx);
+        self.ui_adb_key_dialog(ctx);
         self.ui_logcat_args_dialog(ctx);
         self.ui_foreground_confirm_dialog(ctx);
         self.ui_connect_dialog(ctx);

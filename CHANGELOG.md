@@ -4,6 +4,14 @@
 
 - English changelog: [`CHANGELOG.en.md`](./CHANGELOG.en.md)
 
+## [0.9.4] - 2026-11-10
+
+### 新增
+- 本机 ADB 授权密钥管理：设置页新增「ADB 授权密钥」区块，可查看本机 adb 鉴权公钥（`%USERPROFILE%\.android\adbkey.pub`）全文并一键复制、打开所在文件夹；密钥不存在时可一键生成（后台调用 `adb keygen`，绝不覆盖已有密钥；私钥永不展示）。适用于云真机/云手机控制台、设备批量预授权等需要粘贴本机公钥的场景
+
+### 说明
+- 密钥目录解析与 Windows 版 adb 实测行为保持一致：始终使用 `%USERPROFILE%\.android`（当前 platform-tools 在 Windows 上忽略 `ANDROID_USER_HOME`/`ANDROID_SDK_HOME`），确保展示的就是本机 adb 实际用于设备鉴权的那把公钥
+
 ## [0.9.3] - 2026-11-08
 
 ### 新增

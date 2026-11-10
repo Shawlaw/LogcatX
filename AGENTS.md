@@ -67,6 +67,7 @@ Core (UI-free, reusable by a future non-egui frontend):
 
 - **`adb_executor.rs`** — `AdbExecutor`: every adb invocation goes through it. execute/execute_with_timeout/cancel, `spawn_streaming` (logcat), bounded output capture, kill + reap of children.
 - **`adb.rs`** — device discovery: `list_devices` with `DeviceMetadataCache` (getprop metadata cached across polls, pruned on disconnect) and discovery generations (stale replies can't overwrite newer state); logcat spawn; shell/foreground-app commands; APK install.
+- **`adb_keys.rs`** — local adb auth key: resolves `%USERPROFILE%\.android\adbkey(.pub)` (Windows adb ignores `ANDROID_USER_HOME`/`ANDROID_SDK_HOME` here — measured, see module docs), reads the public key, and generates a missing pair via `adb keygen` without ever overwriting an existing key.
 - **`task.rs`** — `TaskManager`: per-device, per-kind task lifecycle (replaces global `*_in_progress` bools; one device's operation never blocks another's).
 - **`transfer.rs`** — `TransferManager`: transfer queue with per-device concurrency, progress parsing, cancel (= kill + reap), retry, stall supervision. UI clones a handle and polls `snapshot()`.
 - **`remote_fs.rs`** — Files backend: `RemotePath` validation, `shell_quote` escaping, the machine-parsed listing protocol (POSIX `[ -d ]/[ -L ]/[ -f ]` kind markers + `stat -c '%s %Y'`; tolerates CRLF/pty output), mkdir/rename/move/delete, and run-as browsing (`run-as <pkg> sh -c '<script>'` — never a bare script argument; adb joins args with spaces and devices exec the first word).

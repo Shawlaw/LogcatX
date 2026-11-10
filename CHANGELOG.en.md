@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.9.4] - 2026-11-10
+
+### Added
+- Local ADB auth key management: the Settings page gains an "ADB authorization key" section to view the machine's adb auth public key (`%USERPROFILE%\.android\adbkey.pub`) with one-click copy and open-folder actions; when no key exists yet it can be generated in one click (`adb keygen` on a background thread; never overwrites an existing key, and the private key is never displayed). Useful for cloud-device consoles and fleet pre-authorization flows that ask for your adb public key
+
+### Notes
+- Key directory resolution matches measured Windows adb behavior: always `%USERPROFILE%\.android` (current platform-tools ignores `ANDROID_USER_HOME`/`ANDROID_SDK_HOME` on Windows), so the displayed key is exactly the one local adb authenticates with
+
 ## [0.9.3] - 2026-11-08
 
 ### Added

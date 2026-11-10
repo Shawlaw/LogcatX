@@ -1,6 +1,6 @@
 //! Standalone ADB process fixture used by Rust integration and native UI E2E.
 //! Each test gets its own directory; no global environment or real ADB state.
-use std::{fs, io::{self, Write}, path::Path, thread, time::Duration};
+use std::{fs, io::{self, Write}, path::{Path, PathBuf}, thread, time::Duration};
 
 fn value<'a>(config: &'a str, key: &str, default: &'a str) -> &'a str {
     config.lines().find_map(|line| line.strip_prefix(&format!("{key}="))).unwrap_or(default)
@@ -45,6 +45,19 @@ fn main() {
             } else { eprintln!("failed to connect to {target}"); std::process::exit(1); }
         }
         "disconnect" => { let _ = fs::remove_file(root.join("connected")); println!("disconnected"); }
+        "keygen" => {
+            // Mirror `adb keygen FILE`: write the private key at FILE and the
+            // public key at FILE.pub. `keygen=fail` simulates a failing adb.
+            if value(&config, "keygen", "ok") == "fail" {
+                eprintln!("keygen refused by fixture"); std::process::exit(1);
+            }
+            let file = PathBuf::from(args.get(1).cloned().unwrap_or_default());
+            let mut pub_name = file.as_os_str().to_os_string();
+            pub_name.push(".pub");
+            fs::write(&file, b"FIXTURE-PRIVATE-KEY").unwrap();
+            fs::write(PathBuf::from(pub_name), "QAAAAFIXTURE-PUBKEY user@fixture\n").unwrap();
+            println!("Generating adb key pair...");
+        }
         "devices" => {
             println!("List of devices attached");
             if let Ok(target) = fs::read_to_string(root.join("connected")) { println!("{target}\tdevice product:fixture model:Wireless_Device"); }

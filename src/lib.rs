@@ -7,6 +7,7 @@
 
 pub mod adb;
 pub mod adb_executor;
+pub mod adb_keys;
 pub mod app;
 pub mod build_info;
 pub mod clipboard;

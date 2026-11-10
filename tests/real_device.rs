@@ -956,3 +956,31 @@ fn wait_recording(
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+
+/// `adb keygen` must write the private key at FILE and the public key at
+/// FILE.pub. Needs no attached device and writes only into a temp directory,
+/// never the real `%USERPROFILE%\.android`.
+#[test]
+#[ignore = "real adb: set LOGCATX_REAL_ADB"]
+fn keygen_generates_real_key_pair_in_temp_dir() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let private_key = dir.path().join("adbkey");
+    let public_key = logcatx::adb_keys::generate_key_at(&adb_path(), &private_key)
+        .expect("generate adb key pair")
+        .expect("fresh key must be generated");
+    assert!(private_key.exists(), "private key file must exist");
+    assert!(
+        public_key.contains(char::is_whitespace),
+        "adb pubkey format is base64 payload + space + comment: {public_key}"
+    );
+    // A second run must refuse to touch the existing key.
+    assert_eq!(
+        logcatx::adb_keys::generate_key_at(&adb_path(), &private_key).expect("re-run keygen"),
+        None,
+        "existing key must not be regenerated"
+    );
+    let read_back = logcatx::adb_keys::read_public_key_at(&dir.path().join("adbkey.pub"))
+        .expect("read generated public key")
+        .expect("public key file exists");
+    assert_eq!(read_back, public_key);
+}
