@@ -329,7 +329,7 @@
     "text.hint": "换行会转为回车键。若设备不支持非 ASCII 的 input text，LogcatX 会通过设备剪贴板粘贴该段文本。",
     "text.paste": "粘贴电脑剪贴板",
     "text.send": "发送",
-    "text.cancel": "取消",
+    "text.close": "关闭",
     "text.empty": "请先输入文本。",
     "text.status.sending": "正在向 {device} 输入文本……",
     "text.status.sent": "已向 {device} 输入 {chars} 个字符。",

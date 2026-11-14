@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.9.5] - 2026-11-14
+
+### Enhanced
+
+- The Send text dialog stays open after sending to the selected ADB device and keeps the target and text. Once sending finishes, you can resend or edit the text and send it again. Select Close to dismiss the dialog.
+
 ## [0.9.4] - 2026-11-10
 
 ### Added

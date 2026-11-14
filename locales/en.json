@@ -329,7 +329,7 @@
     "text.hint": "New lines are sent as Enter. If this device rejects non-ASCII input text, LogcatX pastes that run through the device clipboard.",
     "text.paste": "Paste PC clipboard",
     "text.send": "Send",
-    "text.cancel": "Cancel",
+    "text.close": "Close",
     "text.empty": "Enter some text first.",
     "text.status.sending": "Sending text to {device}...",
     "text.status.sent": "Sent {chars} characters to {device}.",

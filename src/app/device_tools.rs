@@ -39,7 +39,7 @@ impl AdbCollectorApp {
             return;
         };
         let mut send = false;
-        let mut cancel = false;
+        let mut close = false;
 
         egui::Window::new(self.tr("text.title"))
             .collapsible(false)
@@ -91,16 +91,22 @@ impl AdbCollectorApp {
                 });
                 ui.add_space(8.0);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button(self.tr("text.send")).clicked() {
+                    if ui
+                        .add_enabled(
+                            self.tool_task_serial.is_none(),
+                            egui::Button::new(self.tr("text.send")),
+                        )
+                        .clicked()
+                    {
                         send = true;
                     }
-                    if ui.button(self.tr("text.cancel")).clicked() {
-                        cancel = true;
+                    if ui.button(self.tr("text.close")).clicked() {
+                        close = true;
                     }
                 });
             });
 
-        if cancel {
+        if close {
             self.show_text_dialog = false;
             self.text_device_id = None;
             self.text_error = None;
@@ -110,11 +116,7 @@ impl AdbCollectorApp {
                 self.text_error = Some(self.tr("text.empty"));
             } else {
                 match self.start_text_task(&device_id, text) {
-                    Ok(()) => {
-                        self.show_text_dialog = false;
-                        self.text_device_id = None;
-                        self.text_error = None;
-                    }
+                    Ok(()) => self.text_error = None,
                     Err(err) => self.text_error = Some(err),
                 }
             }
