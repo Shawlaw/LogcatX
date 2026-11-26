@@ -36,6 +36,7 @@
 ### 长录屏
 
 - 由 scrcpy 直接把画面编码写入本地 MP4，不经过设备临时文件。
+- Mirror/New Display 保存的 `--no-control`、`--no-audio`、额外 argv 和虚拟屏草稿不会被录屏命令读取；录屏始终使用独立的 `--no-playback --no-audio --record=… --record-format=mp4 --video-bit-rate=…` 参数链。
 - 启动时使用 `--no-playback`，并把 scrcpy 的 SDL 窗口隐藏；停止时向该窗口发送
   `WM_CLOSE`，scrcpy 会正常收尾 MP4。若 10 秒内无法关闭，才会强制结束进程并
   在状态栏提示文件可能不完整。

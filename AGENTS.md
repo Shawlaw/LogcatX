@@ -76,7 +76,7 @@ Core (UI-free, reusable by a future non-egui frontend):
 - **`models.rs`** — core data types: `DeviceInfo`, `DeviceEntry` (transport merge), `AppEvent` mpsc enum, dialog state.
 - **`config.rs`** — `AppConfig` (serde) with atomic persistence; portable-vs-AppData via `desktop-config`; 0.8→0.9 migration.
 - **`fs_utils.rs`**, **`i18n.rs`**, **`updater.rs`**, **`build_info.rs`** — log-dir management/cleanup safety; `desktop-i18n` wrapper (`locales/*.json`); signed in-app updates (see below); compile-time version/commit identity.
-- **`scrcpy.rs`** — scrcpy version detection and screen mirroring integration.
+- **`scrcpy.rs`** — scrcpy version detection; Mirror/New Display argv construction, per-device launch/display settings, bounded startup diagnostics, and the independent recording command.
 
 UI layer (the only modules allowed to import egui/eframe):
 
@@ -88,6 +88,7 @@ Binaries:
 
 - **`bin/logcatx-updater.rs`** — update helper shipped beside `LogcatX.exe`; performs the post-exit file replacement and restart for updates.
 - **`bin/fake_adb.rs`** — scriptable adb double (`FAKE_ADB_SCRIPT` scenario files) driving the integration tests.
+- **`bin/fake_scrcpy.rs`** — process-level scrcpy double recording JSON argv/ADB environment and simulating startup failures; never included in release artifacts.
 
 ### Key patterns
 
@@ -118,8 +119,8 @@ Shared infrastructure comes from the [DeskFoundry](https://github.com/Shawlaw/De
 ## Tests
 
 - Inline `#[cfg(test)]` unit tests in each source file (heaviest: `adb.rs` parsing, `config.rs`, `updater.rs`, device-merge logic in `app.rs`).
-- `tests/` integration suites against the fake adb double: `fake_adb_harness.rs`, `adb_executor.rs`, `remote_fs.rs`, `transfer.rs`, and `update_helper.rs` (drives the real `logcatx-updater` binary through apply/ack/rollback).
-- `tests/real_device.rs`: `#[ignore]`-gated smoke against real hardware — discovery/identity, listing protocol, file-op roundtrips, logcat capture, multi-device isolation (parallel pushes must not mix), run-as browsing, dual-transport (USB+wireless) identity, and a live signed-manifest check. Requires `LOGCATX_REAL_ADB`; multi-device cases soft-skip below two devices.
+- `tests/` integration suites: `fake_adb_harness.rs`, `adb_discovery.rs`, `adb_executor.rs`, `device_tools.rs`, `remote_fs.rs`, `transfer.rs`, `scrcpy_launch.rs` (real process spawns against `fake_scrcpy`, including exact argv, recording isolation, and raw startup diagnostics), and `update_helper.rs` (drives the real `logcatx-updater` binary through apply/ack/rollback).
+- `tests/real_device.rs`: `#[ignore]`-gated smoke against real hardware — discovery/identity, listing protocol, file-op roundtrips, logcat capture, multi-device isolation (parallel pushes must not mix), run-as browsing, dual-transport (USB+wireless) identity, quick/long recording, raw scrcpy startup diagnostics, and a live signed-manifest check. Requires `LOGCATX_REAL_ADB`; scrcpy cases also use `LOGCATX_REAL_SCRCPY`, and multi-device cases soft-skip below two devices.
 - Run individual tests with `cargo test <test_name>`; the real-device suite as shown in the commands section above.
 
 ## Release process

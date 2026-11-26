@@ -92,7 +92,7 @@ LogcatX 是一个面向 Windows 发布的桌面 GUI 工具，用来并行采集�
 
 两种镜像模式共用同一份按设备 identity 保存的公共启动配置，启动时自动保存，取消不会保存；重启应用后仍会恢复。New Display 还会按设备记住跟随主屏开关、自定义宽高、DPI 和启动包名；切回跟随主屏不会清除自定义参数，重新切回自定义时可直接恢复。
 
-scrcpy 不允许同时使用 `--start-app` 和 `--no-control`。启动包名非空时，请关闭「禁用设备控制」，或清空包名。启动失败对话框会透传 scrcpy 原始 stdout/stderr，并对这条已知冲突补充中文说明。上述配置**不影响**快速 `screenrecord` 录屏或 scrcpy 长录屏。
+scrcpy 不允许同时使用 `--start-app` 和 `--no-control`。启动包名非空时，请关闭「禁用设备控制」，或清空包名。scrcpy 在启动阶段提前退出时，错误对话框会透传其原始 stdout/stderr，并对这条已知冲突补充中文说明。上述配置**不影响**快速 `screenrecord` 录屏或 scrcpy 长录屏。
 
 ## 便携模式说明
 

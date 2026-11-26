@@ -88,7 +88,7 @@ Blank lines are ignored; internal spaces and Windows backslashes are preserved, 
 
 Mirror and New Display share one common launch configuration saved by device identity. Launch saves the current options; Cancel does not, and saved options return after an app restart. New Display also remembers its follow-main-display toggle, custom width/height/DPI, and start-app package per device. Switching back to the main display does not erase the custom draft, which returns when custom mode is selected again.
 
-scrcpy rejects `--start-app` together with `--no-control`. To start an app, turn off **Disable device control** or clear the package name. Launch failures show the original scrcpy stdout/stderr, with an additional explanation for this known conflict. These options **never affect** quick `screenrecord` clips or long scrcpy recordings.
+scrcpy rejects `--start-app` together with `--no-control`. To start an app, turn off **Disable device control** or clear the package name. When scrcpy exits during startup, the error dialog includes its original stdout/stderr, with an additional explanation for this known conflict. These options **never affect** quick `screenrecord` clips or long scrcpy recordings.
 
 ## Portable behavior
 

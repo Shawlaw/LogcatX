@@ -14,7 +14,7 @@ All notable changes to this project will be documented in this file.
 - Extra arguments are checked for NUL characters, input/count limits, and forbidden `--serial` / `-s` device overrides. Validation or persistence failures prevent launch while keeping the draft editable
 - Legacy configs default to an empty options map, empty records are normalized away, and saving ordinary Settings preserves per-device scrcpy options
 - New Display remembers its follow-main-display toggle, custom width/height/DPI, and start-app package per device. The custom draft survives follow mode and app restarts
-- An invalid scrcpy path opens Settings with a modal acknowledgement dialog. Launch failures include the original scrcpy stdout/stderr, with an additional explanation for the `--start-app` / `--no-control` conflict instead of exposing only a process exit status
+- An invalid scrcpy path opens Settings with a modal acknowledgement dialog. Early scrcpy startup exits include the original stdout/stderr, with an additional explanation for the `--start-app` / `--no-control` conflict instead of exposing only a process exit status
 
 ### Notes
 - Custom argument support depends on the installed scrcpy version. Quick recording and long scrcpy recording retain their independent fixed arguments and never read these mirror launch options
