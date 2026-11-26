@@ -2,8 +2,10 @@ use crate::managed_child::ManagedChild;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
+    io::Read,
     path::Path,
     process::{Command, Output, Stdio},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
@@ -11,6 +13,9 @@ use tempfile::NamedTempFile;
 pub const MAX_EXTRA_ARGS: usize = 64;
 pub const MAX_EXTRA_ARGS_BYTES: usize = 16 * 1024;
 pub const MAX_EXTRA_ARG_BYTES: usize = 4 * 1024;
+pub const DEFAULT_NEW_DISPLAY_WIDTH: &str = "720";
+pub const DEFAULT_NEW_DISPLAY_HEIGHT: &str = "1600";
+pub const DEFAULT_NEW_DISPLAY_DPI: &str = "320";
 
 /// Per-device options shared by Mirror and New Display. Each non-empty line in
 /// `extra_args` is passed to scrcpy as one independent argv item.
@@ -25,6 +30,50 @@ pub struct ScrcpyLaunchOptions {
 impl ScrcpyLaunchOptions {
     pub fn is_empty(&self) -> bool {
         !self.no_control && !self.no_audio && self.extra_args.trim().is_empty()
+    }
+}
+
+/// Persisted New Display draft. Custom dimensions remain present even when
+/// `use_device_defaults` is true, so switching modes never erases them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NewDisplaySettings {
+    pub use_device_defaults: bool,
+    pub width: String,
+    pub height: String,
+    pub dpi: String,
+    pub start_app: String,
+}
+
+impl Default for NewDisplaySettings {
+    fn default() -> Self {
+        Self {
+            use_device_defaults: true,
+            width: DEFAULT_NEW_DISPLAY_WIDTH.to_owned(),
+            height: DEFAULT_NEW_DISPLAY_HEIGHT.to_owned(),
+            dpi: DEFAULT_NEW_DISPLAY_DPI.to_owned(),
+            start_app: String::new(),
+        }
+    }
+}
+
+impl NewDisplaySettings {
+    pub fn normalized(mut self) -> Self {
+        self.width = self.width.trim().to_owned();
+        self.height = self.height.trim().to_owned();
+        self.dpi = self.dpi.trim().to_owned();
+        self.start_app = self.start_app.trim().to_owned();
+        if self.width.is_empty() {
+            self.width = DEFAULT_NEW_DISPLAY_WIDTH.to_owned();
+        }
+        if self.height.is_empty() {
+            self.height = DEFAULT_NEW_DISPLAY_HEIGHT.to_owned();
+        }
+        self
+    }
+
+    pub fn is_default(&self) -> bool {
+        self == &Self::default()
     }
 }
 
@@ -103,15 +152,19 @@ pub fn parse_extra_args(input: &str) -> Result<Vec<String>, ScrcpyArgsError> {
     Ok(args)
 }
 
-fn is_device_selector(argument: &str) -> bool {
-    if let Some(long_name) = argument
+fn is_long_option_prefix(argument: &str, option: &str) -> bool {
+    argument
         .strip_prefix("--")
         .map(|value| value.split_once('=').map_or(value, |(name, _)| name))
-    {
+        .is_some_and(|name| !name.is_empty() && option.starts_with(name))
+}
+
+fn is_device_selector(argument: &str) -> bool {
+    if argument.starts_with("--") {
         // getopt_long accepts unique long-option prefixes, so checking only
         // `--serial` misses forms such as `--seri=OTHER`. Reject every prefix
         // (including ambiguous short prefixes) to remain fail-closed.
-        return !long_name.is_empty() && "serial".starts_with(long_name);
+        return is_long_option_prefix(argument, "serial");
     }
 
     let Some(short_options) = argument.strip_prefix('-') else {
@@ -266,10 +319,27 @@ pub fn launch(
     mode: LaunchMode,
     options: &ScrcpyLaunchOptions,
 ) -> Result<(), String> {
-    let mut child = build_command(scrcpy_path, adb_path, serial, mode, options)
-        .map_err(|error| error.to_string())?
+    let mut command = build_command(scrcpy_path, adb_path, serial, mode, options)
+        .map_err(|error| error.to_string())?;
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
         .spawn()
         .map_err(|err| format!("Failed to start scrcpy for {serial}: {err}"))?;
+
+    // Drain both pipes for the whole child lifetime: a quiet early failure may
+    // return its exact diagnostics, while a long-running mirror can never
+    // block on a full pipe. Each reader retains only a bounded prefix.
+    let (sender, receiver) = mpsc::channel();
+    spawn_output_reader(
+        child.stdout.take().expect("piped scrcpy stdout"),
+        CaptureStream::Stdout,
+        sender.clone(),
+    );
+    spawn_output_reader(
+        child.stderr.take().expect("piped scrcpy stderr"),
+        CaptureStream::Stderr,
+        sender,
+    );
 
     // Argument errors normally make scrcpy exit immediately. Reap such an
     // early exit instead of reporting a successful mirror; a still-running
@@ -280,15 +350,73 @@ pub fn launch(
             .try_wait()
             .map_err(|err| format!("Failed to check scrcpy startup for {serial}: {err}"))?
         {
-            return Err(format!(
-                "scrcpy for {serial} exited during startup with {status}"
-            ));
+            let output = collect_captured_output(&receiver);
+            let mut error = format!("scrcpy for {serial} exited during startup with {status}");
+            if !output.is_empty() {
+                error.push('\n');
+                error.push_str(&output);
+            }
+            return Err(error);
         }
         if Instant::now() >= deadline {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+const MAX_CAPTURED_STREAM_BYTES: usize = 32 * 1024;
+
+#[derive(Clone, Copy)]
+enum CaptureStream {
+    Stdout,
+    Stderr,
+}
+
+fn spawn_output_reader<R>(
+    mut reader: R,
+    stream: CaptureStream,
+    sender: mpsc::Sender<(CaptureStream, String)>,
+) where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut captured = Vec::new();
+        let mut truncated = false;
+        let mut buffer = [0_u8; 8192];
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 {
+                break;
+            }
+            let remaining = MAX_CAPTURED_STREAM_BYTES.saturating_sub(captured.len());
+            let retained = remaining.min(count);
+            captured.extend_from_slice(&buffer[..retained]);
+            truncated |= retained < count;
+        }
+        let mut text = String::from_utf8_lossy(&captured).into_owned();
+        if truncated {
+            text.push_str("\n[output truncated]");
+        }
+        let _ = sender.send((stream, text));
+    });
+}
+
+fn collect_captured_output(receiver: &mpsc::Receiver<(CaptureStream, String)>) -> String {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    for _ in 0..2 {
+        let Ok((stream, text)) =
+            receiver.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        else {
+            break;
+        };
+        match stream {
+            CaptureStream::Stdout => stdout = text,
+            CaptureStream::Stderr => stderr = text,
+        }
+    }
+    combined_text_output(&stdout, &stderr)
 }
 
 /// A headless scrcpy process recording the device screen to a local MP4.
@@ -426,12 +554,19 @@ fn parse_version_token(token: &str) -> Option<ScrcpyVersion> {
 }
 
 fn combined_output(output: &Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    combined_text_output(
+        &String::from_utf8_lossy(&output.stdout),
+        &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+fn combined_text_output(stdout: &str, stderr: &str) -> String {
+    let stdout = stdout.trim();
+    let stderr = stderr.trim();
     match (stdout.is_empty(), stderr.is_empty()) {
         (false, false) => format!("{stdout}\n{stderr}"),
-        (false, true) => stdout,
-        (true, false) => stderr,
+        (false, true) => stdout.to_owned(),
+        (true, false) => stderr.to_owned(),
         (true, true) => String::new(),
     }
 }
@@ -700,7 +835,7 @@ mod tests {
                     .unwrap(),
             ),
             &ScrcpyLaunchOptions {
-                no_control: true,
+                no_control: false,
                 no_audio: true,
                 extra_args: "--max-size=1280".into(),
             },
@@ -715,7 +850,6 @@ mod tests {
                 OsStr::new("--new-display=1280x960/160"),
                 OsStr::new("--start-app"),
                 OsStr::new("com.android.settings"),
-                OsStr::new("--no-control"),
                 OsStr::new("--no-audio"),
                 OsStr::new("--max-size=1280"),
             ]

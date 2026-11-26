@@ -153,6 +153,39 @@ fn immediate_scrcpy_exit_is_not_reported_as_a_successful_launch() {
     )
     .expect_err("early process exit is a failed launch");
     assert!(error.contains("exited during startup"), "{error}");
+    assert!(error.contains("synthetic scrcpy stdout"), "{error}");
+    assert!(
+        error.contains("ERROR: synthetic scrcpy startup failure"),
+        "{error}"
+    );
+    wait_for_record(&log);
+}
+
+#[test]
+fn start_app_no_control_returns_the_raw_scrcpy_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("start-app-no-control.json");
+    let _env = FakeScrcpyEnv::new(&log);
+
+    let error = scrcpy::launch(
+        env!("CARGO_BIN_EXE_fake_scrcpy"),
+        "adb",
+        "DEVICE_TRANSPORT",
+        LaunchMode::NewDisplay(
+            NewDisplayOptions::default()
+                .with_start_app("com.android.settings")
+                .unwrap(),
+        ),
+        &ScrcpyLaunchOptions {
+            no_control: true,
+            ..Default::default()
+        },
+    )
+    .expect_err("scrcpy rejects start-app when control is disabled");
+    assert!(
+        error.contains("ERROR: Cannot start an Android app if control is disabled"),
+        "{error}"
+    );
     wait_for_record(&log);
 }
 

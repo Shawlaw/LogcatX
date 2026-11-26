@@ -21,7 +21,17 @@ fn main() {
         )
         .expect("write fake scrcpy call");
     }
+    let has_start_app = args
+        .iter()
+        .any(|arg| arg == "--start-app" || arg.starts_with("--start-app="));
+    let has_no_control = args.iter().any(|arg| arg == "--no-control");
+    if has_start_app && has_no_control {
+        eprintln!("ERROR: Cannot start an Android app if control is disabled");
+        std::process::exit(1);
+    }
     if env::var_os("FAKE_SCRCPY_FAIL_STARTUP").is_some() {
+        println!("synthetic scrcpy stdout");
+        eprintln!("ERROR: synthetic scrcpy startup failure");
         std::process::exit(3);
     }
     // Model a mirror that survives LogcatX's startup observation window.

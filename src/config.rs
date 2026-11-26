@@ -1,4 +1,7 @@
-use crate::{fs_utils, i18n, scrcpy::ScrcpyLaunchOptions};
+use crate::{
+    fs_utils, i18n,
+    scrcpy::{NewDisplaySettings, ScrcpyLaunchOptions},
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -70,6 +73,10 @@ pub struct AppConfig {
     /// identity used by aliases and logcat arguments.
     #[serde(default)]
     pub device_scrcpy_options: BTreeMap<String, ScrcpyLaunchOptions>,
+    /// Last launched New Display draft, including retained custom dimensions
+    /// while following the main display.
+    #[serde(default)]
+    pub device_scrcpy_new_display: BTreeMap<String, NewDisplaySettings>,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
     #[serde(default)]
@@ -111,6 +118,7 @@ impl AppConfig {
             apk_auto_install_devices: Vec::new(),
             device_logcat_args: BTreeMap::new(),
             device_scrcpy_options: BTreeMap::new(),
+            device_scrcpy_new_display: BTreeMap::new(),
             auto_check_updates: default_auto_check_updates(),
             update_proxy: UpdateProxyConfig::default(),
             file_favorites: Vec::new(),
@@ -152,6 +160,8 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
         normalize_serial_list(normalized.apk_auto_install_devices);
     normalized.device_logcat_args = normalize_logcat_args(normalized.device_logcat_args);
     normalized.device_scrcpy_options = normalize_scrcpy_options(normalized.device_scrcpy_options);
+    normalized.device_scrcpy_new_display =
+        normalize_new_display_settings(normalized.device_scrcpy_new_display);
     normalized.update_proxy = normalize_update_proxy(normalized.update_proxy);
 
     // Atomic replace (PRD §33): a crash mid-write keeps the previous config
@@ -191,13 +201,25 @@ pub fn remember_recent_connection(
     Ok(())
 }
 
-/// Save one device's Mirror/New Display options as a transaction. The caller's
-/// in-memory config changes only after both the atomic write and reload succeed.
+/// Save one device's shared Mirror/New Display options as a transaction.
 pub fn save_device_scrcpy_options(
     config: &mut AppConfig,
     paths: &AppPaths,
     identity_key: &str,
     options: ScrcpyLaunchOptions,
+) -> Result<(), String> {
+    save_device_scrcpy_configuration(config, paths, identity_key, options, None)
+}
+
+/// Atomically save shared launch options and, for a New Display launch, its
+/// mode-specific draft. The caller's in-memory config changes only after both
+/// the atomic write and reload succeed.
+pub fn save_device_scrcpy_configuration(
+    config: &mut AppConfig,
+    paths: &AppPaths,
+    identity_key: &str,
+    options: ScrcpyLaunchOptions,
+    new_display: Option<NewDisplaySettings>,
 ) -> Result<(), String> {
     let identity_key = identity_key.trim();
     if identity_key.is_empty() {
@@ -215,7 +237,19 @@ pub fn save_device_scrcpy_options(
             .device_scrcpy_options
             .insert(identity_key.to_owned(), options);
     }
-    if candidate.device_scrcpy_options == config.device_scrcpy_options {
+    if let Some(settings) = new_display {
+        let settings = settings.normalized();
+        if settings.is_default() {
+            candidate.device_scrcpy_new_display.remove(identity_key);
+        } else {
+            candidate
+                .device_scrcpy_new_display
+                .insert(identity_key.to_owned(), settings);
+        }
+    }
+    if candidate.device_scrcpy_options == config.device_scrcpy_options
+        && candidate.device_scrcpy_new_display == config.device_scrcpy_new_display
+    {
         return Ok(());
     }
 
@@ -292,6 +326,8 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
     config.apk_auto_install_devices = normalize_serial_list(config.apk_auto_install_devices);
     config.device_logcat_args = normalize_logcat_args(config.device_logcat_args);
     config.device_scrcpy_options = normalize_scrcpy_options(config.device_scrcpy_options);
+    config.device_scrcpy_new_display =
+        normalize_new_display_settings(config.device_scrcpy_new_display);
     config.update_proxy = normalize_update_proxy(config.update_proxy);
 
     config
@@ -371,6 +407,21 @@ fn normalize_scrcpy_options(
             continue;
         }
         normalized.insert(identity_key.to_owned(), options);
+    }
+    normalized
+}
+
+fn normalize_new_display_settings(
+    values: BTreeMap<String, NewDisplaySettings>,
+) -> BTreeMap<String, NewDisplaySettings> {
+    let mut normalized = BTreeMap::new();
+    for (identity_key, settings) in values {
+        let identity_key = identity_key.trim();
+        let settings = settings.normalized();
+        if identity_key.is_empty() || settings.is_default() {
+            continue;
+        }
+        normalized.insert(identity_key.to_owned(), settings);
     }
     normalized
 }
@@ -484,8 +535,9 @@ mod tests {
         AppConfig, AppPaths, MAX_RECENT_CONNECTIONS, default_app_log_max_size_mb,
         is_executable_file, load_config, normalize_aliases, normalize_logcat_args,
         normalize_recent_connections, normalize_scrcpy_options, normalize_serial_list, save_config,
-        save_device_scrcpy_options,
+        save_device_scrcpy_configuration, save_device_scrcpy_options,
     };
+    use crate::scrcpy::NewDisplaySettings;
     use std::{collections::BTreeMap, fs, path::PathBuf};
 
     fn scratch_paths(label: &str) -> (PathBuf, AppPaths) {
@@ -534,6 +586,7 @@ mod tests {
         assert_eq!(config.language, "zh-CN");
         assert!(config.file_favorites.is_empty(), "new field defaults");
         assert!(config.device_scrcpy_options.is_empty());
+        assert!(config.device_scrcpy_new_display.is_empty());
         assert!(
             config
                 .record_dir
@@ -562,6 +615,7 @@ mod tests {
         assert!(config.file_favorites.is_empty());
         assert!(config.device_aliases.is_empty());
         assert!(config.device_scrcpy_options.is_empty());
+        assert!(config.device_scrcpy_new_display.is_empty());
         assert!(
             config
                 .record_dir
@@ -902,10 +956,117 @@ mod tests {
         );
     }
 
+    fn display_settings(
+        use_device_defaults: bool,
+        width: &str,
+        height: &str,
+        dpi: &str,
+        start_app: &str,
+    ) -> NewDisplaySettings {
+        NewDisplaySettings {
+            use_device_defaults,
+            width: width.into(),
+            height: height.into(),
+            dpi: dpi.into(),
+            start_app: start_app.into(),
+        }
+    }
+
+    #[test]
+    fn new_display_custom_draft_survives_follow_mode_restart_and_mirror_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        let mut config = AppConfig::default();
+        let common = launch_options(false, true, "");
+        let custom = display_settings(false, "1280", "960", "160", "com.android.settings");
+        save_device_scrcpy_configuration(
+            &mut config,
+            &paths,
+            "DEVICE_A",
+            common.clone(),
+            Some(custom),
+        )
+        .unwrap();
+
+        // Launching in follow mode must not erase the hidden custom draft.
+        let follow = display_settings(true, " 1280 ", " 960 ", " 160 ", " com.android.settings ");
+        save_device_scrcpy_configuration(
+            &mut config,
+            &paths,
+            "DEVICE_A",
+            common.clone(),
+            Some(follow),
+        )
+        .unwrap();
+        let reloaded = load_config(&paths.config_path, &paths).unwrap();
+        let saved = reloaded.device_scrcpy_new_display.get("DEVICE_A").unwrap();
+        assert!(saved.use_device_defaults);
+        assert_eq!(saved.width, "1280");
+        assert_eq!(saved.height, "960");
+        assert_eq!(saved.dpi, "160");
+        assert_eq!(saved.start_app, "com.android.settings");
+
+        // Mirror saves only the shared options and cannot clear New Display.
+        save_device_scrcpy_options(
+            &mut config,
+            &paths,
+            "DEVICE_A",
+            launch_options(false, false, "--max-size=1280"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.device_scrcpy_new_display.get("DEVICE_A"),
+            reloaded.device_scrcpy_new_display.get("DEVICE_A")
+        );
+    }
+
+    #[test]
+    fn new_display_settings_are_device_isolated_and_default_records_are_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        let mut config = AppConfig::default();
+        let first = display_settings(false, "1280", "960", "160", "com.example.one");
+        let second = display_settings(false, "720", "1280", "", "com.example.two");
+        for (identity, settings) in [("DEVICE_A", first.clone()), ("DEVICE_B", second.clone())] {
+            save_device_scrcpy_configuration(
+                &mut config,
+                &paths,
+                identity,
+                launch_options(false, false, ""),
+                Some(settings),
+            )
+            .unwrap();
+        }
+        let reloaded = load_config(&paths.config_path, &paths).unwrap();
+        assert_eq!(
+            reloaded.device_scrcpy_new_display.get("DEVICE_A"),
+            Some(&first)
+        );
+        assert_eq!(
+            reloaded.device_scrcpy_new_display.get("DEVICE_B"),
+            Some(&second)
+        );
+
+        save_device_scrcpy_configuration(
+            &mut config,
+            &paths,
+            "DEVICE_A",
+            launch_options(false, false, ""),
+            Some(NewDisplaySettings::default()),
+        )
+        .unwrap();
+        assert!(!config.device_scrcpy_new_display.contains_key("DEVICE_A"));
+        assert_eq!(
+            config.device_scrcpy_new_display.get("DEVICE_B"),
+            Some(&second)
+        );
+    }
+
     #[test]
     fn scrcpy_options_deserialize_with_defaults_and_normalize_empty_records() {
         let legacy: AppConfig = serde_json::from_str("{}").unwrap();
         assert!(legacy.device_scrcpy_options.is_empty());
+        assert!(legacy.device_scrcpy_new_display.is_empty());
 
         let normalized = normalize_scrcpy_options(BTreeMap::from([
             ("".into(), launch_options(true, true, "--max-size=1280")),
@@ -979,11 +1140,18 @@ mod tests {
         let before = serde_json::to_value(&config).unwrap();
 
         assert!(
-            save_device_scrcpy_options(
+            save_device_scrcpy_configuration(
                 &mut config,
                 &paths,
                 "DEVICE_A",
                 launch_options(true, false, "--max-size=1280"),
+                Some(display_settings(
+                    false,
+                    "1280",
+                    "960",
+                    "160",
+                    "com.example.app",
+                )),
             )
             .is_err()
         );
@@ -1023,10 +1191,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = history_test_paths(dir.path());
         let options = launch_options(true, true, "--window-title=My Phone");
+        let display = display_settings(false, "1280", "960", "160", "com.example.app");
         let mut settings = AppConfig {
             language: "en".into(),
             device_aliases: BTreeMap::from([("DEVICE_A".into(), "Pixel".into())]),
             device_scrcpy_options: BTreeMap::from([("DEVICE_A".into(), options.clone())]),
+            device_scrcpy_new_display: BTreeMap::from([("DEVICE_A".into(), display.clone())]),
             ..Default::default()
         };
         save_config(&paths.config_path, &settings).unwrap();
@@ -1045,6 +1215,10 @@ mod tests {
         assert_eq!(
             reloaded.device_scrcpy_options.get("DEVICE_A"),
             Some(&options)
+        );
+        assert_eq!(
+            reloaded.device_scrcpy_new_display.get("DEVICE_A"),
+            Some(&display)
         );
     }
 

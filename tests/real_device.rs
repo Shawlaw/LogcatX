@@ -939,6 +939,36 @@ fn scrcpy_long_recording_stops_cleanly() {
     let _ = std::fs::remove_file(outcome.local_path);
 }
 
+/// scrcpy itself rejects --start-app with --no-control. LogcatX must surface
+/// the original diagnostic instead of hiding it behind an exit status.
+#[test]
+#[ignore = "real adb + scrcpy: set LOGCATX_REAL_ADB and LOGCATX_REAL_SCRCPY"]
+fn scrcpy_start_app_no_control_returns_raw_diagnostic() {
+    let Ok(scrcpy_path) = std::env::var("LOGCATX_REAL_SCRCPY") else {
+        eprintln!("LOGCATX_REAL_SCRCPY is not set; skipping");
+        return;
+    };
+    let error = logcatx::scrcpy::launch(
+        &scrcpy_path,
+        &adb_path(),
+        &target_serial(),
+        logcatx::scrcpy::LaunchMode::NewDisplay(
+            logcatx::scrcpy::NewDisplayOptions::default()
+                .with_start_app("com.android.settings")
+                .unwrap(),
+        ),
+        &logcatx::scrcpy::ScrcpyLaunchOptions {
+            no_control: true,
+            ..Default::default()
+        },
+    )
+    .expect_err("scrcpy rejects this option combination");
+    assert!(
+        error.contains("ERROR: Cannot start an Android app if control is disabled"),
+        "raw scrcpy diagnostic must be preserved: {error}"
+    );
+}
+
 fn wait_recording(
     task: &mut recorder::RecordingTask,
     timeout: Duration,

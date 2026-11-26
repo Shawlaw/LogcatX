@@ -86,7 +86,9 @@ Both **Mirror current screen** and **Mirror in new virtual display** under the d
 
 Blank lines are ignored; internal spaces and Windows backslashes are preserved, and shell quotes are unnecessary. An option and its value may also occupy separate lines. Device overrides through `--serial` / `-s` (including getopt abbreviations and clustered short options) are forbidden. Support for every other argument depends on the installed scrcpy version.
 
-Mirror and New Display share one configuration saved by device identity. Launch saves the current options; Cancel does not, and saved options return after an app restart. These options **never affect** quick `screenrecord` clips or long scrcpy recordings.
+Mirror and New Display share one common launch configuration saved by device identity. Launch saves the current options; Cancel does not, and saved options return after an app restart. New Display also remembers its follow-main-display toggle, custom width/height/DPI, and start-app package per device. Switching back to the main display does not erase the custom draft, which returns when custom mode is selected again.
+
+scrcpy rejects `--start-app` together with `--no-control`. To start an app, turn off **Disable device control** or clear the package name. Launch failures show the original scrcpy stdout/stderr, with an additional explanation for this known conflict. These options **never affect** quick `screenrecord` clips or long scrcpy recordings.
 
 ## Portable behavior
 

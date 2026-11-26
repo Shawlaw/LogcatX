@@ -20,6 +20,15 @@
       "extra_args": "--max-size=1280\n--window-title=My Phone"
     }
   },
+  "device_scrcpy_new_display": {
+    "emulator-5554": {
+      "use_device_defaults": false,
+      "width": "1280",
+      "height": "960",
+      "dpi": "160",
+      "start_app": "com.android.settings"
+    }
+  },
   "pinned_devices": [
     "emulator-5554"
   ],

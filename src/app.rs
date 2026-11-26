@@ -35,9 +35,9 @@ const PLATFORM_TOOLS_URL_ZH_CN: &str =
     "https://developer.android.google.cn/tools/releases/platform-tools?hl=zh-cn";
 const SCRCPY_RELEASES_URL: &str = "https://github.com/Genymobile/scrcpy/releases";
 const DEFAULT_DEVICE_DROP_DIR: &str = "/sdcard/Download";
-const DEFAULT_NEW_DISPLAY_WIDTH: &str = "720";
-const DEFAULT_NEW_DISPLAY_HEIGHT: &str = "1600";
-const DEFAULT_NEW_DISPLAY_DPI: &str = "320";
+const DEFAULT_NEW_DISPLAY_WIDTH: &str = scrcpy::DEFAULT_NEW_DISPLAY_WIDTH;
+const DEFAULT_NEW_DISPLAY_HEIGHT: &str = scrcpy::DEFAULT_NEW_DISPLAY_HEIGHT;
+const DEFAULT_NEW_DISPLAY_DPI: &str = scrcpy::DEFAULT_NEW_DISPLAY_DPI;
 const SCRCPY_DIALOG_FOOTER_HEIGHT: f32 = 54.0;
 // Includes the footer controls plus the card's bottom inner margin on the
 // fixed-height settings page.
@@ -180,6 +180,8 @@ pub struct AdbCollectorApp {
     update_connection_test: UpdateConnectionTestPhase,
     scroll_to_update_proxy_settings: bool,
     settings_save_error: Option<String>,
+    /// Blocking scrcpy-path error shown above the Settings page.
+    scrcpy_settings_alert: Option<String>,
     i18n: I18n,
     ime_enter_guard: ImeEnterGuard,
     show_settings: bool,
@@ -432,6 +434,7 @@ impl AdbCollectorApp {
             update_connection_test: UpdateConnectionTestPhase::Idle,
             scroll_to_update_proxy_settings: false,
             settings_save_error: None,
+            scrcpy_settings_alert: None,
             i18n: I18n::new("en"),
             ime_enter_guard: ImeEnterGuard::default(),
             show_settings: require_initial_setup,
@@ -2964,6 +2967,27 @@ impl AdbCollectorApp {
         }
     }
 
+    fn ui_scrcpy_settings_alert(&mut self, ctx: &egui::Context) {
+        let Some(message) = self.scrcpy_settings_alert.clone() else {
+            return;
+        };
+        egui::Modal::new(egui::Id::new("scrcpy-settings-error")).show(ctx, |ui| {
+            ui.set_min_width(420.0);
+            ui.set_max_width(460.0);
+            ui.heading(self.tr("scrcpy.settings_error.title"));
+            ui.add_space(8.0);
+            ui.label(message);
+            ui.add_space(6.0);
+            ui.small(self.tr("scrcpy.settings_error.hint"));
+            ui.add_space(12.0);
+            ui.vertical_centered(|ui| {
+                if ui.button(self.tr("files.alert_ok")).clicked() {
+                    self.scrcpy_settings_alert = None;
+                }
+            });
+        });
+    }
+
     fn ui_scrcpy_mirror_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_scrcpy_mirror_dialog {
             return;
@@ -5031,7 +5055,7 @@ impl AdbCollectorApp {
             self.scrcpy_mirror_error = Some(self.tr("scrcpy.options.scrcpy_unavailable"));
             return;
         }
-        if let Err(error) = self.persist_scrcpy_options_for_launch(&device_id, &options) {
+        if let Err(error) = self.persist_scrcpy_options_for_launch(&device_id, &options, None) {
             self.scrcpy_mirror_error = Some(error);
             return;
         }
@@ -5054,8 +5078,7 @@ impl AdbCollectorApp {
                 ));
             }
             Err(error) => {
-                self.scrcpy_mirror_error =
-                    Some(self.tr_args("scrcpy.options.launch_failed", &[("error", error)]));
+                self.scrcpy_mirror_error = Some(self.scrcpy_launch_error_message(error));
             }
         }
     }
@@ -5064,16 +5087,18 @@ impl AdbCollectorApp {
         &mut self,
         device_id: &str,
         options: &scrcpy::ScrcpyLaunchOptions,
+        new_display: Option<scrcpy::NewDisplaySettings>,
     ) -> Result<(), String> {
         if let Err(error) = scrcpy::parse_extra_args(&options.extra_args) {
             return Err(self.scrcpy_args_error_message(&error));
         }
         let identity_key = self.device_identity_key(device_id);
-        config::save_device_scrcpy_options(
+        config::save_device_scrcpy_configuration(
             &mut self.config,
             &self.app_paths,
             &identity_key,
             options.clone(),
+            new_display,
         )
         .map_err(|error| self.tr_args("scrcpy.options.save_failed", &[("error", error)]))
     }
@@ -5099,6 +5124,17 @@ impl AdbCollectorApp {
         }
     }
 
+    fn scrcpy_launch_error_message(&self, error: String) -> String {
+        let start_app_conflict =
+            error.contains("Cannot start an Android app if control is disabled");
+        let mut message = self.tr_args("scrcpy.options.launch_failed", &[("error", error)]);
+        if start_app_conflict {
+            message.push('\n');
+            message.push_str(&self.tr("scrcpy.new_display.error.start_app_no_control"));
+        }
+        message
+    }
+
     fn open_new_display_dialog(&mut self, device_id: String) {
         let Some(transport_serial) = self.ready_scrcpy_transport(&device_id) else {
             return;
@@ -5121,11 +5157,12 @@ impl AdbCollectorApp {
         self.show_new_display_dialog = true;
         self.show_scrcpy_mirror_dialog = false;
         self.scrcpy_mirror_device_id = None;
-        self.new_display_use_device_defaults = true;
-        self.new_display_width_input = DEFAULT_NEW_DISPLAY_WIDTH.to_owned();
-        self.new_display_height_input = DEFAULT_NEW_DISPLAY_HEIGHT.to_owned();
-        self.new_display_dpi_input = DEFAULT_NEW_DISPLAY_DPI.to_owned();
-        self.new_display_start_app_input.clear();
+        let display_settings = saved_new_display_settings(&self.config, &self.devices, &device_id);
+        self.new_display_use_device_defaults = display_settings.use_device_defaults;
+        self.new_display_width_input = display_settings.width;
+        self.new_display_height_input = display_settings.height;
+        self.new_display_dpi_input = display_settings.dpi;
+        self.new_display_start_app_input = display_settings.start_app;
         self.new_display_app_filter_input.clear();
         self.new_display_apps.clear();
         self.new_display_apps_error = None;
@@ -5140,6 +5177,14 @@ impl AdbCollectorApp {
 
     fn start_scrcpy_new_display(&mut self, device_id: String, options: scrcpy::NewDisplayOptions) {
         let launch_options = self.new_display_scrcpy_options_input.clone();
+        let display_settings = scrcpy::NewDisplaySettings {
+            use_device_defaults: self.new_display_use_device_defaults,
+            width: self.new_display_width_input.clone(),
+            height: self.new_display_height_input.clone(),
+            dpi: self.new_display_dpi_input.clone(),
+            start_app: self.new_display_start_app_input.clone(),
+        }
+        .normalized();
         let Some(transport_serial) = self.ready_scrcpy_transport(&device_id) else {
             self.new_display_scrcpy_error = Some(self.tr("scrcpy.options.device_unavailable"));
             return;
@@ -5155,7 +5200,11 @@ impl AdbCollectorApp {
             ));
             return;
         }
-        if let Err(error) = self.persist_scrcpy_options_for_launch(&device_id, &launch_options) {
+        if let Err(error) = self.persist_scrcpy_options_for_launch(
+            &device_id,
+            &launch_options,
+            Some(display_settings),
+        ) {
             self.new_display_scrcpy_error = Some(error);
             return;
         }
@@ -5178,8 +5227,7 @@ impl AdbCollectorApp {
                 ));
             }
             Err(error) => {
-                self.new_display_scrcpy_error =
-                    Some(self.tr_args("scrcpy.options.launch_failed", &[("error", error)]));
+                self.new_display_scrcpy_error = Some(self.scrcpy_launch_error_message(error));
             }
         }
     }
@@ -5207,7 +5255,9 @@ impl AdbCollectorApp {
 
     fn configured_scrcpy_version(&mut self) -> Option<scrcpy::ScrcpyVersion> {
         if self.config.scrcpy_path.trim().is_empty() {
-            self.set_error(self.tr("status.scrcpy_not_configured"));
+            let error = self.tr("status.scrcpy_not_configured");
+            self.set_error(error.clone());
+            self.scrcpy_settings_alert = Some(error);
             self.active_page = NavigationPage::Settings;
             return None;
         }
@@ -5215,7 +5265,8 @@ impl AdbCollectorApp {
         match scrcpy::validate_scrcpy_path(&self.config.scrcpy_path) {
             Ok(version) => Some(version),
             Err(err) => {
-                self.set_error(err);
+                self.set_error(err.clone());
+                self.scrcpy_settings_alert = Some(err);
                 self.active_page = NavigationPage::Settings;
                 None
             }
@@ -6622,6 +6673,21 @@ fn saved_scrcpy_launch_options(
         .unwrap_or_default()
 }
 
+fn saved_new_display_settings(
+    config: &AppConfig,
+    devices: &[DeviceEntry],
+    serial_or_identity: &str,
+) -> scrcpy::NewDisplaySettings {
+    let identity_key = device_index(devices, serial_or_identity)
+        .map(|index| devices[index].info.identity_key.as_str())
+        .unwrap_or(serial_or_identity);
+    config
+        .device_scrcpy_new_display
+        .get(identity_key)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn device_index(devices: &[DeviceEntry], identity_or_serial: &str) -> Option<usize> {
     devices
         .iter()
@@ -7000,6 +7066,7 @@ impl eframe::App for AdbCollectorApp {
         self.ui_connect_dialog(ctx);
         self.ui_drop_target_dialog(ctx);
         self.ui_update_dialog(ctx);
+        self.ui_scrcpy_settings_alert(ctx);
         self.ui_drag_overlay(ctx);
         ctx.request_repaint_after(Duration::from_millis(250));
     }
@@ -7204,10 +7271,15 @@ mod tests {
         device_transport_rank, filter_installed_packages, fold_mdns_advertisements,
         format_device_model_name, hide_unattributed_handshake_endpoints, install_dropped_apks,
         is_current_cleanup_preview_response, is_mdns_advertisement, pick_primary_device_info,
-        saved_scrcpy_launch_options, scrcpy_dialog_scroll_height, settings_error_scroll_area,
-        settings_path_input_width, should_reveal_proxy_settings_content, transport_device_index,
+        saved_new_display_settings, saved_scrcpy_launch_options, scrcpy_dialog_scroll_height,
+        settings_error_scroll_area, settings_path_input_width,
+        should_reveal_proxy_settings_content, transport_device_index,
     };
-    use crate::{config::AppConfig, models::DeviceInfo, scrcpy::ScrcpyLaunchOptions};
+    use crate::{
+        config::AppConfig,
+        models::DeviceInfo,
+        scrcpy::{NewDisplaySettings, ScrcpyLaunchOptions},
+    };
     use eframe::egui;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -7246,10 +7318,21 @@ mod tests {
             no_audio: true,
             extra_args: "--window-title=My Phone".into(),
         };
+        let display = NewDisplaySettings {
+            use_device_defaults: true,
+            width: "1280".into(),
+            height: "960".into(),
+            dpi: "160".into(),
+            start_app: "com.android.settings".into(),
+        };
         let config = AppConfig {
             device_scrcpy_options: std::collections::BTreeMap::from([(
                 "REAL_DEVICE".into(),
                 options.clone(),
+            )]),
+            device_scrcpy_new_display: std::collections::BTreeMap::from([(
+                "REAL_DEVICE".into(),
+                display.clone(),
             )]),
             ..Default::default()
         };
@@ -7264,10 +7347,18 @@ mod tests {
                 saved_scrcpy_launch_options(&config, &devices, serial),
                 options
             );
+            assert_eq!(
+                saved_new_display_settings(&config, &devices, serial),
+                display
+            );
         }
         assert_eq!(
             saved_scrcpy_launch_options(&config, &devices, "OTHER_DEVICE"),
             ScrcpyLaunchOptions::default()
+        );
+        assert_eq!(
+            saved_new_display_settings(&config, &devices, "OTHER_DEVICE"),
+            NewDisplaySettings::default()
         );
     }
 
