@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 - 中文版更新日志：[`CHANGELOG.md`](./CHANGELOG.md)
 
+## [0.9.6] - 2026-11-26
+
+### Added
+- The scrcpy Mirror and New Display dialogs now offer per-device **Disable device control** (`--no-control`) and **Disable audio forwarding** (`--no-audio`) options. Both modes share one saved configuration per device identity, restore it after restart, and keep it across merged USB/Wi-Fi transports
+- Extra scrcpy arguments can be entered one per line. Each line is passed as an independent argv item, preserving internal spaces and Windows backslashes without shell quotes or shell execution
+
+### Enhanced
+- Extra arguments are checked for NUL characters, input/count limits, and forbidden `--serial` / `-s` device overrides. Validation or persistence failures prevent launch while keeping the draft editable
+- Legacy configs default to an empty options map, empty records are normalized away, and saving ordinary Settings preserves per-device scrcpy options
+
+### Notes
+- Custom argument support depends on the installed scrcpy version. Quick recording and long scrcpy recording retain their independent fixed arguments and never read these mirror launch options
+
 ## [0.9.5] - 2026-11-14
 
 ### Enhanced

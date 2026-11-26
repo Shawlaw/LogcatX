@@ -38,6 +38,7 @@ const DEFAULT_DEVICE_DROP_DIR: &str = "/sdcard/Download";
 const DEFAULT_NEW_DISPLAY_WIDTH: &str = "720";
 const DEFAULT_NEW_DISPLAY_HEIGHT: &str = "1600";
 const DEFAULT_NEW_DISPLAY_DPI: &str = "320";
+const SCRCPY_DIALOG_FOOTER_HEIGHT: f32 = 54.0;
 // Includes the footer controls plus the card's bottom inner margin on the
 // fixed-height settings page.
 const SETTINGS_FOOTER_HEIGHT: f32 = 70.0;
@@ -196,6 +197,7 @@ pub struct AdbCollectorApp {
     cleanup_in_progress: bool,
     show_alias_dialog: bool,
     show_logcat_args_dialog: bool,
+    show_scrcpy_mirror_dialog: bool,
     show_new_display_dialog: bool,
     show_connect_dialog: bool,
     selected_serial: Option<String>,
@@ -232,7 +234,12 @@ pub struct AdbCollectorApp {
     alias_input_value: String,
     logcat_args_input_serial: Option<String>,
     logcat_args_input_value: String,
+    scrcpy_mirror_device_id: Option<String>,
+    scrcpy_mirror_options_input: scrcpy::ScrcpyLaunchOptions,
+    scrcpy_mirror_error: Option<String>,
     new_display_device_id: Option<String>,
+    new_display_scrcpy_options_input: scrcpy::ScrcpyLaunchOptions,
+    new_display_scrcpy_error: Option<String>,
     new_display_use_device_defaults: bool,
     new_display_width_input: String,
     new_display_height_input: String,
@@ -442,6 +449,7 @@ impl AdbCollectorApp {
             cleanup_in_progress: false,
             show_alias_dialog: false,
             show_logcat_args_dialog: false,
+            show_scrcpy_mirror_dialog: false,
             show_new_display_dialog: false,
             show_connect_dialog: false,
             selected_serial: None,
@@ -476,7 +484,12 @@ impl AdbCollectorApp {
             alias_input_value: String::new(),
             logcat_args_input_serial: None,
             logcat_args_input_value: String::new(),
+            scrcpy_mirror_device_id: None,
+            scrcpy_mirror_options_input: scrcpy::ScrcpyLaunchOptions::default(),
+            scrcpy_mirror_error: None,
             new_display_device_id: None,
+            new_display_scrcpy_options_input: scrcpy::ScrcpyLaunchOptions::default(),
+            new_display_scrcpy_error: None,
             new_display_use_device_defaults: true,
             new_display_width_input: DEFAULT_NEW_DISPLAY_WIDTH.to_owned(),
             new_display_height_input: DEFAULT_NEW_DISPLAY_HEIGHT.to_owned(),
@@ -2171,7 +2184,7 @@ impl AdbCollectorApp {
                 self.read_device_clipboard(serial);
             }
             if let Some(serial) = open_scrcpy_mirror_serial {
-                self.start_scrcpy_mirror(serial);
+                self.open_scrcpy_mirror_dialog(serial);
             }
             if let Some(serial) = open_new_display_serial {
                 self.open_new_display_dialog(serial);
@@ -2951,6 +2964,75 @@ impl AdbCollectorApp {
         }
     }
 
+    fn ui_scrcpy_mirror_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_scrcpy_mirror_dialog {
+            return;
+        }
+        let Some(device_id) = self.scrcpy_mirror_device_id.clone() else {
+            self.show_scrcpy_mirror_dialog = false;
+            return;
+        };
+
+        let mut open = true;
+        let mut launch_clicked = false;
+        let mut cancel_clicked = false;
+        let mut options = self.scrcpy_mirror_options_input.clone();
+        let i18n = self.i18n.clone();
+        let device_label = self.device_identity_label(&device_id);
+        let title = self.tr("scrcpy.mirror.title");
+        let launch_label = self.tr("scrcpy.mirror.launch");
+        let cancel_label = self.tr("settings.cancel");
+        let launch_error = self.scrcpy_mirror_error.clone();
+        let mut options_changed = false;
+
+        egui::Window::new(title)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([560.0, 480.0])
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let scroll_height = scrcpy_dialog_scroll_height(ui.available_height());
+                egui::ScrollArea::vertical()
+                    .id_salt("scrcpy-mirror-options")
+                    .max_height(scroll_height)
+                    .min_scrolled_height(0.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.label(self.tr_args(
+                            "scrcpy.new_display.device",
+                            &[("device", device_label.clone())],
+                        ));
+                        ui.add_space(8.0);
+                        options_changed = ui_scrcpy_launch_options_editor(ui, &mut options, &i18n);
+                        if let Some(error) = &launch_error {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(error).color(Color32::from_rgb(192, 57, 43)));
+                        }
+                    });
+                ui.add_space(10.0);
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    cancel_clicked = ui.button(cancel_label).clicked();
+                    launch_clicked = ui.button(launch_label).clicked();
+                });
+            });
+
+        self.scrcpy_mirror_options_input = options;
+        if options_changed {
+            self.scrcpy_mirror_error = None;
+        }
+        if !open || cancel_clicked {
+            self.show_scrcpy_mirror_dialog = false;
+            self.scrcpy_mirror_device_id = None;
+            self.scrcpy_mirror_error = None;
+            self.scrcpy_mirror_options_input = scrcpy::ScrcpyLaunchOptions::default();
+            return;
+        }
+        if launch_clicked {
+            self.start_scrcpy_mirror(device_id);
+        }
+    }
+
     fn ui_new_display_dialog(&mut self, ctx: &egui::Context) {
         if !self.show_new_display_dialog {
             return;
@@ -2983,126 +3065,147 @@ impl AdbCollectorApp {
         let cancel_label = self.tr("settings.cancel");
         let installed_apps = self.new_display_apps.clone();
         let apps_error = self.new_display_apps_error.clone();
+        let mut scrcpy_options = self.new_display_scrcpy_options_input.clone();
+        let i18n = self.i18n.clone();
+        let launch_error = self.new_display_scrcpy_error.clone();
+        let mut scrcpy_options_changed = false;
 
         egui::Window::new(title)
             .collapsible(false)
-            .resizable(false)
+            .resizable(true)
+            .default_size([600.0, 680.0])
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label(self.tr_args(
-                    "scrcpy.new_display.device",
-                    &[("device", device_label.clone())],
-                ));
-                ui.add_space(6.0);
-                styled_checkbox(
-                    ui,
-                    true,
-                    &mut self.new_display_use_device_defaults,
-                    follow_device_label,
-                );
-                if !self.new_display_use_device_defaults {
-                    ui.add_space(6.0);
-                    ui.label(dimensions_label);
-                    ui.horizontal(|ui| {
-                        ui.label(width_label);
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.new_display_width_input)
-                                .desired_width(72.0),
+                let scroll_height = scrcpy_dialog_scroll_height(ui.available_height());
+                egui::ScrollArea::vertical()
+                    .id_salt("scrcpy-new-display-options")
+                    .max_height(scroll_height)
+                    .min_scrolled_height(0.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.label(self.tr_args(
+                            "scrcpy.new_display.device",
+                            &[("device", device_label.clone())],
+                        ));
+                        ui.add_space(6.0);
+                        styled_checkbox(
+                            ui,
+                            true,
+                            &mut self.new_display_use_device_defaults,
+                            follow_device_label,
                         );
-                        text_menu::text_edit_menu(
-                            &response,
-                            &mut self.new_display_width_input,
-                            &self.i18n,
-                        );
-                        ui.label(height_label);
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.new_display_height_input)
-                                .desired_width(72.0),
-                        );
-                        text_menu::text_edit_menu(
-                            &response,
-                            &mut self.new_display_height_input,
-                            &self.i18n,
-                        );
-                        ui.label(dpi_label);
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut self.new_display_dpi_input)
-                                .desired_width(64.0),
-                        );
-                        text_menu::text_edit_menu(
-                            &response,
-                            &mut self.new_display_dpi_input,
-                            &self.i18n,
-                        );
-                    });
-                }
-                ui.add_space(6.0);
-                ui.label(start_app_label);
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.new_display_start_app_input)
-                        .hint_text(text_menu::hint("com.example.app"))
-                        .desired_width(300.0),
-                );
-                text_menu::text_edit_menu(
-                    &response,
-                    &mut self.new_display_start_app_input,
-                    &self.i18n,
-                );
-                ui.small(start_app_hint);
-                if self.new_display_apps_loading {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.small(loading_apps_label);
-                    });
-                } else if let Some(error) = apps_error {
-                    ui.small(RichText::new(error).color(Color32::from_rgb(192, 57, 43)));
-                } else if installed_apps.is_empty() {
-                    ui.small(no_apps_label);
-                } else {
-                    ui.add_space(6.0);
-                    ui.label(filter_apps_label);
-                    let response = ui.add(
-                        egui::TextEdit::singleline(&mut self.new_display_app_filter_input)
-                            .hint_text(text_menu::hint(filter_apps_hint))
-                            .desired_width(300.0),
-                    );
-                    text_menu::text_edit_menu(
-                        &response,
-                        &mut self.new_display_app_filter_input,
-                        &self.i18n,
-                    );
-                    let filtered_apps = filter_installed_packages(
-                        &installed_apps,
-                        &self.new_display_app_filter_input,
-                    );
-                    if filtered_apps.is_empty() {
-                        ui.small(no_matching_apps_label);
-                    } else {
-                        egui::ComboBox::from_id_salt("new-display-start-app")
-                            .selected_text(if self.new_display_start_app_input.is_empty() {
-                                select_app_label.clone()
-                            } else {
-                                self.new_display_start_app_input.clone()
-                            })
-                            .width(300.0)
-                            .show_ui(ui, |ui| {
-                                egui::ScrollArea::vertical()
-                                    .max_height(180.0)
-                                    .show(ui, |ui| {
-                                        for package in filtered_apps {
-                                            ui.selectable_value(
-                                                &mut self.new_display_start_app_input,
-                                                package.to_owned(),
-                                                package,
-                                            );
-                                        }
-                                    });
+                        if !self.new_display_use_device_defaults {
+                            ui.add_space(6.0);
+                            ui.label(dimensions_label);
+                            ui.horizontal(|ui| {
+                                ui.label(width_label);
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut self.new_display_width_input)
+                                        .desired_width(72.0),
+                                );
+                                text_menu::text_edit_menu(
+                                    &response,
+                                    &mut self.new_display_width_input,
+                                    &self.i18n,
+                                );
+                                ui.label(height_label);
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut self.new_display_height_input)
+                                        .desired_width(72.0),
+                                );
+                                text_menu::text_edit_menu(
+                                    &response,
+                                    &mut self.new_display_height_input,
+                                    &self.i18n,
+                                );
+                                ui.label(dpi_label);
+                                let response = ui.add(
+                                    egui::TextEdit::singleline(&mut self.new_display_dpi_input)
+                                        .desired_width(64.0),
+                                );
+                                text_menu::text_edit_menu(
+                                    &response,
+                                    &mut self.new_display_dpi_input,
+                                    &self.i18n,
+                                );
                             });
-                    }
-                }
-                ui.add_space(6.0);
-                ui.small(hint);
+                        }
+                        ui.add_space(6.0);
+                        ui.label(start_app_label);
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut self.new_display_start_app_input)
+                                .hint_text(text_menu::hint("com.example.app"))
+                                .desired_width(300.0),
+                        );
+                        text_menu::text_edit_menu(
+                            &response,
+                            &mut self.new_display_start_app_input,
+                            &self.i18n,
+                        );
+                        ui.small(start_app_hint);
+                        if self.new_display_apps_loading {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.small(loading_apps_label);
+                            });
+                        } else if let Some(error) = apps_error {
+                            ui.small(RichText::new(error).color(Color32::from_rgb(192, 57, 43)));
+                        } else if installed_apps.is_empty() {
+                            ui.small(no_apps_label);
+                        } else {
+                            ui.add_space(6.0);
+                            ui.label(filter_apps_label);
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut self.new_display_app_filter_input)
+                                    .hint_text(text_menu::hint(filter_apps_hint))
+                                    .desired_width(300.0),
+                            );
+                            text_menu::text_edit_menu(
+                                &response,
+                                &mut self.new_display_app_filter_input,
+                                &self.i18n,
+                            );
+                            let filtered_apps = filter_installed_packages(
+                                &installed_apps,
+                                &self.new_display_app_filter_input,
+                            );
+                            if filtered_apps.is_empty() {
+                                ui.small(no_matching_apps_label);
+                            } else {
+                                egui::ComboBox::from_id_salt("new-display-start-app")
+                                    .selected_text(if self.new_display_start_app_input.is_empty() {
+                                        select_app_label.clone()
+                                    } else {
+                                        self.new_display_start_app_input.clone()
+                                    })
+                                    .width(300.0)
+                                    .show_ui(ui, |ui| {
+                                        egui::ScrollArea::vertical().max_height(180.0).show(
+                                            ui,
+                                            |ui| {
+                                                for package in filtered_apps {
+                                                    ui.selectable_value(
+                                                        &mut self.new_display_start_app_input,
+                                                        package.to_owned(),
+                                                        package,
+                                                    );
+                                                }
+                                            },
+                                        );
+                                    });
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.small(hint);
+                        ui.add_space(10.0);
+                        scrcpy_options_changed =
+                            ui_scrcpy_launch_options_editor(ui, &mut scrcpy_options, &i18n);
+                        if let Some(error) = &launch_error {
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(error).color(Color32::from_rgb(192, 57, 43)));
+                        }
+                    });
                 ui.add_space(10.0);
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
                     cancel_clicked = ui.button(cancel_label).clicked();
@@ -3110,9 +3213,15 @@ impl AdbCollectorApp {
                 });
             });
 
+        self.new_display_scrcpy_options_input = scrcpy_options;
+        if scrcpy_options_changed {
+            self.new_display_scrcpy_error = None;
+        }
         if !open || cancel_clicked {
             self.show_new_display_dialog = false;
             self.new_display_device_id = None;
+            self.new_display_scrcpy_error = None;
+            self.new_display_scrcpy_options_input = scrcpy::ScrcpyLaunchOptions::default();
             return;
         }
         if launch_clicked {
@@ -3128,7 +3237,7 @@ impl AdbCollectorApp {
             .and_then(|options| options.with_start_app(&self.new_display_start_app_input));
             match options {
                 Ok(options) => self.start_scrcpy_new_display(device_id, options),
-                Err(err) => self.set_error(err),
+                Err(error) => self.new_display_scrcpy_error = Some(error),
             }
         }
     }
@@ -3979,17 +4088,10 @@ impl AdbCollectorApp {
             scrcpy_path: self.scrcpy_path_input.trim().to_owned(),
             log_dir: self.log_dir_input.trim().to_owned(),
             record_dir: self.record_dir_input.trim().to_owned(),
-            app_log_max_size_mb: self.config.app_log_max_size_mb,
             language: self.language_input.clone(),
-            device_aliases: self.config.device_aliases.clone(),
-            pinned_devices: self.config.pinned_devices.clone(),
-            recent_connections: self.config.recent_connections.clone(),
-            wireless_connections: self.config.wireless_connections.clone(),
-            apk_auto_install_devices: self.config.apk_auto_install_devices.clone(),
-            device_logcat_args: self.config.device_logcat_args.clone(),
             auto_check_updates: self.auto_update_input,
             update_proxy: self.update_proxy_input(),
-            file_favorites: self.config.file_favorites.clone(),
+            ..self.config.clone()
         };
 
         if candidate.adb_path.is_empty() || candidate.log_dir.is_empty() {
@@ -4043,17 +4145,7 @@ impl AdbCollectorApp {
             scrcpy_path: fs_utils::display_path_string(&candidate.scrcpy_path),
             log_dir: fs_utils::display_path(&resolved_log_dir),
             record_dir: fs_utils::display_path(&record_dir),
-            app_log_max_size_mb: candidate.app_log_max_size_mb,
-            language: self.language_input.clone(),
-            device_aliases: candidate.device_aliases.clone(),
-            pinned_devices: candidate.pinned_devices.clone(),
-            recent_connections: candidate.recent_connections.clone(),
-            wireless_connections: candidate.wireless_connections.clone(),
-            apk_auto_install_devices: candidate.apk_auto_install_devices.clone(),
-            device_logcat_args: candidate.device_logcat_args.clone(),
-            auto_check_updates: candidate.auto_check_updates,
-            update_proxy: candidate.update_proxy.clone(),
-            file_favorites: candidate.file_favorites.clone(),
+            ..candidate.clone()
         };
 
         if let Err(err) = config::save_config(&self.app_paths.config_path, &saved) {
@@ -4912,11 +5004,35 @@ impl AdbCollectorApp {
             .map_err(|err| format!("Failed to copy the screenshot to the system clipboard: {err}"))
     }
 
+    fn open_scrcpy_mirror_dialog(&mut self, device_id: String) {
+        if self.ready_scrcpy_transport(&device_id).is_none()
+            || self.configured_scrcpy_version().is_none()
+        {
+            return;
+        }
+
+        self.scrcpy_mirror_options_input =
+            saved_scrcpy_launch_options(&self.config, &self.devices, &device_id);
+        self.scrcpy_mirror_error = None;
+        self.scrcpy_mirror_device_id = Some(device_id);
+        self.show_scrcpy_mirror_dialog = true;
+        // Only one scrcpy launch dialog owns the shared per-device draft.
+        self.show_new_display_dialog = false;
+        self.new_display_device_id = None;
+    }
+
     fn start_scrcpy_mirror(&mut self, device_id: String) {
+        let options = self.scrcpy_mirror_options_input.clone();
         let Some(transport_serial) = self.ready_scrcpy_transport(&device_id) else {
+            self.scrcpy_mirror_error = Some(self.tr("scrcpy.options.device_unavailable"));
             return;
         };
         if self.configured_scrcpy_version().is_none() {
+            self.scrcpy_mirror_error = Some(self.tr("scrcpy.options.scrcpy_unavailable"));
+            return;
+        }
+        if let Err(error) = self.persist_scrcpy_options_for_launch(&device_id, &options) {
+            self.scrcpy_mirror_error = Some(error);
             return;
         }
 
@@ -4925,13 +5041,61 @@ impl AdbCollectorApp {
             &self.config.adb_path,
             &transport_serial,
             scrcpy::LaunchMode::Mirror,
+            &options,
         );
         match result {
-            Ok(()) => self.set_info(self.tr_args(
-                "status.scrcpy_mirror_opened",
-                &[("serial", self.device_identity_label(&device_id))],
-            )),
-            Err(err) => self.set_error(err),
+            Ok(()) => {
+                self.show_scrcpy_mirror_dialog = false;
+                self.scrcpy_mirror_device_id = None;
+                self.scrcpy_mirror_error = None;
+                self.set_info(self.tr_args(
+                    "status.scrcpy_mirror_opened",
+                    &[("serial", self.device_identity_label(&device_id))],
+                ));
+            }
+            Err(error) => {
+                self.scrcpy_mirror_error =
+                    Some(self.tr_args("scrcpy.options.launch_failed", &[("error", error)]));
+            }
+        }
+    }
+
+    fn persist_scrcpy_options_for_launch(
+        &mut self,
+        device_id: &str,
+        options: &scrcpy::ScrcpyLaunchOptions,
+    ) -> Result<(), String> {
+        if let Err(error) = scrcpy::parse_extra_args(&options.extra_args) {
+            return Err(self.scrcpy_args_error_message(&error));
+        }
+        let identity_key = self.device_identity_key(device_id);
+        config::save_device_scrcpy_options(
+            &mut self.config,
+            &self.app_paths,
+            &identity_key,
+            options.clone(),
+        )
+        .map_err(|error| self.tr_args("scrcpy.options.save_failed", &[("error", error)]))
+    }
+
+    fn scrcpy_args_error_message(&self, error: &scrcpy::ScrcpyArgsError) -> String {
+        match error {
+            scrcpy::ScrcpyArgsError::ContainsNul => self.tr("scrcpy.options.error.nul"),
+            scrcpy::ScrcpyArgsError::InputTooLong { max_bytes } => self.tr_args(
+                "scrcpy.options.error.input_too_long",
+                &[("max", max_bytes.to_string())],
+            ),
+            scrcpy::ScrcpyArgsError::TooManyArguments { max } => {
+                self.tr_args("scrcpy.options.error.too_many", &[("max", max.to_string())])
+            }
+            scrcpy::ScrcpyArgsError::ArgumentTooLong { line, max_bytes } => self.tr_args(
+                "scrcpy.options.error.argument_too_long",
+                &[("line", line.to_string()), ("max", max_bytes.to_string())],
+            ),
+            scrcpy::ScrcpyArgsError::DeviceSelector { line } => self.tr_args(
+                "scrcpy.options.error.device_selector",
+                &[("line", line.to_string())],
+            ),
         }
     }
 
@@ -4950,8 +5114,17 @@ impl AdbCollectorApp {
             return;
         }
 
+        self.new_display_scrcpy_options_input =
+            saved_scrcpy_launch_options(&self.config, &self.devices, &device_id);
+        self.new_display_scrcpy_error = None;
         self.new_display_device_id = Some(device_id.clone());
         self.show_new_display_dialog = true;
+        self.show_scrcpy_mirror_dialog = false;
+        self.scrcpy_mirror_device_id = None;
+        self.new_display_use_device_defaults = true;
+        self.new_display_width_input = DEFAULT_NEW_DISPLAY_WIDTH.to_owned();
+        self.new_display_height_input = DEFAULT_NEW_DISPLAY_HEIGHT.to_owned();
+        self.new_display_dpi_input = DEFAULT_NEW_DISPLAY_DPI.to_owned();
         self.new_display_start_app_input.clear();
         self.new_display_app_filter_input.clear();
         self.new_display_apps.clear();
@@ -4966,17 +5139,24 @@ impl AdbCollectorApp {
     }
 
     fn start_scrcpy_new_display(&mut self, device_id: String, options: scrcpy::NewDisplayOptions) {
+        let launch_options = self.new_display_scrcpy_options_input.clone();
         let Some(transport_serial) = self.ready_scrcpy_transport(&device_id) else {
+            self.new_display_scrcpy_error = Some(self.tr("scrcpy.options.device_unavailable"));
             return;
         };
         let Some(version) = self.configured_scrcpy_version() else {
+            self.new_display_scrcpy_error = Some(self.tr("scrcpy.options.scrcpy_unavailable"));
             return;
         };
         if !version.supports_new_display() {
-            self.set_error(self.tr_args(
+            self.new_display_scrcpy_error = Some(self.tr_args(
                 "status.scrcpy_new_display_requires_v3",
                 &[("version", version.to_string())],
             ));
+            return;
+        }
+        if let Err(error) = self.persist_scrcpy_options_for_launch(&device_id, &launch_options) {
+            self.new_display_scrcpy_error = Some(error);
             return;
         }
 
@@ -4985,17 +5165,22 @@ impl AdbCollectorApp {
             &self.config.adb_path,
             &transport_serial,
             scrcpy::LaunchMode::NewDisplay(options),
+            &launch_options,
         );
         match result {
             Ok(()) => {
                 self.show_new_display_dialog = false;
                 self.new_display_device_id = None;
+                self.new_display_scrcpy_error = None;
                 self.set_info(self.tr_args(
                     "status.scrcpy_new_display_opened",
                     &[("serial", self.device_identity_label(&device_id))],
                 ));
             }
-            Err(err) => self.set_error(err),
+            Err(error) => {
+                self.new_display_scrcpy_error =
+                    Some(self.tr_args("scrcpy.options.launch_failed", &[("error", error)]));
+            }
         }
     }
 
@@ -6258,6 +6443,44 @@ fn apply_visual_style(ctx: &egui::Context) {
     ctx.set_style(style);
 }
 
+fn ui_scrcpy_launch_options_editor(
+    ui: &mut egui::Ui,
+    options: &mut scrcpy::ScrcpyLaunchOptions,
+    i18n: &I18n,
+) -> bool {
+    let mut changed = styled_checkbox(
+        ui,
+        true,
+        &mut options.no_control,
+        i18n.tr("scrcpy.options.no_control"),
+    )
+    .changed();
+    ui.small(i18n.tr("scrcpy.options.no_control_hint"));
+    ui.add_space(6.0);
+    changed |= styled_checkbox(
+        ui,
+        true,
+        &mut options.no_audio,
+        i18n.tr("scrcpy.options.no_audio"),
+    )
+    .changed();
+    ui.small(i18n.tr("scrcpy.options.no_audio_hint"));
+    ui.add_space(10.0);
+    ui.label(i18n.tr("scrcpy.options.extra_args"));
+    let response = ui.add_sized(
+        [ui.available_width(), 112.0],
+        egui::TextEdit::multiline(&mut options.extra_args)
+            .desired_rows(5)
+            .hint_text(text_menu::hint(
+                i18n.tr("scrcpy.options.extra_args_placeholder"),
+            )),
+    );
+    text_menu::text_edit_menu(&response, &mut options.extra_args, i18n);
+    changed |= response.changed();
+    ui.small(i18n.tr("scrcpy.options.extra_args_hint"));
+    changed
+}
+
 /// 复选框对勾的强调色（选中行边框同款蓝）。
 const CHECK_MARK_COLOR: Color32 = Color32::from_rgb(56, 116, 255);
 
@@ -6336,6 +6559,10 @@ fn is_current_cleanup_preview_response(current_generation: u64, request_id: u64)
     current_generation == request_id
 }
 
+fn scrcpy_dialog_scroll_height(available_height: f32) -> f32 {
+    (available_height - SCRCPY_DIALOG_FOOTER_HEIGHT).max(0.0)
+}
+
 fn settings_path_input_width(available_width: f32) -> f32 {
     (available_width * 0.5).clamp(160.0, 420.0)
 }
@@ -6380,6 +6607,21 @@ fn format_device_model_name(manufacturer: Option<&str>, model: Option<&str>) -> 
 /// Row/session keys take precedence over transport aliases. An address may
 /// be a retained row key while also naming a different, independently shown
 /// endpoint after a USB pairing changes.
+fn saved_scrcpy_launch_options(
+    config: &AppConfig,
+    devices: &[DeviceEntry],
+    serial_or_identity: &str,
+) -> scrcpy::ScrcpyLaunchOptions {
+    let identity_key = device_index(devices, serial_or_identity)
+        .map(|index| devices[index].info.identity_key.as_str())
+        .unwrap_or(serial_or_identity);
+    config
+        .device_scrcpy_options
+        .get(identity_key)
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn device_index(devices: &[DeviceEntry], identity_or_serial: &str) -> Option<usize> {
     devices
         .iter()
@@ -6748,6 +6990,7 @@ impl eframe::App for AdbCollectorApp {
         self.ui_record_dialog(ctx);
         self.ui_text_dialog(ctx);
         self.ui_recording_cleanup_dialog(ctx);
+        self.ui_scrcpy_mirror_dialog(ctx);
         self.ui_new_display_dialog(ctx);
         self.ui_clear_confirm_dialog(ctx);
         self.ui_alias_dialog(ctx);
@@ -6961,10 +7204,10 @@ mod tests {
         device_transport_rank, filter_installed_packages, fold_mdns_advertisements,
         format_device_model_name, hide_unattributed_handshake_endpoints, install_dropped_apks,
         is_current_cleanup_preview_response, is_mdns_advertisement, pick_primary_device_info,
-        settings_error_scroll_area, settings_path_input_width,
-        should_reveal_proxy_settings_content, transport_device_index,
+        saved_scrcpy_launch_options, scrcpy_dialog_scroll_height, settings_error_scroll_area,
+        settings_path_input_width, should_reveal_proxy_settings_content, transport_device_index,
     };
-    use crate::models::DeviceInfo;
+    use crate::{config::AppConfig, models::DeviceInfo, scrcpy::ScrcpyLaunchOptions};
     use eframe::egui;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -6992,6 +7235,69 @@ mod tests {
         for info in infos {
             assert_eq!(info.identity_key, info.serial);
         }
+    }
+
+    #[test]
+    fn scrcpy_dialog_options_follow_identity_across_usb_and_wifi() {
+        use crate::models::DeviceEntry;
+
+        let options = ScrcpyLaunchOptions {
+            no_control: true,
+            no_audio: true,
+            extra_args: "--window-title=My Phone".into(),
+        };
+        let config = AppConfig {
+            device_scrcpy_options: std::collections::BTreeMap::from([(
+                "REAL_DEVICE".into(),
+                options.clone(),
+            )]),
+            ..Default::default()
+        };
+        let mut entry = DeviceEntry::new(transport("USB-A", "REAL_DEVICE", "device"));
+        entry.transport_serials.push("192.168.0.8:5555".into());
+        let devices = vec![entry];
+
+        // Both dialog open functions use this helper, so either transport (or
+        // the stable row key) reloads exactly the same persisted options.
+        for serial in ["REAL_DEVICE", "USB-A", "192.168.0.8:5555"] {
+            assert_eq!(
+                saved_scrcpy_launch_options(&config, &devices, serial),
+                options
+            );
+        }
+        assert_eq!(
+            saved_scrcpy_launch_options(&config, &devices, "OTHER_DEVICE"),
+            ScrcpyLaunchOptions::default()
+        );
+    }
+
+    #[test]
+    fn independent_network_rows_do_not_share_scrcpy_options() {
+        use crate::models::DeviceEntry;
+
+        let options = ScrcpyLaunchOptions {
+            no_control: true,
+            ..Default::default()
+        };
+        let config = AppConfig {
+            device_scrcpy_options: std::collections::BTreeMap::from([(
+                "10.0.0.1:5555".into(),
+                options.clone(),
+            )]),
+            ..Default::default()
+        };
+        let devices = vec![
+            DeviceEntry::new(transport("10.0.0.1:5555", "10.0.0.1:5555", "device")),
+            DeviceEntry::new(transport("10.0.0.1:6666", "10.0.0.1:6666", "device")),
+        ];
+        assert_eq!(
+            saved_scrcpy_launch_options(&config, &devices, "10.0.0.1:5555"),
+            options
+        );
+        assert_eq!(
+            saved_scrcpy_launch_options(&config, &devices, "10.0.0.1:6666"),
+            ScrcpyLaunchOptions::default()
+        );
     }
 
     #[test]
@@ -7411,6 +7717,13 @@ mod tests {
         assert!(is_current_cleanup_preview_response(7, 7));
         assert!(!is_current_cleanup_preview_response(8, 7));
         assert!(!is_current_cleanup_preview_response(7, 8));
+    }
+
+    #[test]
+    fn scrcpy_dialog_scroll_area_always_reserves_the_footer() {
+        assert_eq!(scrcpy_dialog_scroll_height(500.0), 446.0);
+        assert_eq!(scrcpy_dialog_scroll_height(54.0), 0.0);
+        assert_eq!(scrcpy_dialog_scroll_height(20.0), 0.0);
     }
 
     #[test]

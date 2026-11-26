@@ -17,7 +17,7 @@ A small desktop GUI tool for collecting `adb logcat` logs from multiple Android 
 
 - platform: **Windows**
 - distribution: **portable zip** (ships the app plus an update helper; in-app updates included)
-- current milestone: **v0.9.5**
+- current milestone: **v0.9.6**
 
 ## Screenshots
 
@@ -69,6 +69,24 @@ These screenshots show the current Windows UI for the Devices page and the Setti
 - in-app update checks plus a once-daily automatic check (first window open after 08:00); updates are signature-verified and install with one download-and-restart action
 - network proxy configuration can automatically use `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY`, or a custom unauthenticated HTTP / SOCKS5 proxy; settings can test the proxy configuration against the GitHub homepage or a custom HTTPS URL
 - shared infrastructure now comes from the public [DeskFoundry](https://github.com/Shawlaw/DeskFoundry) monorepo
+
+## scrcpy launch options
+
+Both **Mirror current screen** and **Mirror in new virtual display** under the device **More → Device screen (scrcpy)** menu provide:
+
+- **Disable device control**: adds `--no-control` to show the screen without controlling the device.
+- **Disable audio forwarding**: adds `--no-audio` to disable device audio forwarding.
+- **Extra launch arguments**: one independent argv item per line, for example:
+
+  ```text
+  --max-size=1280
+  --video-bit-rate=8M
+  --window-title=My Phone
+  ```
+
+Blank lines are ignored; internal spaces and Windows backslashes are preserved, and shell quotes are unnecessary. An option and its value may also occupy separate lines. Device overrides through `--serial` / `-s` (including getopt abbreviations and clustered short options) are forbidden. Support for every other argument depends on the installed scrcpy version.
+
+Mirror and New Display share one configuration saved by device identity. Launch saves the current options; Cancel does not, and saved options return after an app restart. These options **never affect** quick `screenrecord` clips or long scrcpy recordings.
 
 ## Portable behavior
 

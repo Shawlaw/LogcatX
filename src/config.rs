@@ -1,4 +1,4 @@
-use crate::{fs_utils, i18n};
+use crate::{fs_utils, i18n, scrcpy::ScrcpyLaunchOptions};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -66,6 +66,10 @@ pub struct AppConfig {
     pub apk_auto_install_devices: Vec<String>,
     #[serde(default)]
     pub device_logcat_args: BTreeMap<String, String>,
+    /// Shared Mirror/New Display options, keyed by the same stable device
+    /// identity used by aliases and logcat arguments.
+    #[serde(default)]
+    pub device_scrcpy_options: BTreeMap<String, ScrcpyLaunchOptions>,
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
     #[serde(default)]
@@ -106,6 +110,7 @@ impl AppConfig {
             wireless_connections: Vec::new(),
             apk_auto_install_devices: Vec::new(),
             device_logcat_args: BTreeMap::new(),
+            device_scrcpy_options: BTreeMap::new(),
             auto_check_updates: default_auto_check_updates(),
             update_proxy: UpdateProxyConfig::default(),
             file_favorites: Vec::new(),
@@ -146,6 +151,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<(), String> {
     normalized.apk_auto_install_devices =
         normalize_serial_list(normalized.apk_auto_install_devices);
     normalized.device_logcat_args = normalize_logcat_args(normalized.device_logcat_args);
+    normalized.device_scrcpy_options = normalize_scrcpy_options(normalized.device_scrcpy_options);
     normalized.update_proxy = normalize_update_proxy(normalized.update_proxy);
 
     // Atomic replace (PRD §33): a crash mid-write keeps the previous config
@@ -182,6 +188,40 @@ pub fn remember_recent_connection(
     }
     save_config(&paths.config_path, &candidate)?;
     *config = load_config(&paths.config_path, paths)?;
+    Ok(())
+}
+
+/// Save one device's Mirror/New Display options as a transaction. The caller's
+/// in-memory config changes only after both the atomic write and reload succeed.
+pub fn save_device_scrcpy_options(
+    config: &mut AppConfig,
+    paths: &AppPaths,
+    identity_key: &str,
+    options: ScrcpyLaunchOptions,
+) -> Result<(), String> {
+    let identity_key = identity_key.trim();
+    if identity_key.is_empty() {
+        return Err("Device identity key cannot be empty".to_owned());
+    }
+    crate::scrcpy::parse_extra_args(&options.extra_args).map_err(|error| error.to_string())?;
+
+    let mut candidate = config.clone();
+    if options.is_empty() {
+        candidate.device_scrcpy_options.remove(identity_key);
+    } else {
+        let mut options = options;
+        options.extra_args = options.extra_args.trim().to_owned();
+        candidate
+            .device_scrcpy_options
+            .insert(identity_key.to_owned(), options);
+    }
+    if candidate.device_scrcpy_options == config.device_scrcpy_options {
+        return Ok(());
+    }
+
+    save_config(&paths.config_path, &candidate)?;
+    let saved = load_config(&paths.config_path, paths)?;
+    *config = saved;
     Ok(())
 }
 
@@ -251,6 +291,7 @@ fn normalize_config(mut config: AppConfig, paths: &AppPaths) -> AppConfig {
         normalize_wireless_connections(config.wireless_connections, &config.recent_connections);
     config.apk_auto_install_devices = normalize_serial_list(config.apk_auto_install_devices);
     config.device_logcat_args = normalize_logcat_args(config.device_logcat_args);
+    config.device_scrcpy_options = normalize_scrcpy_options(config.device_scrcpy_options);
     config.update_proxy = normalize_update_proxy(config.update_proxy);
 
     config
@@ -315,6 +356,21 @@ fn normalize_logcat_args(args: BTreeMap<String, String>) -> BTreeMap<String, Str
             continue;
         }
         normalized.insert(serial.to_owned(), args_str.to_owned());
+    }
+    normalized
+}
+
+fn normalize_scrcpy_options(
+    values: BTreeMap<String, ScrcpyLaunchOptions>,
+) -> BTreeMap<String, ScrcpyLaunchOptions> {
+    let mut normalized = BTreeMap::new();
+    for (identity_key, mut options) in values {
+        let identity_key = identity_key.trim();
+        options.extra_args = options.extra_args.trim().to_owned();
+        if identity_key.is_empty() || options.is_empty() {
+            continue;
+        }
+        normalized.insert(identity_key.to_owned(), options);
     }
     normalized
 }
@@ -427,7 +483,8 @@ mod tests {
     use super::{
         AppConfig, AppPaths, MAX_RECENT_CONNECTIONS, default_app_log_max_size_mb,
         is_executable_file, load_config, normalize_aliases, normalize_logcat_args,
-        normalize_recent_connections, normalize_serial_list, save_config,
+        normalize_recent_connections, normalize_scrcpy_options, normalize_serial_list, save_config,
+        save_device_scrcpy_options,
     };
     use std::{collections::BTreeMap, fs, path::PathBuf};
 
@@ -476,6 +533,7 @@ mod tests {
         assert_eq!(config.adb_path, "C:/platform-tools/adb.exe");
         assert_eq!(config.language, "zh-CN");
         assert!(config.file_favorites.is_empty(), "new field defaults");
+        assert!(config.device_scrcpy_options.is_empty());
         assert!(
             config
                 .record_dir
@@ -503,6 +561,7 @@ mod tests {
         assert_eq!(config.language, "en");
         assert!(config.file_favorites.is_empty());
         assert!(config.device_aliases.is_empty());
+        assert!(config.device_scrcpy_options.is_empty());
         assert!(
             config
                 .record_dir
@@ -807,6 +866,186 @@ mod tests {
 
         assert_eq!(loaded.update_proxy.mode, super::UpdateProxyMode::Automatic);
         assert!(loaded.update_proxy.url.is_empty());
+    }
+
+    fn launch_options(
+        no_control: bool,
+        no_audio: bool,
+        extra_args: &str,
+    ) -> crate::scrcpy::ScrcpyLaunchOptions {
+        crate::scrcpy::ScrcpyLaunchOptions {
+            no_control,
+            no_audio,
+            extra_args: extra_args.to_owned(),
+        }
+    }
+
+    #[test]
+    fn scrcpy_options_round_trip_two_isolated_devices() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        let first = launch_options(true, false, "--max-size=1280\n--window-title=My Phone");
+        let second = launch_options(false, true, "");
+        let mut config = AppConfig::default();
+        save_device_scrcpy_options(&mut config, &paths, "DEVICE_A", first.clone()).unwrap();
+        save_device_scrcpy_options(&mut config, &paths, "DEVICE_B", second.clone()).unwrap();
+
+        let reloaded = load_config(&paths.config_path, &paths).unwrap();
+        assert_eq!(reloaded.device_scrcpy_options.get("DEVICE_A"), Some(&first));
+        assert_eq!(
+            reloaded.device_scrcpy_options.get("DEVICE_B"),
+            Some(&second)
+        );
+        assert_ne!(
+            reloaded.device_scrcpy_options.get("DEVICE_A"),
+            reloaded.device_scrcpy_options.get("DEVICE_B")
+        );
+    }
+
+    #[test]
+    fn scrcpy_options_deserialize_with_defaults_and_normalize_empty_records() {
+        let legacy: AppConfig = serde_json::from_str("{}").unwrap();
+        assert!(legacy.device_scrcpy_options.is_empty());
+
+        let normalized = normalize_scrcpy_options(BTreeMap::from([
+            ("".into(), launch_options(true, true, "--max-size=1280")),
+            ("   ".into(), launch_options(true, false, "")),
+            ("EMPTY".into(), launch_options(false, false, "  \n")),
+            (
+                " DEVICE_A ".into(),
+                launch_options(true, false, "  --window-title=My Phone  \n"),
+            ),
+        ]));
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(
+            normalized.get("DEVICE_A"),
+            Some(&launch_options(true, false, "--window-title=My Phone"))
+        );
+    }
+
+    #[test]
+    fn clearing_scrcpy_options_removes_only_the_empty_device_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        let mut config = AppConfig::default();
+        save_device_scrcpy_options(
+            &mut config,
+            &paths,
+            "DEVICE_A",
+            launch_options(true, true, "--max-size=1280"),
+        )
+        .unwrap();
+        save_device_scrcpy_options(
+            &mut config,
+            &paths,
+            "DEVICE_B",
+            launch_options(false, true, ""),
+        )
+        .unwrap();
+        save_device_scrcpy_options(
+            &mut config,
+            &paths,
+            "DEVICE_A",
+            launch_options(false, false, " \n"),
+        )
+        .unwrap();
+
+        assert!(!config.device_scrcpy_options.contains_key("DEVICE_A"));
+        assert!(config.device_scrcpy_options.contains_key("DEVICE_B"));
+        let raw: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&paths.config_path).unwrap()).unwrap();
+        assert!(
+            !raw["device_scrcpy_options"]
+                .as_object()
+                .unwrap()
+                .contains_key("DEVICE_A")
+        );
+    }
+
+    #[test]
+    fn failed_scrcpy_options_save_leaves_memory_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        // A directory at the config path reliably rejects atomic replacement.
+        fs::create_dir(&paths.config_path).unwrap();
+        let mut config = AppConfig {
+            device_scrcpy_options: BTreeMap::from([(
+                "DEVICE_A".into(),
+                launch_options(false, true, "--max-size=1024"),
+            )]),
+            device_aliases: BTreeMap::from([("DEVICE_A".into(), "Pixel".into())]),
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&config).unwrap();
+
+        assert!(
+            save_device_scrcpy_options(
+                &mut config,
+                &paths,
+                "DEVICE_A",
+                launch_options(true, false, "--max-size=1280"),
+            )
+            .is_err()
+        );
+        assert_eq!(serde_json::to_value(config).unwrap(), before);
+    }
+
+    #[test]
+    fn invalid_scrcpy_options_touch_neither_memory_nor_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        let mut config = AppConfig {
+            device_scrcpy_options: BTreeMap::from([(
+                "DEVICE_A".into(),
+                launch_options(false, true, "--max-size=1024"),
+            )]),
+            ..Default::default()
+        };
+        save_config(&paths.config_path, &config).unwrap();
+        let before_memory = serde_json::to_value(&config).unwrap();
+        let before_disk = fs::read(&paths.config_path).unwrap();
+
+        assert!(
+            save_device_scrcpy_options(
+                &mut config,
+                &paths,
+                "DEVICE_A",
+                launch_options(true, false, "--serial=OTHER_DEVICE"),
+            )
+            .is_err()
+        );
+        assert_eq!(serde_json::to_value(&config).unwrap(), before_memory);
+        assert_eq!(fs::read(&paths.config_path).unwrap(), before_disk);
+    }
+
+    #[test]
+    fn saving_unrelated_settings_preserves_scrcpy_options_and_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = history_test_paths(dir.path());
+        let options = launch_options(true, true, "--window-title=My Phone");
+        let mut settings = AppConfig {
+            language: "en".into(),
+            device_aliases: BTreeMap::from([("DEVICE_A".into(), "Pixel".into())]),
+            device_scrcpy_options: BTreeMap::from([("DEVICE_A".into(), options.clone())]),
+            ..Default::default()
+        };
+        save_config(&paths.config_path, &settings).unwrap();
+
+        // save_settings() starts with the existing per-device fields and only
+        // changes ordinary settings on the candidate.
+        settings.language = "zh-CN".into();
+        settings.adb_path = "adb".into();
+        save_config(&paths.config_path, &settings).unwrap();
+        let reloaded = load_config(&paths.config_path, &paths).unwrap();
+        assert_eq!(reloaded.language, "zh-CN");
+        assert_eq!(
+            reloaded.device_aliases.get("DEVICE_A").map(String::as_str),
+            Some("Pixel")
+        );
+        assert_eq!(
+            reloaded.device_scrcpy_options.get("DEVICE_A"),
+            Some(&options)
+        );
     }
 
     #[test]

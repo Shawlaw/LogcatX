@@ -13,6 +13,13 @@
   "device_aliases": {
     "emulator-5554": "Pixel 8 Pro"
   },
+  "device_scrcpy_options": {
+    "emulator-5554": {
+      "no_control": false,
+      "no_audio": true,
+      "extra_args": "--max-size=1280\n--window-title=My Phone"
+    }
+  },
   "pinned_devices": [
     "emulator-5554"
   ],

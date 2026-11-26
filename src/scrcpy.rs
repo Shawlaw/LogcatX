@@ -1,10 +1,135 @@
 use crate::managed_child::ManagedChild;
+use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     path::Path,
     process::{Command, Output, Stdio},
+    time::{Duration, Instant},
 };
 use tempfile::NamedTempFile;
+
+pub const MAX_EXTRA_ARGS: usize = 64;
+pub const MAX_EXTRA_ARGS_BYTES: usize = 16 * 1024;
+pub const MAX_EXTRA_ARG_BYTES: usize = 4 * 1024;
+
+/// Per-device options shared by Mirror and New Display. Each non-empty line in
+/// `extra_args` is passed to scrcpy as one independent argv item.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScrcpyLaunchOptions {
+    pub no_control: bool,
+    pub no_audio: bool,
+    pub extra_args: String,
+}
+
+impl ScrcpyLaunchOptions {
+    pub fn is_empty(&self) -> bool {
+        !self.no_control && !self.no_audio && self.extra_args.trim().is_empty()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScrcpyArgsError {
+    ContainsNul,
+    InputTooLong { max_bytes: usize },
+    TooManyArguments { max: usize },
+    ArgumentTooLong { line: usize, max_bytes: usize },
+    DeviceSelector { line: usize },
+}
+
+impl std::fmt::Display for ScrcpyArgsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ContainsNul => {
+                write!(formatter, "scrcpy arguments cannot contain NUL characters")
+            }
+            Self::InputTooLong { max_bytes } => write!(
+                formatter,
+                "scrcpy extra arguments exceed the {max_bytes}-byte limit"
+            ),
+            Self::TooManyArguments { max } => {
+                write!(formatter, "scrcpy accepts at most {max} extra arguments")
+            }
+            Self::ArgumentTooLong { line, max_bytes } => write!(
+                formatter,
+                "scrcpy argument on line {line} exceeds the {max_bytes}-byte limit"
+            ),
+            Self::DeviceSelector { line } => write!(
+                formatter,
+                "scrcpy argument on line {line} cannot override the selected device (--serial/-s)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ScrcpyArgsError {}
+
+/// Parse one argv item per line without shell tokenization or execution.
+/// Blank lines are ignored, CRLF is accepted, and quotes/backslashes are kept
+/// as literal argument content rather than interpreted by a shell.
+pub fn parse_extra_args(input: &str) -> Result<Vec<String>, ScrcpyArgsError> {
+    if input.contains('\0') {
+        return Err(ScrcpyArgsError::ContainsNul);
+    }
+    if input.len() > MAX_EXTRA_ARGS_BYTES {
+        return Err(ScrcpyArgsError::InputTooLong {
+            max_bytes: MAX_EXTRA_ARGS_BYTES,
+        });
+    }
+
+    let mut args = Vec::new();
+    for (index, raw_line) in input.lines().enumerate() {
+        let argument = raw_line.trim();
+        if argument.is_empty() {
+            continue;
+        }
+        let line = index + 1;
+        if argument.len() > MAX_EXTRA_ARG_BYTES {
+            return Err(ScrcpyArgsError::ArgumentTooLong {
+                line,
+                max_bytes: MAX_EXTRA_ARG_BYTES,
+            });
+        }
+        if is_device_selector(argument) {
+            return Err(ScrcpyArgsError::DeviceSelector { line });
+        }
+        if args.len() == MAX_EXTRA_ARGS {
+            return Err(ScrcpyArgsError::TooManyArguments {
+                max: MAX_EXTRA_ARGS,
+            });
+        }
+        args.push(argument.to_owned());
+    }
+    Ok(args)
+}
+
+fn is_device_selector(argument: &str) -> bool {
+    if let Some(long_name) = argument
+        .strip_prefix("--")
+        .map(|value| value.split_once('=').map_or(value, |(name, _)| name))
+    {
+        // getopt_long accepts unique long-option prefixes, so checking only
+        // `--serial` misses forms such as `--seri=OTHER`. Reject every prefix
+        // (including ambiguous short prefixes) to remain fail-closed.
+        return !long_name.is_empty() && "serial".starts_with(long_name);
+    }
+
+    let Some(short_options) = argument.strip_prefix('-') else {
+        return false;
+    };
+    // getopt also accepts clustered short flags: `-nsOTHER` means `-n` plus
+    // `-sOTHER`. Stop at the first other value-taking option because the rest
+    // of that same argv is its value, not more options (scrcpy 3.3.4 cli.c).
+    for option in short_options.chars() {
+        if option == 's' {
+            return true;
+        }
+        if matches!(option, 'b' | 'm' | 'p' | 'r' | 'V') {
+            break;
+        }
+    }
+    false
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ScrcpyVersion {
@@ -139,11 +264,31 @@ pub fn launch(
     adb_path: &str,
     serial: &str,
     mode: LaunchMode,
+    options: &ScrcpyLaunchOptions,
 ) -> Result<(), String> {
-    build_command(scrcpy_path, adb_path, serial, mode)
+    let mut child = build_command(scrcpy_path, adb_path, serial, mode, options)
+        .map_err(|error| error.to_string())?
         .spawn()
-        .map(|_| ())
-        .map_err(|err| format!("Failed to start scrcpy for {serial}: {err}"))
+        .map_err(|err| format!("Failed to start scrcpy for {serial}: {err}"))?;
+
+    // Argument errors normally make scrcpy exit immediately. Reap such an
+    // early exit instead of reporting a successful mirror; a still-running
+    // child keeps the existing detached fire-and-forget behavior.
+    let deadline = Instant::now() + Duration::from_millis(250);
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("Failed to check scrcpy startup for {serial}: {err}"))?
+        {
+            return Err(format!(
+                "scrcpy for {serial} exited during startup with {status}"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// A headless scrcpy process recording the device screen to a local MP4.
@@ -211,16 +356,30 @@ fn build_recording_command(
     command
 }
 
-fn build_command(scrcpy_path: &str, adb_path: &str, serial: &str, mode: LaunchMode) -> Command {
+fn build_command(
+    scrcpy_path: &str,
+    adb_path: &str,
+    serial: &str,
+    mode: LaunchMode,
+    options: &ScrcpyLaunchOptions,
+) -> Result<Command, ScrcpyArgsError> {
+    let extra_args = parse_extra_args(&options.extra_args)?;
     let mut command = scrcpy_command(scrcpy_path);
     command.args(["--serial", serial]).env("ADB", adb_path);
-    if let LaunchMode::NewDisplay(options) = mode {
-        command.arg(options.argument());
-        if let Some(start_app) = options.start_app {
+    if let LaunchMode::NewDisplay(display_options) = mode {
+        command.arg(display_options.argument());
+        if let Some(start_app) = display_options.start_app {
             command.args(["--start-app", start_app.as_str()]);
         }
     }
-    command
+    if options.no_control {
+        command.arg("--no-control");
+    }
+    if options.no_audio {
+        command.arg("--no-audio");
+    }
+    command.args(extra_args);
+    Ok(command)
 }
 
 fn parse_positive_dimension(input: &str, label: &str) -> Result<Option<u32>, String> {
@@ -311,8 +470,9 @@ impl EmptyStringExt for str {
 #[cfg(test)]
 mod tests {
     use super::{
-        LaunchMode, NewDisplayOptions, ScrcpyVersion, build_command, build_recording_command,
-        parse_scrcpy_version,
+        LaunchMode, MAX_EXTRA_ARG_BYTES, MAX_EXTRA_ARGS, MAX_EXTRA_ARGS_BYTES, NewDisplayOptions,
+        ScrcpyArgsError, ScrcpyLaunchOptions, ScrcpyVersion, build_command,
+        build_recording_command, parse_extra_args, parse_scrcpy_version,
     };
     use std::ffi::OsStr;
 
@@ -437,7 +597,9 @@ mod tests {
                     .with_start_app("com.android.settings")
                     .expect("start app"),
             ),
-        );
+            &ScrcpyLaunchOptions::default(),
+        )
+        .expect("valid launch options");
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(
             args,
@@ -456,6 +618,248 @@ mod tests {
                 .and_then(|(_, value)| value),
             Some(OsStr::new("C:/Android/platform-tools/adb.exe"))
         );
+    }
+
+    #[test]
+    fn default_launch_options_preserve_the_original_mirror_command() {
+        let options = ScrcpyLaunchOptions::default();
+        assert!(!options.no_control);
+        assert!(!options.no_audio);
+        assert!(options.extra_args.is_empty());
+
+        let command =
+            build_command("scrcpy", "adb", "device-1", LaunchMode::Mirror, &options).unwrap();
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(args, [OsStr::new("--serial"), OsStr::new("device-1")]);
+    }
+
+    #[test]
+    fn fixed_launch_flags_are_independent_and_ordered() {
+        for (no_control, no_audio, expected) in [
+            (true, false, vec!["--no-control"]),
+            (false, true, vec!["--no-audio"]),
+            (true, true, vec!["--no-control", "--no-audio"]),
+            (false, false, vec![]),
+        ] {
+            let command = build_command(
+                "scrcpy",
+                "adb",
+                "device-1",
+                LaunchMode::Mirror,
+                &ScrcpyLaunchOptions {
+                    no_control,
+                    no_audio,
+                    extra_args: String::new(),
+                },
+            )
+            .unwrap();
+            let args: Vec<_> = command.get_args().skip(2).collect();
+            let expected: Vec<_> = expected.into_iter().map(OsStr::new).collect();
+            assert_eq!(args, expected);
+        }
+    }
+
+    #[test]
+    fn mirror_appends_fixed_and_custom_arguments_after_the_managed_target() {
+        let command = build_command(
+            "scrcpy",
+            "adb",
+            "device-1",
+            LaunchMode::Mirror,
+            &ScrcpyLaunchOptions {
+                no_control: true,
+                no_audio: true,
+                extra_args: "--max-size=1280\n--window-title=My Phone".into(),
+            },
+        )
+        .unwrap();
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                OsStr::new("--serial"),
+                OsStr::new("device-1"),
+                OsStr::new("--no-control"),
+                OsStr::new("--no-audio"),
+                OsStr::new("--max-size=1280"),
+                OsStr::new("--window-title=My Phone"),
+            ]
+        );
+    }
+
+    #[test]
+    fn new_display_keeps_mode_arguments_before_shared_launch_options() {
+        let command = build_command(
+            "scrcpy",
+            "adb",
+            "device-1",
+            LaunchMode::NewDisplay(
+                NewDisplayOptions::custom("1280", "960", "160")
+                    .unwrap()
+                    .with_start_app("com.android.settings")
+                    .unwrap(),
+            ),
+            &ScrcpyLaunchOptions {
+                no_control: true,
+                no_audio: true,
+                extra_args: "--max-size=1280".into(),
+            },
+        )
+        .unwrap();
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                OsStr::new("--serial"),
+                OsStr::new("device-1"),
+                OsStr::new("--new-display=1280x960/160"),
+                OsStr::new("--start-app"),
+                OsStr::new("com.android.settings"),
+                OsStr::new("--no-control"),
+                OsStr::new("--no-audio"),
+                OsStr::new("--max-size=1280"),
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_args_use_one_argv_per_nonempty_line() {
+        let parsed = parse_extra_args(
+            "  --max-size=1280  \r\n\n--video-codec\r\nh265\n--window-title=My Phone\n--record=C:\\Temp\\My Phone.mp4\n",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed,
+            [
+                "--max-size=1280",
+                "--video-codec",
+                "h265",
+                "--window-title=My Phone",
+                r"--record=C:\Temp\My Phone.mp4",
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_args_reject_nul_and_every_device_selector_form() {
+        assert_eq!(
+            parse_extra_args("--max-size=1280\0"),
+            Err(ScrcpyArgsError::ContainsNul)
+        );
+        for selector in [
+            "--serial",
+            "--serial=other",
+            "--seri=other",
+            "--ser=other",
+            "--s=other",
+            "--s",
+            "-s",
+            "-s=other",
+            "-sother",
+            "-nsother",
+            "-nSs=other",
+        ] {
+            assert_eq!(
+                parse_extra_args(selector),
+                Err(ScrcpyArgsError::DeviceSelector { line: 1 }),
+                "selector must be rejected: {selector}"
+            );
+        }
+        assert_eq!(
+            parse_extra_args("--serializable").unwrap(),
+            ["--serializable"]
+        );
+        assert_eq!(parse_extra_args("--stay-awake").unwrap(), ["--stay-awake"]);
+        assert_eq!(parse_extra_args("-nS").unwrap(), ["-nS"]);
+        assert_eq!(
+            parse_extra_args(r"-rC:\Videos\My Phone.mp4").unwrap(),
+            [r"-rC:\Videos\My Phone.mp4"]
+        );
+        assert_eq!(parse_extra_args("-Vverbose").unwrap(), ["-Vverbose"]);
+    }
+
+    #[test]
+    fn invalid_persisted_args_still_fail_command_construction() {
+        let error = build_command(
+            "scrcpy",
+            "adb",
+            "device-1",
+            LaunchMode::Mirror,
+            &ScrcpyLaunchOptions {
+                extra_args: "--serial=other".into(),
+                ..Default::default()
+            },
+        )
+        .expect_err("builder revalidates manually edited config");
+        assert_eq!(error, ScrcpyArgsError::DeviceSelector { line: 1 });
+    }
+
+    #[test]
+    fn extra_args_enforce_single_argument_byte_limit() {
+        let valid = "x".repeat(MAX_EXTRA_ARG_BYTES);
+        assert_eq!(parse_extra_args(&valid).unwrap(), [valid]);
+        let invalid = "x".repeat(MAX_EXTRA_ARG_BYTES + 1);
+        assert_eq!(
+            parse_extra_args(&invalid),
+            Err(ScrcpyArgsError::ArgumentTooLong {
+                line: 1,
+                max_bytes: MAX_EXTRA_ARG_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn extra_args_enforce_input_and_count_limits() {
+        let too_many = (0..=MAX_EXTRA_ARGS)
+            .map(|index| format!("--window-title=Phone {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            parse_extra_args(&too_many),
+            Err(ScrcpyArgsError::TooManyArguments {
+                max: MAX_EXTRA_ARGS
+            })
+        );
+        let oversized = "x".repeat(MAX_EXTRA_ARGS_BYTES + 1);
+        assert_eq!(
+            parse_extra_args(&oversized),
+            Err(ScrcpyArgsError::InputTooLong {
+                max_bytes: MAX_EXTRA_ARGS_BYTES
+            })
+        );
+    }
+
+    #[test]
+    fn recording_command_never_reads_mirror_launch_options() {
+        let launch_options = ScrcpyLaunchOptions {
+            no_control: true,
+            no_audio: false,
+            extra_args: "--max-size=1280\n--window-title=Mirror Only".into(),
+        };
+        assert!(launch_options.no_control);
+        let command = build_recording_command(
+            "scrcpy",
+            "adb",
+            "device-1",
+            std::path::Path::new("recording.mp4"),
+            8,
+        );
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                OsStr::new("--serial"),
+                OsStr::new("device-1"),
+                OsStr::new("--no-playback"),
+                OsStr::new("--no-audio"),
+                OsStr::new("--record=recording.mp4"),
+                OsStr::new("--record-format=mp4"),
+                OsStr::new("--video-bit-rate=8M"),
+            ]
+        );
+        assert!(!args.contains(&OsStr::new("--no-control")));
+        assert!(!args.contains(&OsStr::new("--max-size=1280")));
+        assert!(!args.contains(&OsStr::new("--window-title=Mirror Only")));
     }
 
     #[test]
